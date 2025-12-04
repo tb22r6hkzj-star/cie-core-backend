@@ -1,0 +1,19 @@
+{
+  "name": "cie-core-backend",
+  "version": "1.0.0",
+  "description": "Backend API for the Color Intelligence Engine (CIE) core app.",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "morgan": "^1.10.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
