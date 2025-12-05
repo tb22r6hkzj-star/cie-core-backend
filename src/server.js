@@ -10,7 +10,7 @@ app.use(cors());
 app.use(express.json());
 app.use(morgan('dev'));
 
-// Multer for handling image uploads (keeps file in memory)
+// Multer (keeps file uploads in memory)
 const upload = multer({ storage: multer.memoryStorage() });
 
 // ===== Routes =====
@@ -20,18 +20,15 @@ app.get('/', (req, res) => {
   res.json({ message: 'CIE Core Backend is running.' });
 });
 
-// Health route for Render auto-monitoring
+// Health check for Render monitoring
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// Image transform route (Famous → Backend → AI processing)
-// EXPECTS:
-// - image: uploaded file
-// - prompt: string
+// ===== Ghost Mannequin TRANSFORM route =====
 app.post('/api/images/transform', upload.single('image'), async (req, res) => {
   try {
-    // No image upload?
+    // No file uploaded
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -39,13 +36,14 @@ app.post('/api/images/transform', upload.single('image'), async (req, res) => {
       });
     }
 
-    // The prompt that Famous frontend sends
+    // Read the prompt sent from Famous frontend
     const prompt = req.body.prompt || 'ghost mannequin';
 
-    // TODO — replace with real AI transform call
-    // For now return a placeholder image so the pipeline works
-    const fakeTransformedImage = 'https://via.placeholder.com/768x1024.png?text=Ghost+Mock';
+    // TEMPORARY: Working image placeholder
+    const fakeTransformedImage =
+      'https://images.pexels.com/photos/767116/pexels-photo-767116.jpeg';
 
+    // Send back a real valid URL
     return res.json({
       success: true,
       ghostImageUrl: fakeTransformedImage,
@@ -61,17 +59,15 @@ app.post('/api/images/transform', upload.single('image'), async (req, res) => {
   }
 });
 
-// ===== Server Start =====
+// ===== Start Server =====
 const port = process.env.PORT || 4000;
-
 const server = app.listen(port, () => {
   console.log(`🚀 CIE Core Backend listening on port ${port}`);
 });
 
-// ===== Graceful Shutdown =====
+// Graceful shutdown
 const shutdown = async (signal) => {
   console.log(`Received ${signal}. Shutting down gracefully...`);
-
   server.close(() => {
     console.log('HTTP server closed. Exiting process.');
     process.exit(0);
