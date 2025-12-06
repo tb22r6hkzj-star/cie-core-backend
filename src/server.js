@@ -17,7 +17,7 @@ app.use(cors());
 app.use(express.json());
 app.use(morgan("dev"));
 
-// Multer stores uploaded image in memory
+// Multer: store uploaded image in memory as a Buffer
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
@@ -33,7 +33,8 @@ async function removeBackground(imageBuffer) {
   const base64Image = `data:image/png;base64,${imageBuffer.toString("base64")}`;
 
   const output = await replicate.run(
-    "cjwbw/rembg:fb8af171cfe1a61dddcf1242cc093f9c408dfc5b0b52dff78eaefbf19f108a9",
+    // ✅ use the default/latest version instead of a fixed hash
+    "cjwbw/rembg",
     {
       input: {
         image: base64Image,
@@ -41,6 +42,7 @@ async function removeBackground(imageBuffer) {
     }
   );
 
+  // Replicate may return an array of URLs — normalize it
   return Array.isArray(output) ? output[0] : output;
 }
 
