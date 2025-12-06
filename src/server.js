@@ -32,5 +32,5 @@ async function removeBackground(imageBuffer) {
     throw new Error("Unexpected Replicate output format from Replicate");
   }
 
-  return url;
+  return url; // ← VERY IMPORTANT
 }
