@@ -10,31 +10,27 @@ import Replicate from "replicate";
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// ─────────────────────────────────────────────
 // Middleware
-// ─────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
 app.use(morgan("dev"));
 
-// Multer: store uploaded image in memory as a Buffer
+// Multer config (store uploaded file in memory)
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
-// ─────────────────────────────────────────────
 // Replicate client
-// ─────────────────────────────────────────────
 const replicate = new Replicate({
   auth: process.env.REPLICATE_API_TOKEN,
 });
 
-// Background removal helper
+// Background removal function
 async function removeBackground(imageBuffer) {
   const base64Image = `data:image/png;base64,${imageBuffer.toString("base64")}`;
 
+  // IMPORTANT: Use the valid model version
   const output = await replicate.run(
-    // ✅ use the default/latest version instead of a fixed hash
-    "cjwbw/rembg",
+    "cjwbw/rembg:fb8af171cfa1616ddcf1242c093f9c46bcada5ad4cf6f2fbe8b81b330ec5c003",
     {
       input: {
         image: base64Image,
@@ -42,20 +38,17 @@ async function removeBackground(imageBuffer) {
     }
   );
 
-  // Replicate may return an array of URLs — normalize it
   return Array.isArray(output) ? output[0] : output;
 }
 
-// ─────────────────────────────────────────────
 // Routes
-// ─────────────────────────────────────────────
 
 // Health check
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-// Image transform route
+// Transform route
 app.post("/api/images/transform", upload.single("image"), async (req, res) => {
   try {
     if (!req.file) {
@@ -73,18 +66,17 @@ app.post("/api/images/transform", upload.single("image"), async (req, res) => {
       success: true,
       ghostImageUrl: outputUrl,
     });
+
   } catch (error) {
     console.error("❌ Transform Error:", error);
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
       message: "Failed to transform image (server error).",
     });
   }
 });
 
-// ─────────────────────────────────────────────
 // Start server
-// ─────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
