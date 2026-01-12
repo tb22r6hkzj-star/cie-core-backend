@@ -1,25 +1,23 @@
 // server.js
-// Drop-in Express backend for Render that:
-// - accepts image uploads (multipart/form-data)
-// - calls either Replicate OR Pixelcut (configurable)
-// - logs upstream errors (so Render logs show the REAL cause)
-// - includes safe CORS + healthcheck + global error handler
+// ✅ Render-ready Express backend
+// ✅ Accepts multipart upload (field name: "image")
+// ✅ Uploads image to Cloudinary to obtain a PUBLIC image_url (required by Pixelcut)
+// ✅ Calls Pixelcut Remove Background: https://api.developer.pixelcut.ai/v1/remove-background
+// ✅ Logs Pixelcut status/body so Render shows the REAL error
+// ✅ Global error handler
 
 import express from "express";
 import cors from "cors";
 import multer from "multer";
-
-// If you use dotenv locally, keep this. Render ignores it unless you upload a .env (don't).
 import dotenv from "dotenv";
+import { v2 as cloudinary } from "cloudinary";
+
 dotenv.config();
 
 const app = express();
-
-// ---------- Config ----------
 const PORT = process.env.PORT || 10000;
 
-// CORS: allow your frontend(s). For quick unblock, allow all.
-// Later, lock this down to your Famous/Vercel domains.
+// ----- CORS -----
 app.use(
   cors({
     origin: "*",
@@ -28,177 +26,118 @@ app.use(
   })
 );
 
-// JSON parser for non-multipart routes
 app.use(express.json({ limit: "10mb" }));
 
-// Multer for multipart/form-data uploads (the uploaded file must be in field name: "image")
+// ----- Multer: accept file upload -----
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 8 * 1024 * 1024 }, // 8MB
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
 });
 
-// ---------- Health ----------
-app.get("/", (req, res) => res.send("CIE backend up"));
-app.get("/health", (req, res) => res.json({ ok: true }));
-
-// ---------- Helpers ----------
+// ----- Helpers -----
 function requireEnv(name) {
-  const v = process.env[name];
-  if (!v) {
+  const val = process.env[name];
+  if (!val) {
     const err = new Error(`Missing environment variable: ${name}`);
     err.status = 500;
     throw err;
   }
-  return v;
+  return val;
 }
 
-function toDataUri(file) {
-  // Replicate commonly accepts data URI base64
-  const mime = file.mimetype || "image/png";
-  const b64 = file.buffer.toString("base64");
-  return `data:${mime};base64,${b64}`;
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-async function fetchText(url, options) {
-  const resp = await fetch(url, options);
-  const text = await resp.text();
-  return { resp, text };
+// ----- Health -----
+app.get("/", (req, res) => res.send("CIE backend up"));
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+// ----- Cloudinary setup (REQUIRED for Pixelcut URL mode) -----
+function cloudinaryConfigured() {
+  return (
+    !!process.env.CLOUDINARY_CLOUD_NAME &&
+    !!process.env.CLOUDINARY_API_KEY &&
+    !!process.env.CLOUDINARY_API_SECRET
+  );
 }
 
-// ---------- Provider: Replicate (recommended if your logs show api.replicate.com) ----------
-async function transformWithReplicate(file) {
-  const token = requireEnv("REPLICATE_API_TOKEN");
-  const version = requireEnv("REPLICATE_MODEL_VERSION"); // you must set this to the model version ID
-  const inputKey = process.env.REPLICATE_INPUT_IMAGE_KEY || "image"; // some models use "image"
+function initCloudinary() {
+  if (!cloudinaryConfigured()) return;
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+    secure: true,
+  });
+}
 
-  // Create prediction
-  const createUrl = "https://api.replicate.com/v1/predictions";
-  const createBody = {
-    version,
-    input: {
-      [inputKey]: toDataUri(file),
-      // add more model inputs here if needed:
-      // e.g. prompt, scale, etc.
-    },
-  };
+async function uploadToCloudinary(file) {
+  if (!cloudinaryConfigured()) {
+    const err = new Error(
+      "Cloudinary not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET on Render."
+    );
+    err.status = 400;
+    throw err;
+  }
 
-  const { resp: createResp, text: createText } = await fetchText(createUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Token ${token}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify(createBody),
+  // Convert buffer to data URI (Cloudinary supports this)
+  const dataUri = `data:${file.mimetype};base64,${file.buffer.toString("base64")}`;
+
+  const folder = process.env.CLOUDINARY_FOLDER || "cie";
+  const publicIdPrefix = process.env.CLOUDINARY_PUBLIC_ID_PREFIX || "upload";
+
+  const result = await cloudinary.uploader.upload(dataUri, {
+    folder,
+    public_id: `${publicIdPrefix}-${Date.now()}`,
+    resource_type: "image",
   });
 
-  console.log("REPLICATE create status:", createResp.status);
-  if (!createResp.ok) {
-    console.log("REPLICATE create body:", createText);
-    const err = new Error(`Replicate create failed: ${createResp.status}`);
+  if (!result?.secure_url) {
+    const err = new Error("Cloudinary upload failed (no secure_url returned).");
     err.status = 502;
     throw err;
   }
 
-  const created = JSON.parse(createText);
-  let prediction = created;
-
-  // Poll until done (avoid infinite loop)
-  const maxPolls = Number(process.env.REPLICATE_MAX_POLLS || 20);
-  const pollDelayMs = Number(process.env.REPLICATE_POLL_DELAY_MS || 1500);
-
-  for (let i = 0; i < maxPolls; i++) {
-    if (prediction.status === "succeeded") break;
-    if (prediction.status === "failed" || prediction.status === "canceled") break;
-
-    await new Promise((r) => setTimeout(r, pollDelayMs));
-
-    const pollUrl = `https://api.replicate.com/v1/predictions/${prediction.id}`;
-    const { resp: pollResp, text: pollText } = await fetchText(pollUrl, {
-      method: "GET",
-      headers: {
-        Authorization: `Token ${token}`,
-        Accept: "application/json",
-      },
-    });
-
-    console.log("REPLICATE poll status:", pollResp.status);
-    if (!pollResp.ok) {
-      console.log("REPLICATE poll body:", pollText);
-      const err = new Error(`Replicate poll failed: ${pollResp.status}`);
-      err.status = 502;
-      throw err;
-    }
-
-    prediction = JSON.parse(pollText);
-  }
-
-  if (prediction.status !== "succeeded") {
-    console.log("REPLICATE final prediction:", prediction);
-    const err = new Error(`Replicate failed: ${prediction.status}`);
-    err.status = 502;
-    throw err;
-  }
-
-  // Many models return output as a URL or array of URLs.
-  return { provider: "replicate", output: prediction.output, predictionId: prediction.id };
+  return result.secure_url;
 }
 
-// ---------- Provider: Pixelcut Developer API ----------
-// Pixelcut docs show X-API-KEY header and often accept image_url.
-// Because your frontend uploads a FILE, Pixelcut will require either:
-//   A) an endpoint that accepts file/base64, OR
-//   B) you upload the file to a public URL first, then send image_url.
-//
-// This implementation supports two modes controlled by env:
-// - PIXELCUT_MODE="base64"  -> sends { image_base64: "...", format: "png" }  (ONLY if your Pixelcut endpoint supports it)
-// - PIXELCUT_MODE="url"     -> expects you to provide a public URL in req.body.image_url (no file required)
-//
-// You MUST set PIXELCUT_ENDPOINT to the Pixelcut API endpoint you are using.
-async function transformWithPixelcut({ file, imageUrlFromBody }) {
+// ----- Pixelcut Remove Background -----
+async function transformWithPixelcutRemoveBg(imageUrl) {
   const apiKey = requireEnv("PIXELCUT_API_KEY");
-  const endpoint = requireEnv("PIXELCUT_ENDPOINT"); // e.g. https://api.developer.pixelcut.ai/v1/<your-endpoint>
-  const mode = (process.env.PIXELCUT_MODE || "base64").toLowerCase();
+  const endpoint = requireEnv("PIXELCUT_ENDPOINT"); // must be full URL
   const format = process.env.PIXELCUT_FORMAT || "png";
 
-  let body;
+  // Pixelcut requires JSON with image_url (NOT base64, NOT multipart)
+  const payload = {
+    image_url: imageUrl,
+    format,
+    // optional: shadow config, etc. (only if you want it)
+    // shadow: { enabled: false }
+  };
 
-  if (mode === "url") {
-    if (!imageUrlFromBody) {
-      const err = new Error(
-        "PIXELCUT_MODE=url requires req.body.image_url (a public URL). Pixelcut quickstart uses image_url."
-      );
-      err.status = 400;
-      throw err;
-    }
-    body = { image_url: imageUrlFromBody, format };
-  } else {
-    // base64 mode
-    if (!file) {
-      const err = new Error("No file uploaded. Send multipart field name 'image'.");
-      err.status = 400;
-      throw err;
-    }
-    const b64 = file.buffer.toString("base64");
-    // IMPORTANT: Only works if your Pixelcut endpoint supports base64 input.
-    body = { image_base64: b64, format };
-  }
+  console.log("PIXELCUT endpoint:", endpoint);
+  console.log("PIXELCUT payload keys:", Object.keys(payload));
 
-  const { resp, text } = await fetchText(endpoint, {
+  const resp = await fetch(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
       "X-API-KEY": apiKey,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(payload),
   });
 
+  const text = await resp.text();
+
   console.log("PIXELCUT status:", resp.status);
+  console.log("PIXELCUT body:", text);
+
   if (!resp.ok) {
-    console.log("PIXELCUT body:", text);
     const err = new Error(`Pixelcut failed: ${resp.status}`);
     err.status = 502;
+    err.details = text;
     throw err;
   }
 
@@ -209,54 +148,51 @@ async function transformWithPixelcut({ file, imageUrlFromBody }) {
     data = { raw: text };
   }
 
-  return { provider: "pixelcut", output: data };
+  // Pixelcut docs show result_url in successful response
+  return data;
 }
 
-// ---------- Main Route ----------
+// ----- Main Route -----
 app.post("/api/images/transform", upload.single("image"), async (req, res, next) => {
   try {
-    // Decide provider:
-    // - Set TRANSFORM_PROVIDER=replicate or pixelcut on Render
-    // - If not set, auto-detect: if REPLICATE_API_TOKEN exists -> replicate, else pixelcut
-    const provider =
-      (process.env.TRANSFORM_PROVIDER || "").toLowerCase() ||
-      (process.env.REPLICATE_API_TOKEN ? "replicate" : "pixelcut");
+    // Enforce Pixelcut endpoint from your doc:
+    // https://api.developer.pixelcut.ai/v1/remove-background
+    // (set this in Render as PIXELCUT_ENDPOINT)
 
-    const file = req.file; // uploaded file in "image"
-    const imageUrlFromBody = req.body?.image_url; // if using PIXELCUT_MODE=url
-
-    if (provider === "replicate") {
-      const result = await transformWithReplicate(file);
-      return res.json(result);
+    if (!req.file) {
+      return res.status(400).json({ error: "No image uploaded. Use form field name 'image'." });
     }
 
-    if (provider === "pixelcut") {
-      const result = await transformWithPixelcut({ file, imageUrlFromBody });
-      return res.json(result);
-    }
+    // 1) Upload to Cloudinary to create a PUBLIC URL Pixelcut can access
+    initCloudinary();
+    const publicUrl = await uploadToCloudinary(req.file);
+    console.log("PUBLIC image_url (Cloudinary):", publicUrl);
 
-    const err = new Error(
-      `Unknown TRANSFORM_PROVIDER='${provider}'. Use 'replicate' or 'pixelcut'.`
-    );
-    err.status = 500;
-    throw err;
+    // 2) Send public URL to Pixelcut
+    const pixelcutResult = await transformWithPixelcutRemoveBg(publicUrl);
+
+    // 3) Return Pixelcut response to frontend
+    return res.json({
+      provider: "pixelcut",
+      input_url: publicUrl,
+      result: pixelcutResult, // should include result_url
+    });
   } catch (err) {
-    // Route-level logging so Render shows the true cause
     console.error("🔥 /api/images/transform error:", err?.stack || err);
     next(err);
   }
 });
 
-// ---------- Global Error Handler (must be after routes) ----------
+// ----- Global Error Handler -----
 app.use((err, req, res, next) => {
   const status = err?.status || 500;
   res.status(status).json({
     error: err?.message || "Internal Server Error",
+    details: err?.details,
   });
 });
 
-// ---------- Start ----------
+// ----- Start -----
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
-  console.log("TRANSFORM_PROVIDER:", process.env.TRANSFORM_PROVIDER || "(auto)");
 });
