@@ -1,3 +1,10 @@
+// src/server.js
+// FULL REPLACEMENT — SAFE VERSION (won’t break your flow)
+// ✅ Restores upload/ghost pipeline: POST /api/images/transform
+// ✅ Restores recommendations: POST /api/recommendations
+// ✅ Fixes Famous preview + deployed preview CORS by allowing all origins (dev-safe)
+// ✅ Keeps your existing response contract: success, ghostImageUrl, garmentColorFamily, summary
+
 import express from "express";
 import cors from "cors";
 import multer from "multer";
@@ -10,50 +17,31 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 /* =========================
-   CORS — ALLOW FAMOUS PREVIEW + YOUR SITE
-   (Most Famous previews are on *.famous.ai subdomains)
-   ========================= */
-
-const allowOrigin = (origin) => {
-  if (!origin) return true; // curl/postman/server-to-server
-
-  // Allow your production domains
-  if (origin === "https://visioncoreengine.tech") return true;
-  if (origin === "https://www.visioncoreengine.tech") return true;
-
-  // Allow Famous main + Famous preview subdomains
-  if (origin === "https://famous.ai") return true;
-  if (origin.endsWith(".famous.ai")) return true;
-
-  return false;
-};
-
+   CORS (DEV / PREVIEW SAFE)
+   =========================
+   This removes the “CORS not allowed from this origin” issue across:
+   - famous preview deployments
+   - visioncoreengine.tech
+   - any staging domain
+*/
 app.use(
   cors({
-    origin: function (origin, cb) {
-      if (allowOrigin(origin)) return cb(null, true);
-      return cb(null, false);
-    },
+    origin: "*",
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-API-KEY"],
-    credentials: false,
   })
 );
-
-// Handle preflight for all routes
 app.options("*", cors());
 
 /* =========================
    BODY PARSING
    ========================= */
-
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 /* =========================
-   MULTER (upload)
+   UPLOAD (Multer)
    ========================= */
-
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
@@ -62,7 +50,6 @@ const upload = multer({
 /* =========================
    CLOUDINARY CONFIG
    ========================= */
-
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -73,14 +60,12 @@ cloudinary.config({
 /* =========================
    HEALTH
    ========================= */
-
 app.get("/", (_req, res) => res.json({ ok: true, service: "cie-core-backend" }));
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 /* =========================
    COLOR MATH HELPERS
    ========================= */
-
 function clamp01(x) {
   return Math.max(0, Math.min(1, x));
 }
@@ -97,6 +82,7 @@ function rgbToHex({ r, g, b }) {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
 }
 
+// RGB (0-255) -> HSL (h 0-360, s/l 0-1)
 function rgbToHsl({ r, g, b }) {
   const rn = r / 255,
     gn = g / 255,
@@ -120,6 +106,7 @@ function rgbToHsl({ r, g, b }) {
   return { h, s: clamp01(s), l: clamp01(l) };
 }
 
+// HSL -> RGB
 function hslToRgb({ h, s, l }) {
   const C = (1 - Math.abs(2 * l - 1)) * s;
   const X = C * (1 - Math.abs(((h / 60) % 2) - 1));
@@ -235,17 +222,14 @@ function buildPalettes(dominantHex) {
   ];
 
   return {
+    dominant: { hex: dominantHex.toUpperCase(), reason: "Dominant HEX extracted from ghost image pixels." },
     neutrals: { hexes: neutrals, reason: "Neutral anchors (low-saturation) for compatibility." },
     earthTones: { hexes: earthDerived, reason: "Earth tones via muted saturation + olive/tan shifts." },
     pastels: { hexes: pastels, reason: "Pastels via high lightness + lower saturation transform." },
-    bold: { hexes: bold, reason: "Bold palette uses dominant + hue relationships (contrast/triad/analogous)." },
-    complementary: {
-      hex: complementaryHex.toUpperCase(),
-      reason: `Complementary hue computed as (H+180) mod 360.`,
-    },
-    analogous: { hexes: [analogousLeftHex.toUpperCase(), analogousRightHex.toUpperCase()], reason: "Analogous hues computed as H±30." },
-    triad: { hexes: [triad1Hex.toUpperCase(), triad2Hex.toUpperCase()], reason: "Triadic hues computed as H+120 and H+240." },
-    dominant: { hex: dominantHex.toUpperCase(), reason: "Dominant HEX extracted from ghost image pixels." },
+    bold: { hexes: bold, reason: "Bold palette uses hue relationships (contrast/triad/analogous)." },
+    complementary: { hex: complementaryHex.toUpperCase(), reason: "Complementary computed as H+180 (mod 360)." },
+    analogous: { hexes: [analogousLeftHex.toUpperCase(), analogousRightHex.toUpperCase()], reason: "Analogous computed as H±30." },
+    triad: { hexes: [triad1Hex.toUpperCase(), triad2Hex.toUpperCase()], reason: "Triad computed as H+120 and H+240." },
   };
 }
 
@@ -255,7 +239,10 @@ function buildPalettes(dominantHex) {
 
 async function uploadToCloudinary(file) {
   const dataUri = `data:${file.mimetype};base64,${file.buffer.toString("base64")}`;
-  const result = await cloudinary.uploader.upload(dataUri, { folder: "cie", resource_type: "image" });
+  const result = await cloudinary.uploader.upload(dataUri, {
+    folder: "cie",
+    resource_type: "image",
+  });
   if (!result?.secure_url) throw new Error("Cloudinary upload failed (no secure_url)");
   return result.secure_url;
 }
@@ -303,17 +290,19 @@ async function analyzeGhostColors(ghostUrl) {
    ROUTES
    ========================= */
 
-// Upload → ghost → analysis. Must return frontend contract keys.
+// Upload → ghost → analysis
 app.post("/api/images/transform", upload.single("image"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, error: "No image uploaded" });
 
     const publicUrl = await uploadToCloudinary(req.file);
     const ghostUrl = await callPixelcutRemoveBg(publicUrl);
+
     const analysis = await analyzeGhostColors(ghostUrl);
     const palettes = buildPalettes(analysis.dominantHex);
 
-    const summary = `Primary color detected. Use recommendations below for balanced, contrast, cohesive, emphasis, natural, or explore directions.`;
+    const summary =
+      "Primary color detected. Use recommendations below for balanced, contrast, cohesive, emphasis, natural, or explore directions.";
 
     return res.json({
       success: true,
@@ -329,7 +318,7 @@ app.post("/api/images/transform", upload.single("image"), async (req, res) => {
   }
 });
 
-// Recommendations (called by the intent cards)
+// Recommendations (intent cards)
 function normalizeMode(mode) {
   const m = String(mode || "").toLowerCase().trim();
   if (m.includes("neutral")) return "neutrals";
@@ -418,7 +407,6 @@ app.post("/api/recommendations", async (req, res) => {
 /* =========================
    START
    ========================= */
-
 app.listen(PORT, () => {
   console.log(`✅ CIE Core backend running on port ${PORT}`);
 });
