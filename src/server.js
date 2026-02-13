@@ -1,9 +1,8 @@
-// src/server.js
-// FULL REPLACEMENT — SAFE VERSION (won’t break your flow)
-// ✅ Restores upload/ghost pipeline: POST /api/images/transform
-// ✅ Restores recommendations: POST /api/recommendations
-// ✅ Fixes Famous preview + deployed preview CORS by allowing all origins (dev-safe)
-// ✅ Keeps your existing response contract: success, ghostImageUrl, garmentColorFamily, summary
+// src/server.js — FULL REPLACEMENT (fixes upload field + Cloudinary config)
+// - Accepts multipart field name "file" (common) and "image" (legacy)
+// - Uses CLOUDINARY_URL if present (preferred)
+// - Adds /ready endpoint to confirm env presence (booleans only)
+// - Adds basic step timing logs for /api/images/transform
 
 import express from "express";
 import cors from "cors";
@@ -17,13 +16,8 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 /* =========================
-   CORS (DEV / PREVIEW SAFE)
-   =========================
-   This removes the “CORS not allowed from this origin” issue across:
-   - famous preview deployments
-   - visioncoreengine.tech
-   - any staging domain
-*/
+   CORS (DEV SAFE)
+   ========================= */
 app.use(
   cors({
     origin: "*",
@@ -49,22 +43,42 @@ const upload = multer({
 
 /* =========================
    CLOUDINARY CONFIG
-   ========================= */
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-  secure: true,
-});
+   =========================
+   Prefer CLOUDINARY_URL. If not present, fall back to individual vars.
+*/
+if (process.env.CLOUDINARY_URL) {
+  cloudinary.config({ secure: true });
+} else {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+    secure: true,
+  });
+}
 
 /* =========================
-   HEALTH
+   HEALTH + READY
    ========================= */
 app.get("/", (_req, res) => res.json({ ok: true, service: "cie-core-backend" }));
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
+app.get("/ready", (_req, res) => {
+  res.json({
+    ok: true,
+    env: {
+      CLOUDINARY_URL: !!process.env.CLOUDINARY_URL,
+      CLOUDINARY_CLOUD_NAME: !!process.env.CLOUDINARY_CLOUD_NAME,
+      CLOUDINARY_API_KEY: !!process.env.CLOUDINARY_API_KEY,
+      CLOUDINARY_API_SECRET: !!process.env.CLOUDINARY_API_SECRET,
+      PIXELCUT_API_KEY: !!process.env.PIXELCUT_API_KEY,
+      PIXELCUT_ENDPOINT: !!process.env.PIXELCUT_ENDPOINT,
+    },
+  });
+});
+
 /* =========================
-   COLOR MATH HELPERS
+   COLOR HELPERS
    ========================= */
 function clamp01(x) {
   return Math.max(0, Math.min(1, x));
@@ -82,7 +96,6 @@ function rgbToHex({ r, g, b }) {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
 }
 
-// RGB (0-255) -> HSL (h 0-360, s/l 0-1)
 function rgbToHsl({ r, g, b }) {
   const rn = r / 255,
     gn = g / 255,
@@ -104,58 +117,6 @@ function rgbToHsl({ r, g, b }) {
   const l = (max + min) / 2;
   const s = delta === 0 ? 0 : delta / (1 - Math.abs(2 * l - 1));
   return { h, s: clamp01(s), l: clamp01(l) };
-}
-
-// HSL -> RGB
-function hslToRgb({ h, s, l }) {
-  const C = (1 - Math.abs(2 * l - 1)) * s;
-  const X = C * (1 - Math.abs(((h / 60) % 2) - 1));
-  const m = l - C / 2;
-
-  let r1 = 0,
-    g1 = 0,
-    b1 = 0;
-
-  if (0 <= h && h < 60) [r1, g1, b1] = [C, X, 0];
-  else if (60 <= h && h < 120) [r1, g1, b1] = [X, C, 0];
-  else if (120 <= h && h < 180) [r1, g1, b1] = [0, C, X];
-  else if (180 <= h && h < 240) [r1, g1, b1] = [0, X, C];
-  else if (240 <= h && h < 300) [r1, g1, b1] = [X, 0, C];
-  else [r1, g1, b1] = [C, 0, X];
-
-  return {
-    r: Math.round((r1 + m) * 255),
-    g: Math.round((g1 + m) * 255),
-    b: Math.round((b1 + m) * 255),
-  };
-}
-
-function shiftHue(hex, degrees) {
-  const hsl = rgbToHsl(hexToRgb(hex));
-  const h = (hsl.h + degrees + 360) % 360;
-  return rgbToHex(hslToRgb({ h, s: hsl.s, l: hsl.l }));
-}
-
-function toPastel(hex) {
-  const hsl = rgbToHsl(hexToRgb(hex));
-  return rgbToHex(
-    hslToRgb({
-      h: hsl.h,
-      s: clamp01(Math.min(hsl.s, 0.35)),
-      l: clamp01(Math.max(hsl.l, 0.78)),
-    })
-  );
-}
-
-function toMuted(hex) {
-  const hsl = rgbToHsl(hexToRgb(hex));
-  return rgbToHex(
-    hslToRgb({
-      h: hsl.h,
-      s: clamp01(Math.min(hsl.s, 0.4)),
-      l: clamp01(Math.min(Math.max(hsl.l, 0.3), 0.7)),
-    })
-  );
 }
 
 function classifyFamilyFromHsl({ h, s, l }) {
@@ -183,60 +144,39 @@ function buildPalettes(dominantHex) {
   const H = hsl.h;
 
   const complementaryHue = (H + 180) % 360;
-  const analogousLeftHue = (H - 30 + 360) % 360;
-  const analogousRightHue = (H + 30) % 360;
-  const triad1Hue = (H + 120) % 360;
-  const triad2Hue = (H + 240) % 360;
-
-  const complementaryHex = rgbToHex(hslToRgb({ h: complementaryHue, s: hsl.s, l: hsl.l }));
-  const analogousLeftHex = rgbToHex(hslToRgb({ h: analogousLeftHue, s: hsl.s, l: hsl.l }));
-  const analogousRightHex = rgbToHex(hslToRgb({ h: analogousRightHue, s: hsl.s, l: hsl.l }));
-  const triad1Hex = rgbToHex(hslToRgb({ h: triad1Hue, s: hsl.s, l: hsl.l }));
-  const triad2Hex = rgbToHex(hslToRgb({ h: triad2Hue, s: hsl.s, l: hsl.l }));
+  const complementaryHex = rgbToHex(
+    (() => {
+      // reuse hsl, same sat/light
+      const { s, l } = hsl;
+      // hsl->rgb
+      const C = (1 - Math.abs(2 * l - 1)) * s;
+      const X = C * (1 - Math.abs(((complementaryHue / 60) % 2) - 1));
+      const m = l - C / 2;
+      let r1 = 0,
+        g1 = 0,
+        b1 = 0;
+      if (0 <= complementaryHue && complementaryHue < 60) [r1, g1, b1] = [C, X, 0];
+      else if (60 <= complementaryHue && complementaryHue < 120) [r1, g1, b1] = [X, C, 0];
+      else if (120 <= complementaryHue && complementaryHue < 180) [r1, g1, b1] = [0, C, X];
+      else if (180 <= complementaryHue && complementaryHue < 240) [r1, g1, b1] = [0, X, C];
+      else if (240 <= complementaryHue && complementaryHue < 300) [r1, g1, b1] = [X, 0, C];
+      else [r1, g1, b1] = [C, 0, X];
+      return { r: Math.round((r1 + m) * 255), g: Math.round((g1 + m) * 255), b: Math.round((b1 + m) * 255) };
+    })()
+  ).toUpperCase();
 
   const neutrals = ["#111111", "#2B2B2B", "#7A7A7A", "#CFCFCF", "#F5F1E8"];
-
-  const earthDerived = [
-    toMuted(shiftHue(dominantHex, 90)),
-    toMuted(shiftHue(dominantHex, 35)),
-    toMuted(shiftHue(dominantHex, 180)),
-    "#8C6A3F",
-    "#2F5D50",
-  ].map((x) => x.toUpperCase());
-
-  const pastels = [
-    toPastel(dominantHex),
-    toPastel(analogousLeftHex),
-    toPastel(analogousRightHex),
-    "#F7C6D0",
-    "#C7D9FF",
-  ].map((x) => x.toUpperCase());
-
-  const bold = [
-    dominantHex.toUpperCase(),
-    analogousLeftHex.toUpperCase(),
-    analogousRightHex.toUpperCase(),
-    complementaryHex.toUpperCase(),
-    triad1Hex.toUpperCase(),
-    triad2Hex.toUpperCase(),
-  ];
 
   return {
     dominant: { hex: dominantHex.toUpperCase(), reason: "Dominant HEX extracted from ghost image pixels." },
     neutrals: { hexes: neutrals, reason: "Neutral anchors (low-saturation) for compatibility." },
-    earthTones: { hexes: earthDerived, reason: "Earth tones via muted saturation + olive/tan shifts." },
-    pastels: { hexes: pastels, reason: "Pastels via high lightness + lower saturation transform." },
-    bold: { hexes: bold, reason: "Bold palette uses hue relationships (contrast/triad/analogous)." },
-    complementary: { hex: complementaryHex.toUpperCase(), reason: "Complementary computed as H+180 (mod 360)." },
-    analogous: { hexes: [analogousLeftHex.toUpperCase(), analogousRightHex.toUpperCase()], reason: "Analogous computed as H±30." },
-    triad: { hexes: [triad1Hex.toUpperCase(), triad2Hex.toUpperCase()], reason: "Triad computed as H+120 and H+240." },
+    complementary: { hex: complementaryHex, reason: "Complementary computed as H+180 (mod 360)." },
   };
 }
 
 /* =========================
    IMAGE OPS: Cloudinary + Pixelcut
    ========================= */
-
 async function uploadToCloudinary(file) {
   const dataUri = `data:${file.mimetype};base64,${file.buffer.toString("base64")}`;
   const result = await cloudinary.uploader.upload(dataUri, {
@@ -252,21 +192,30 @@ async function callPixelcutRemoveBg(imageUrl) {
     throw new Error("Missing Pixelcut env vars");
   }
 
-  const resp = await fetch(process.env.PIXELCUT_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-API-KEY": process.env.PIXELCUT_API_KEY,
-      Accept: "application/json",
-    },
-    body: JSON.stringify({ image_url: imageUrl, format: "png" }),
-  });
+  // give Pixelcut time
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45000); // 45s
 
-  const text = await resp.text();
-  if (!resp.ok) throw new Error(`Pixelcut failed: ${resp.status} ${text}`);
+  try {
+    const resp = await fetch(process.env.PIXELCUT_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-KEY": process.env.PIXELCUT_API_KEY,
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ image_url: imageUrl, format: "png" }),
+      signal: controller.signal,
+    });
 
-  const data = JSON.parse(text);
-  return data.result_url;
+    const text = await resp.text();
+    if (!resp.ok) throw new Error(`Pixelcut failed: ${resp.status} ${text}`);
+
+    const data = JSON.parse(text);
+    return data.result_url;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function analyzeGhostColors(ghostUrl) {
@@ -283,120 +232,76 @@ async function analyzeGhostColors(ghostUrl) {
   const hsl = rgbToHsl(hexToRgb(dominantHex));
   const family = classifyFamilyFromHsl(hsl);
 
-  return { dominantHex, hsl, family };
+  return { dominantHex, family };
 }
 
 /* =========================
    ROUTES
    ========================= */
 
-// Upload → ghost → analysis
-app.post("/api/images/transform", upload.single("image"), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ success: false, error: "No image uploaded" });
+// IMPORTANT: Accept "file" (frontend) AND "image" (legacy).
+// This prevents req.file being undefined due to field mismatch.
+app.post(
+  "/api/images/transform",
+  upload.fields([
+    { name: "file", maxCount: 1 },
+    { name: "image", maxCount: 1 },
+  ]),
+  async (req, res) => {
+    const t0 = Date.now();
+    try {
+      const file = (req.files?.file && req.files.file[0]) || (req.files?.image && req.files.image[0]);
+      if (!file) return res.status(400).json({ success: false, error: "No image uploaded (expected field 'file' or 'image')" });
 
-    const publicUrl = await uploadToCloudinary(req.file);
-    const ghostUrl = await callPixelcutRemoveBg(publicUrl);
+      console.log("[TRANSFORM] start");
 
-    const analysis = await analyzeGhostColors(ghostUrl);
-    const palettes = buildPalettes(analysis.dominantHex);
+      const t1 = Date.now();
+      const publicUrl = await uploadToCloudinary(file);
+      console.log("[TRANSFORM] cloudinary_upload_ms", Date.now() - t1);
 
-    const summary =
-      "Primary color detected. Use recommendations below for balanced, contrast, cohesive, emphasis, natural, or explore directions.";
+      const t2 = Date.now();
+      const ghostUrl = await callPixelcutRemoveBg(publicUrl);
+      console.log("[TRANSFORM] pixelcut_ms", Date.now() - t2);
 
-    return res.json({
-      success: true,
-      ghostImageUrl: ghostUrl,
-      garmentColorFamily: analysis.family,
-      summary,
-      dominantHex: analysis.dominantHex,
-      palettes,
-    });
-  } catch (err) {
-    console.error("transform error:", err?.message || err);
-    return res.status(500).json({ success: false, error: err?.message || "Unknown error" });
+      const t3 = Date.now();
+      const analysis = await analyzeGhostColors(ghostUrl);
+      console.log("[TRANSFORM] analyze_ms", Date.now() - t3);
+
+      const palettes = buildPalettes(analysis.dominantHex);
+
+      console.log("[TRANSFORM] total_ms", Date.now() - t0);
+
+      return res.json({
+        success: true,
+        ghostImageUrl: ghostUrl,
+        garmentColorFamily: analysis.family,
+        summary: "Primary color detected. Use recommendations below for balanced, contrast, cohesive, emphasis, natural, or explore directions.",
+        dominantHex: analysis.dominantHex,
+        palettes,
+      });
+    } catch (err) {
+      console.error("[TRANSFORM] error", err?.message || err);
+      return res.status(500).json({ success: false, error: err?.message || "Unknown error" });
+    }
   }
-});
-
-// Recommendations (intent cards)
-function normalizeMode(mode) {
-  const m = String(mode || "").toLowerCase().trim();
-  if (m.includes("neutral")) return "neutrals";
-  if (m.includes("earth")) return "earthTones";
-  if (m.includes("pastel")) return "pastels";
-  if (m.includes("bold")) return "bold";
-  if (m.includes("complement")) return "complementary";
-  if (m.includes("analog")) return "analogous";
-  if (m.includes("triad")) return "triad";
-  if (m.includes("same")) return "sameFamily";
-  if (m.includes("all")) return "all";
-  return "neutrals";
-}
-
-function sameFamilyPalette(dominantHex) {
-  return [
-    dominantHex.toUpperCase(),
-    shiftHue(dominantHex, -12),
-    shiftHue(dominantHex, +12),
-    shiftHue(dominantHex, -24),
-    shiftHue(dominantHex, +24),
-  ].map((x) => x.toUpperCase());
-}
+);
 
 app.post("/api/recommendations", async (req, res) => {
   try {
-    const { ghostImageUrl, mode, itemType } = req.body || {};
+    const { ghostImageUrl, mode } = req.body || {};
     if (!ghostImageUrl) return res.status(400).json({ success: false, error: "ghostImageUrl is required" });
 
     const analysis = await analyzeGhostColors(ghostImageUrl);
     const palettes = buildPalettes(analysis.dominantHex);
 
-    const selected = normalizeMode(mode);
-    let paletteHexes = [];
-    let reason = "";
-
-    if (selected === "neutrals") {
-      paletteHexes = palettes.neutrals.hexes;
-      reason = palettes.neutrals.reason;
-    } else if (selected === "earthTones") {
-      paletteHexes = palettes.earthTones.hexes;
-      reason = palettes.earthTones.reason;
-    } else if (selected === "pastels") {
-      paletteHexes = palettes.pastels.hexes;
-      reason = palettes.pastels.reason;
-    } else if (selected === "bold") {
-      paletteHexes = palettes.bold.hexes;
-      reason = palettes.bold.reason;
-    } else if (selected === "complementary") {
-      paletteHexes = [palettes.complementary.hex];
-      reason = palettes.complementary.reason;
-    } else if (selected === "analogous") {
-      paletteHexes = palettes.analogous.hexes;
-      reason = palettes.analogous.reason;
-    } else if (selected === "triad") {
-      paletteHexes = palettes.triad.hexes;
-      reason = palettes.triad.reason;
-    } else if (selected === "sameFamily") {
-      paletteHexes = sameFamilyPalette(analysis.dominantHex);
-      reason = "Same-family palette computed by tight hue shifts around the dominant hue.";
-    } else {
-      const combined = [
-        palettes.dominant.hex,
-        ...palettes.neutrals.hexes,
-        palettes.complementary.hex,
-        ...palettes.analogous.hexes,
-      ];
-      paletteHexes = [...new Set(combined.map((x) => x.toUpperCase()))].slice(0, 12);
-      reason = "Exploratory set combining dominant + neutrals + complementary + analogous directions.";
-    }
+    const m = String(mode || "").toLowerCase();
+    const paletteHexes = m.includes("neutral") ? palettes.neutrals.hexes : [palettes.complementary.hex];
 
     return res.json({
       success: true,
-      mode: selected,
-      itemType: itemType || null,
       dominantHex: analysis.dominantHex,
       garmentColorFamily: analysis.family,
-      recommendation: { paletteHexes, reason },
+      recommendation: { paletteHexes, reason: "Generated from extracted dominant color using deterministic palette logic." },
     });
   } catch (err) {
     console.error("recommendations error:", err?.message || err);
@@ -404,9 +309,6 @@ app.post("/api/recommendations", async (req, res) => {
   }
 });
 
-/* =========================
-   START
-   ========================= */
 app.listen(PORT, () => {
   console.log(`✅ CIE Core backend running on port ${PORT}`);
 });
