@@ -1,14 +1,32 @@
-// src/server.js — FULL REPLACEMENT (fixes upload field + Cloudinary config)
-// - Accepts multipart field name "file" (common) and "image" (legacy)
-// - Uses CLOUDINARY_URL if present (preferred)
-// - Adds /ready endpoint to confirm env presence (booleans only)
-// - Adds basic step timing logs for /api/images/transform
+// src/server.js
+// FULL REPLACEMENT — V2 COLOR ENGINE + GHOST PIPELINE (single-file backend)
+//
+// ✅ POST /api/images/transform  (upload -> Cloudinary -> Pixelcut remove-bg -> Cloudinary color analysis -> V2 palettes)
+// ✅ POST /api/recommendations   (takes ghostImageUrl -> color analysis -> returns selected mode palette)
+// ✅ GET /health, GET /
+// ✅ CORS dev-safe for Famous previews + custom domains
+//
+// IMPORTANT:
+// 1) Set Render env vars:
+//    - CLOUDINARY_CLOUD_NAME
+//    - CLOUDINARY_API_KEY
+//    - CLOUDINARY_API_SECRET
+//    - PIXELCUT_API_KEY
+//    - PIXELCUT_ENDPOINT   (usually https://api.developer.pixelcut.ai/v1/remove-background)
+// 2) Install deps in backend repo:
+//    npm i express cors multer dotenv cloudinary chroma-js
+//
+// NOTES:
+// - Uses Cloudinary's built-in color extraction (colors:true) on the ghost image.
+// - V2 palettes are MODE-SEPARATED and TONALLY EXPANDED (not “just one blue”).
+// - Deterministic output: same dominantHex -> same palettes (stable + defensible).
 
 import express from "express";
 import cors from "cors";
 import multer from "multer";
 import dotenv from "dotenv";
 import { v2 as cloudinary } from "cloudinary";
+import chroma from "chroma-js";
 
 dotenv.config();
 
@@ -16,7 +34,7 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 /* =========================
-   CORS (DEV SAFE)
+   CORS (DEV / PREVIEW SAFE)
    ========================= */
 app.use(
   cors({
@@ -43,134 +61,232 @@ const upload = multer({
 
 /* =========================
    CLOUDINARY CONFIG
-   =========================
-   Prefer CLOUDINARY_URL. If not present, fall back to individual vars.
-*/
-if (process.env.CLOUDINARY_URL) {
-  cloudinary.config({ secure: true });
-} else {
-  cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET,
-    secure: true,
-  });
-}
+   ========================= */
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+  secure: true,
+});
 
 /* =========================
-   HEALTH + READY
+   HEALTH
    ========================= */
 app.get("/", (_req, res) => res.json({ ok: true, service: "cie-core-backend" }));
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-app.get("/ready", (_req, res) => {
-  res.json({
-    ok: true,
-    env: {
-      CLOUDINARY_URL: !!process.env.CLOUDINARY_URL,
-      CLOUDINARY_CLOUD_NAME: !!process.env.CLOUDINARY_CLOUD_NAME,
-      CLOUDINARY_API_KEY: !!process.env.CLOUDINARY_API_KEY,
-      CLOUDINARY_API_SECRET: !!process.env.CLOUDINARY_API_SECRET,
-      PIXELCUT_API_KEY: !!process.env.PIXELCUT_API_KEY,
-      PIXELCUT_ENDPOINT: !!process.env.PIXELCUT_ENDPOINT,
-    },
-  });
-});
-
 /* =========================
-   COLOR HELPERS
+   HELPERS
    ========================= */
 function clamp01(x) {
   return Math.max(0, Math.min(1, x));
 }
 
-function hexToRgb(hex) {
-  const h = String(hex).replace("#", "").trim();
-  const full = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
-  const int = parseInt(full, 16);
-  return { r: (int >> 16) & 255, g: (int >> 8) & 255, b: int & 255 };
+function safeHex(hex) {
+  try {
+    return chroma(hex).hex().toUpperCase();
+  } catch {
+    return null;
+  }
 }
 
-function rgbToHex({ r, g, b }) {
-  const toHex = (v) => v.toString(16).padStart(2, "0");
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
+function rotateHue(hex, deg) {
+  const c = chroma(hex);
+  const [h, s, l] = c.hsl();
+  const hh = ((h || 0) + deg + 360) % 360;
+  return chroma.hsl(hh, clamp01(s || 0), clamp01(l || 0)).hex().toUpperCase();
 }
 
-function rgbToHsl({ r, g, b }) {
-  const rn = r / 255,
-    gn = g / 255,
-    bn = b / 255;
+function setTone(hex, { sMul = 1, lMul = 1, lAdd = 0, sAdd = 0 } = {}) {
+  const c = chroma(hex);
+  let [h, s, l] = c.hsl();
+  h = Number.isFinite(h) ? h : 0;
+  s = clamp01((s || 0) * sMul + sAdd);
+  l = clamp01((l || 0) * lMul + lAdd);
+  return chroma.hsl(h, s, l).hex().toUpperCase();
+}
 
-  const max = Math.max(rn, gn, bn);
-  const min = Math.min(rn, gn, bn);
-  const delta = max - min;
+function uniqHexes(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const h of arr) {
+    const hx = safeHex(h);
+    if (!hx) continue;
+    if (seen.has(hx)) continue;
+    seen.add(hx);
+    out.push(hx);
+  }
+  return out;
+}
 
-  let h = 0;
-  if (delta !== 0) {
-    if (max === rn) h = ((gn - bn) / delta) % 6;
-    else if (max === gn) h = (bn - rn) / delta + 2;
-    else h = (rn - gn) / delta + 4;
-    h = Math.round(h * 60);
-    if (h < 0) h += 360;
+/* =========================
+   COLOR FAMILY (V2 TAXONOMY)
+   =========================
+   We classify BOTH:
+   - broad family: neutral / pastel / earth / bold
+   - hue lane: red/orange/yellow/green/cyan/blue/purple/pink
+*/
+function classifyColorV2(dominantHex) {
+  const c = chroma(dominantHex);
+  const [hRaw, sRaw, lRaw] = c.hsl();
+  const h = Number.isFinite(hRaw) ? hRaw : 0;
+  const s = clamp01(sRaw || 0);
+  const l = clamp01(lRaw || 0);
+
+  // broad family
+  let family = "neutral";
+  if (s < 0.12) family = "neutral";
+  else if (l > 0.78 && s < 0.35) family = "pastel";
+  else {
+    const earthHue = (h >= 15 && h <= 65) || (h >= 80 && h <= 165); // warm + greens
+    if (earthHue && s <= 0.6 && l >= 0.22 && l <= 0.78) family = "earth";
+    else if (s >= 0.55) family = "bold";
+    else family = "neutral";
   }
 
-  const l = (max + min) / 2;
-  const s = delta === 0 ? 0 : delta / (1 - Math.abs(2 * l - 1));
-  return { h, s: clamp01(s), l: clamp01(l) };
+  // hue lane
+  let lane = "other";
+  if (h >= 345 || h < 15) lane = "red";
+  else if (h >= 15 && h < 45) lane = "orange";
+  else if (h >= 45 && h < 75) lane = "yellow";
+  else if (h >= 75 && h < 165) lane = "green";
+  else if (h >= 165 && h < 210) lane = "cyan";
+  else if (h >= 210 && h < 255) lane = "blue";
+  else if (h >= 255 && h < 315) lane = "purple";
+  else if (h >= 315 && h < 345) lane = "pink";
+
+  const vivid = s >= 0.7;
+  const dark = l <= 0.35;
+  const light = l >= 0.72;
+
+  return { family, lane, vivid, dark, light, h, s, l };
 }
 
-function classifyFamilyFromHsl({ h, s, l }) {
-  if (s < 0.12) return "neutrals";
-  if (l > 0.75 && s < 0.35) return "pastels";
+/* =========================
+   V2 PALETTE ENGINE
+   =========================
+   Mode separation enforcement:
+   - Balance: neutrals + low saturation anchors
+   - Contrast: complementary + split-complementary (NOT just one)
+   - Cohesion: tonal ladder of same hue (light/dark/soft)
+   - Emphasis: controlled high-energy accents (vivid handling)
+   - Natural: grounded earthy blends (olive/tan/clay/muted)
+   - Explore: triad + tetrad + unexpected but valid accents
+*/
+function generatePalettesV2(dominantHex) {
+  const base = safeHex(dominantHex);
+  if (!base) throw new Error("Invalid dominantHex");
 
-  const earthHue = (h >= 15 && h <= 60) || (h >= 70 && h <= 165);
-  if (earthHue && s <= 0.55 && l >= 0.25 && l <= 0.75) return "earth-tones";
+  const meta = classifyColorV2(base);
 
-  if (s >= 0.55) return "bold-colors";
+  // BALANCE — neutral anchors (works for any color)
+  const balance = uniqHexes([
+    "#111111",
+    "#2B2B2B",
+    "#7A7A7A",
+    "#CFCFCF",
+    "#F5F1E8",
+  ]);
 
-  if (h >= 345 || h < 15) return "reds";
-  if (h >= 15 && h < 45) return "oranges";
-  if (h >= 45 && h < 75) return "yellows";
-  if (h >= 75 && h < 165) return "greens";
-  if (h >= 165 && h < 210) return "cyans";
-  if (h >= 210 && h < 255) return "blues";
-  if (h >= 255 && h < 315) return "purples";
-  if (h >= 315 && h < 345) return "pinks";
-  return "all-colors";
-}
+  // CONTRAST — complementary + split complements
+  const comp = rotateHue(base, 180);
+  const split1 = rotateHue(base, 150);
+  const split2 = rotateHue(base, 210);
 
-function buildPalettes(dominantHex) {
-  const hsl = rgbToHsl(hexToRgb(dominantHex));
-  const H = hsl.h;
+  // Make contrast colors usable (avoid too dark/light extremes)
+  const contrast = uniqHexes([
+    setTone(comp, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
+    setTone(split1, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
+    setTone(split2, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
+  ]);
 
-  const complementaryHue = (H + 180) % 360;
-  const complementaryHex = rgbToHex(
-    (() => {
-      // reuse hsl, same sat/light
-      const { s, l } = hsl;
-      // hsl->rgb
-      const C = (1 - Math.abs(2 * l - 1)) * s;
-      const X = C * (1 - Math.abs(((complementaryHue / 60) % 2) - 1));
-      const m = l - C / 2;
-      let r1 = 0,
-        g1 = 0,
-        b1 = 0;
-      if (0 <= complementaryHue && complementaryHue < 60) [r1, g1, b1] = [C, X, 0];
-      else if (60 <= complementaryHue && complementaryHue < 120) [r1, g1, b1] = [X, C, 0];
-      else if (120 <= complementaryHue && complementaryHue < 180) [r1, g1, b1] = [0, C, X];
-      else if (180 <= complementaryHue && complementaryHue < 240) [r1, g1, b1] = [0, X, C];
-      else if (240 <= complementaryHue && complementaryHue < 300) [r1, g1, b1] = [X, 0, C];
-      else [r1, g1, b1] = [C, 0, X];
-      return { r: Math.round((r1 + m) * 255), g: Math.round((g1 + m) * 255), b: Math.round((b1 + m) * 255) };
-    })()
-  ).toUpperCase();
+  // COHESION — same hue tonal ladder (the missing “tonal expansion”)
+  const cohesion = uniqHexes([
+    setTone(base, { sMul: 0.85, lAdd: +0.18 }), // lighter
+    setTone(base, { sMul: 0.75, lAdd: +0.08 }), // soft
+    setTone(base, { sMul: 1.0, lAdd: 0.0 }),    // base
+    setTone(base, { sMul: 0.9, lAdd: -0.10 }),  // deeper
+    setTone(base, { sMul: 0.8, lAdd: -0.18 }),  // darkest
+  ]);
 
-  const neutrals = ["#111111", "#2B2B2B", "#7A7A7A", "#CFCFCF", "#F5F1E8"];
+  // EMPHASIS — vivid handling
+  // If base is vivid, emphasis = "controlled" accents (not random neon)
+  // If base is muted, emphasis = saturate + one high-energy hue shift
+  let emphasis;
+  if (meta.vivid) {
+    emphasis = uniqHexes([
+      setTone(rotateHue(base, 200), { sMul: 0.85, lAdd: meta.dark ? 0.22 : 0.06 }),
+      setTone(rotateHue(base, -200), { sMul: 0.85, lAdd: meta.dark ? 0.22 : 0.06 }),
+      setTone(rotateHue(base, 120), { sMul: 0.8, lAdd: meta.dark ? 0.18 : 0.04 }),
+    ]);
+  } else {
+    emphasis = uniqHexes([
+      setTone(base, { sMul: 1.25, lAdd: 0.02 }),       // punch up the base
+      setTone(rotateHue(base, 150), { sMul: 1.1, lAdd: 0.06 }),
+      setTone(rotateHue(base, 210), { sMul: 1.1, lAdd: 0.06 }),
+    ]);
+  }
+
+  // NATURAL — earthy blends (works even for vivid colors by muting)
+  const natural = uniqHexes([
+    chroma.mix(base, "#556B2F", 0.55, "lab").hex().toUpperCase(), // olive
+    chroma.mix(base, "#8B4513", 0.50, "lab").hex().toUpperCase(), // saddle/clay
+    chroma.mix(base, "#B87333", 0.45, "lab").hex().toUpperCase(), // copper
+    chroma.mix(base, "#D2B48C", 0.55, "lab").hex().toUpperCase(), // tan
+    chroma.mix(base, "#2F5D50", 0.55, "lab").hex().toUpperCase(), // deep green
+  ].map((h) => setTone(h, { sMul: 0.75, lAdd: meta.dark ? 0.18 : 0.0 })));
+
+  // EXPLORE — triad + tetrad accents (still deterministic)
+  const tri1 = rotateHue(base, 120);
+  const tri2 = rotateHue(base, 240);
+  const tet1 = rotateHue(base, 90);
+  const tet2 = rotateHue(base, 270);
+
+  const explore = uniqHexes([
+    setTone(tri1, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
+    setTone(tri2, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
+    setTone(tet1, { sMul: 0.9, lAdd: meta.dark ? 0.22 : 0.05 }),
+    setTone(tet2, { sMul: 0.9, lAdd: meta.dark ? 0.22 : 0.05 }),
+  ]);
 
   return {
-    dominant: { hex: dominantHex.toUpperCase(), reason: "Dominant HEX extracted from ghost image pixels." },
-    neutrals: { hexes: neutrals, reason: "Neutral anchors (low-saturation) for compatibility." },
-    complementary: { hex: complementaryHex, reason: "Complementary computed as H+180 (mod 360)." },
+    dominantHex: base,
+    classification: {
+      family: meta.family,
+      lane: meta.lane,
+      vivid: meta.vivid,
+      h: Math.round(meta.h),
+      s: Number(meta.s.toFixed(3)),
+      l: Number(meta.l.toFixed(3)),
+    },
+    palettes: {
+      balance: {
+        hexes: balance,
+        reason: "Neutral anchors (low-saturation + high-compatibility) for stability and wearable balance.",
+      },
+      contrast: {
+        hexes: contrast,
+        reason: "Complementary + split-complementary accents (H+180, H±150/210) tonally normalized for usability.",
+      },
+      cohesion: {
+        hexes: cohesion,
+        reason: "Same-hue tonal ladder (light → deep) for cohesive outfits, interiors, and brand systems.",
+      },
+      emphasis: {
+        hexes: emphasis,
+        reason: meta.vivid
+          ? "Vivid base detected: emphasis uses controlled accents (muted saturation + safe luminance shifts)."
+          : "Muted base detected: emphasis boosts saturation + adds one high-energy hue shift.",
+      },
+      natural: {
+        hexes: natural,
+        reason: "Earth blends (olive/tan/clay/copper) generated by LAB mixing + muted toning for grounded styling.",
+      },
+      explore: {
+        hexes: explore,
+        reason: "Exploratory harmonies (triad + tetrad) with tonal normalization for broader valid directions.",
+      },
+    },
   };
 }
 
@@ -188,37 +304,31 @@ async function uploadToCloudinary(file) {
 }
 
 async function callPixelcutRemoveBg(imageUrl) {
-  if (!process.env.PIXELCUT_API_KEY || !process.env.PIXELCUT_ENDPOINT) {
-    throw new Error("Missing Pixelcut env vars");
-  }
+  const apiKey = process.env.PIXELCUT_API_KEY;
+  const endpoint = process.env.PIXELCUT_ENDPOINT;
 
-  // give Pixelcut time
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 45000); // 45s
+  if (!apiKey || !endpoint) throw new Error("Missing Pixelcut env vars (PIXELCUT_API_KEY / PIXELCUT_ENDPOINT)");
 
-  try {
-    const resp = await fetch(process.env.PIXELCUT_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-API-KEY": process.env.PIXELCUT_API_KEY,
-        Accept: "application/json",
-      },
-      body: JSON.stringify({ image_url: imageUrl, format: "png" }),
-      signal: controller.signal,
-    });
+  const resp = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-API-KEY": apiKey,
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ image_url: imageUrl, format: "png" }),
+  });
 
-    const text = await resp.text();
-    if (!resp.ok) throw new Error(`Pixelcut failed: ${resp.status} ${text}`);
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`Pixelcut failed: ${resp.status} ${text}`);
 
-    const data = JSON.parse(text);
-    return data.result_url;
-  } finally {
-    clearTimeout(timeout);
-  }
+  const data = JSON.parse(text);
+  if (!data?.result_url) throw new Error("Pixelcut response missing result_url");
+  return data.result_url;
 }
 
 async function analyzeGhostColors(ghostUrl) {
+  // Cloudinary "colors:true" returns a `colors` array: [[hex, percent], ...]
   const res = await cloudinary.uploader.upload(ghostUrl, {
     folder: "cie/ghost",
     resource_type: "image",
@@ -228,80 +338,110 @@ async function analyzeGhostColors(ghostUrl) {
   const colors = Array.isArray(res.colors) ? res.colors : [];
   if (!colors.length) throw new Error("Color analysis failed (no colors returned)");
 
-  const dominantHex = String(colors[0][0]).toUpperCase();
-  const hsl = rgbToHsl(hexToRgb(dominantHex));
-  const family = classifyFamilyFromHsl(hsl);
+  const dominantHex = safeHex(String(colors[0][0])) || "#000000";
+  const topColors = colors
+    .slice(0, 8)
+    .map(([hex, pct]) => ({ hex: safeHex(hex) || "#000000", pct }))
+    .filter((x) => !!x.hex);
 
-  return { dominantHex, family };
+  return { dominantHex, topColors };
 }
 
 /* =========================
    ROUTES
    ========================= */
 
-// IMPORTANT: Accept "file" (frontend) AND "image" (legacy).
-// This prevents req.file being undefined due to field mismatch.
-app.post(
-  "/api/images/transform",
-  upload.fields([
-    { name: "file", maxCount: 1 },
-    { name: "image", maxCount: 1 },
-  ]),
-  async (req, res) => {
-    const t0 = Date.now();
-    try {
-      const file = (req.files?.file && req.files.file[0]) || (req.files?.image && req.files.image[0]);
-      if (!file) return res.status(400).json({ success: false, error: "No image uploaded (expected field 'file' or 'image')" });
-
-      console.log("[TRANSFORM] start");
-
-      const t1 = Date.now();
-      const publicUrl = await uploadToCloudinary(file);
-      console.log("[TRANSFORM] cloudinary_upload_ms", Date.now() - t1);
-
-      const t2 = Date.now();
-      const ghostUrl = await callPixelcutRemoveBg(publicUrl);
-      console.log("[TRANSFORM] pixelcut_ms", Date.now() - t2);
-
-      const t3 = Date.now();
-      const analysis = await analyzeGhostColors(ghostUrl);
-      console.log("[TRANSFORM] analyze_ms", Date.now() - t3);
-
-      const palettes = buildPalettes(analysis.dominantHex);
-
-      console.log("[TRANSFORM] total_ms", Date.now() - t0);
-
-      return res.json({
-        success: true,
-        ghostImageUrl: ghostUrl,
-        garmentColorFamily: analysis.family,
-        summary: "Primary color detected. Use recommendations below for balanced, contrast, cohesive, emphasis, natural, or explore directions.",
-        dominantHex: analysis.dominantHex,
-        palettes,
-      });
-    } catch (err) {
-      console.error("[TRANSFORM] error", err?.message || err);
-      return res.status(500).json({ success: false, error: err?.message || "Unknown error" });
-    }
-  }
-);
-
-app.post("/api/recommendations", async (req, res) => {
+// Upload → ghost → V2 palettes
+app.post("/api/images/transform", upload.single("image"), async (req, res) => {
+  const t0 = Date.now();
   try {
-    const { ghostImageUrl, mode } = req.body || {};
-    if (!ghostImageUrl) return res.status(400).json({ success: false, error: "ghostImageUrl is required" });
+    if (!req.file) return res.status(400).json({ success: false, error: "No image uploaded" });
 
-    const analysis = await analyzeGhostColors(ghostImageUrl);
-    const palettes = buildPalettes(analysis.dominantHex);
+    // Step timing (helps when Render cold starts)
+    const tUploadStart = Date.now();
+    const publicUrl = await uploadToCloudinary(req.file);
+    const tUpload = Date.now() - tUploadStart;
 
-    const m = String(mode || "").toLowerCase();
-    const paletteHexes = m.includes("neutral") ? palettes.neutrals.hexes : [palettes.complementary.hex];
+    const tPixelcutStart = Date.now();
+    const ghostUrl = await callPixelcutRemoveBg(publicUrl);
+    const tPixelcut = Date.now() - tPixelcutStart;
+
+    const tAnalyzeStart = Date.now();
+    const analysis = await analyzeGhostColors(ghostUrl);
+    const tAnalyze = Date.now() - tAnalyzeStart;
+
+    const tPalStart = Date.now();
+    const v2 = generatePalettesV2(analysis.dominantHex);
+    const tPal = Date.now() - tPalStart;
+
+    const totalMs = Date.now() - t0;
 
     return res.json({
       success: true,
-      dominantHex: analysis.dominantHex,
-      garmentColorFamily: analysis.family,
-      recommendation: { paletteHexes, reason: "Generated from extracted dominant color using deterministic palette logic." },
+      engine: "V2",
+      ghostImageUrl: ghostUrl,
+      dominantHex: v2.dominantHex,
+      garmentColorFamily: v2.classification.family,
+      colorLane: v2.classification.lane,
+      classification: v2.classification,
+      topColors: analysis.topColors,
+      palettes: v2.palettes,
+      summary:
+        "Primary color detected. Use Balance/Contrast/Cohesion/Emphasis/Natural/Explore for structured, mode-specific directions.",
+      timing: {
+        upload_cloudinary_ms: tUpload,
+        pixelcut_ms: tPixelcut,
+        analyze_cloudinary_colors_ms: tAnalyze,
+        palette_engine_ms: tPal,
+        total_ms: totalMs,
+      },
+    });
+  } catch (err) {
+    console.error("transform error:", err?.message || err);
+    return res.status(500).json({ success: false, error: err?.message || "Unknown error" });
+  }
+});
+
+// Recommendations — return one mode palette given a ghostImageUrl
+app.post("/api/recommendations", async (req, res) => {
+  try {
+    const { ghostImageUrl, mode, itemType } = req.body || {};
+    if (!ghostImageUrl) return res.status(400).json({ success: false, error: "ghostImageUrl is required" });
+
+    const analysis = await analyzeGhostColors(ghostImageUrl);
+    const v2 = generatePalettesV2(analysis.dominantHex);
+
+    const m = String(mode || "").toLowerCase().trim();
+
+    const map = {
+      balance: "balance",
+      contrast: "contrast",
+      cohesion: "cohesion",
+      emphasis: "emphasis",
+      natural: "natural",
+      explore: "explore",
+      neutrals: "balance",
+      earth: "natural",
+      earthtones: "natural",
+      earth_tones: "natural",
+      bold: "emphasis",
+    };
+
+    const key = map[m] || "balance";
+    const pack = v2.palettes[key];
+
+    return res.json({
+      success: true,
+      engine: "V2",
+      mode: key,
+      itemType: itemType || null,
+      dominantHex: v2.dominantHex,
+      garmentColorFamily: v2.classification.family,
+      colorLane: v2.classification.lane,
+      recommendation: {
+        paletteHexes: pack.hexes,
+        reason: pack.reason,
+      },
     });
   } catch (err) {
     console.error("recommendations error:", err?.message || err);
@@ -309,6 +449,9 @@ app.post("/api/recommendations", async (req, res) => {
   }
 });
 
+/* =========================
+   START
+   ========================= */
 app.listen(PORT, () => {
   console.log(`✅ CIE Core backend running on port ${PORT}`);
 });
