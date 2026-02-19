@@ -16,10 +16,9 @@
 // 2) Install deps in backend repo:
 //    npm i express cors multer dotenv cloudinary chroma-js
 //
-// NOTES:
-// - Uses Cloudinary's built-in color extraction (colors:true) on the ghost image.
-// - V2 palettes are MODE-SEPARATED and TONALLY EXPANDED (not “just one blue”).
-// - Deterministic output: same dominantHex -> same palettes (stable + defensible).
+// KEY FIX (UPLOAD 500):
+// - Uses upload.any() so we accept either FormData key "image" or "file" (or anything)
+// - We pick req.files[0] so key mismatch can’t break the pipeline
 
 import express from "express";
 import cors from "cors";
@@ -121,11 +120,7 @@ function uniqHexes(arr) {
 
 /* =========================
    COLOR FAMILY (V2 TAXONOMY)
-   =========================
-   We classify BOTH:
-   - broad family: neutral / pastel / earth / bold
-   - hue lane: red/orange/yellow/green/cyan/blue/purple/pink
-*/
+   ========================= */
 function classifyColorV2(dominantHex) {
   const c = chroma(dominantHex);
   const [hRaw, sRaw, lRaw] = c.hsl();
@@ -133,18 +128,16 @@ function classifyColorV2(dominantHex) {
   const s = clamp01(sRaw || 0);
   const l = clamp01(lRaw || 0);
 
-  // broad family
   let family = "neutral";
   if (s < 0.12) family = "neutral";
   else if (l > 0.78 && s < 0.35) family = "pastel";
   else {
-    const earthHue = (h >= 15 && h <= 65) || (h >= 80 && h <= 165); // warm + greens
+    const earthHue = (h >= 15 && h <= 65) || (h >= 80 && h <= 165);
     if (earthHue && s <= 0.6 && l >= 0.22 && l <= 0.78) family = "earth";
     else if (s >= 0.55) family = "bold";
     else family = "neutral";
   }
 
-  // hue lane
   let lane = "other";
   if (h >= 345 || h < 15) lane = "red";
   else if (h >= 15 && h < 45) lane = "orange";
@@ -164,54 +157,32 @@ function classifyColorV2(dominantHex) {
 
 /* =========================
    V2 PALETTE ENGINE
-   =========================
-   Mode separation enforcement:
-   - Balance: neutrals + low saturation anchors
-   - Contrast: complementary + split-complementary (NOT just one)
-   - Cohesion: tonal ladder of same hue (light/dark/soft)
-   - Emphasis: controlled high-energy accents (vivid handling)
-   - Natural: grounded earthy blends (olive/tan/clay/muted)
-   - Explore: triad + tetrad + unexpected but valid accents
-*/
+   ========================= */
 function generatePalettesV2(dominantHex) {
   const base = safeHex(dominantHex);
   if (!base) throw new Error("Invalid dominantHex");
 
   const meta = classifyColorV2(base);
 
-  // BALANCE — neutral anchors (works for any color)
-  const balance = uniqHexes([
-    "#111111",
-    "#2B2B2B",
-    "#7A7A7A",
-    "#CFCFCF",
-    "#F5F1E8",
-  ]);
+  const balance = uniqHexes(["#111111", "#2B2B2B", "#7A7A7A", "#CFCFCF", "#F5F1E8"]);
 
-  // CONTRAST — complementary + split complements
   const comp = rotateHue(base, 180);
   const split1 = rotateHue(base, 150);
   const split2 = rotateHue(base, 210);
-
-  // Make contrast colors usable (avoid too dark/light extremes)
   const contrast = uniqHexes([
     setTone(comp, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
     setTone(split1, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
     setTone(split2, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
   ]);
 
-  // COHESION — same hue tonal ladder (the missing “tonal expansion”)
   const cohesion = uniqHexes([
-    setTone(base, { sMul: 0.85, lAdd: +0.18 }), // lighter
-    setTone(base, { sMul: 0.75, lAdd: +0.08 }), // soft
-    setTone(base, { sMul: 1.0, lAdd: 0.0 }),    // base
-    setTone(base, { sMul: 0.9, lAdd: -0.10 }),  // deeper
-    setTone(base, { sMul: 0.8, lAdd: -0.18 }),  // darkest
+    setTone(base, { sMul: 0.85, lAdd: +0.18 }),
+    setTone(base, { sMul: 0.75, lAdd: +0.08 }),
+    setTone(base, { sMul: 1.0, lAdd: 0.0 }),
+    setTone(base, { sMul: 0.9, lAdd: -0.10 }),
+    setTone(base, { sMul: 0.8, lAdd: -0.18 }),
   ]);
 
-  // EMPHASIS — vivid handling
-  // If base is vivid, emphasis = "controlled" accents (not random neon)
-  // If base is muted, emphasis = saturate + one high-energy hue shift
   let emphasis;
   if (meta.vivid) {
     emphasis = uniqHexes([
@@ -221,22 +192,22 @@ function generatePalettesV2(dominantHex) {
     ]);
   } else {
     emphasis = uniqHexes([
-      setTone(base, { sMul: 1.25, lAdd: 0.02 }),       // punch up the base
+      setTone(base, { sMul: 1.25, lAdd: 0.02 }),
       setTone(rotateHue(base, 150), { sMul: 1.1, lAdd: 0.06 }),
       setTone(rotateHue(base, 210), { sMul: 1.1, lAdd: 0.06 }),
     ]);
   }
 
-  // NATURAL — earthy blends (works even for vivid colors by muting)
-  const natural = uniqHexes([
-    chroma.mix(base, "#556B2F", 0.55, "lab").hex().toUpperCase(), // olive
-    chroma.mix(base, "#8B4513", 0.50, "lab").hex().toUpperCase(), // saddle/clay
-    chroma.mix(base, "#B87333", 0.45, "lab").hex().toUpperCase(), // copper
-    chroma.mix(base, "#D2B48C", 0.55, "lab").hex().toUpperCase(), // tan
-    chroma.mix(base, "#2F5D50", 0.55, "lab").hex().toUpperCase(), // deep green
-  ].map((h) => setTone(h, { sMul: 0.75, lAdd: meta.dark ? 0.18 : 0.0 })));
+  const natural = uniqHexes(
+    [
+      chroma.mix(base, "#556B2F", 0.55, "lab").hex().toUpperCase(),
+      chroma.mix(base, "#8B4513", 0.50, "lab").hex().toUpperCase(),
+      chroma.mix(base, "#B87333", 0.45, "lab").hex().toUpperCase(),
+      chroma.mix(base, "#D2B48C", 0.55, "lab").hex().toUpperCase(),
+      chroma.mix(base, "#2F5D50", 0.55, "lab").hex().toUpperCase(),
+    ].map((h) => setTone(h, { sMul: 0.75, lAdd: meta.dark ? 0.18 : 0.0 }))
+  );
 
-  // EXPLORE — triad + tetrad accents (still deterministic)
   const tri1 = rotateHue(base, 120);
   const tri2 = rotateHue(base, 240);
   const tet1 = rotateHue(base, 90);
@@ -328,7 +299,6 @@ async function callPixelcutRemoveBg(imageUrl) {
 }
 
 async function analyzeGhostColors(ghostUrl) {
-  // Cloudinary "colors:true" returns a `colors` array: [[hex, percent], ...]
   const res = await cloudinary.uploader.upload(ghostUrl, {
     folder: "cie/ghost",
     resource_type: "image",
@@ -352,14 +322,14 @@ async function analyzeGhostColors(ghostUrl) {
    ========================= */
 
 // Upload → ghost → V2 palettes
-app.post("/api/images/transform", upload.single("image"), async (req, res) => {
+app.post("/api/images/transform", upload.any(), async (req, res) => {
   const t0 = Date.now();
   try {
-    if (!req.file) return res.status(400).json({ success: false, error: "No image uploaded" });
+    const file = req.files?.[0];
+    if (!file) return res.status(400).json({ success: false, step: "upload", error: "No image uploaded" });
 
-    // Step timing (helps when Render cold starts)
     const tUploadStart = Date.now();
-    const publicUrl = await uploadToCloudinary(req.file);
+    const publicUrl = await uploadToCloudinary(file);
     const tUpload = Date.now() - tUploadStart;
 
     const tPixelcutStart = Date.now();
@@ -398,7 +368,7 @@ app.post("/api/images/transform", upload.single("image"), async (req, res) => {
     });
   } catch (err) {
     console.error("transform error:", err?.message || err);
-    return res.status(500).json({ success: false, error: err?.message || "Unknown error" });
+    return res.status(500).json({ success: false, step: "transform", error: err?.message || "Unknown error" });
   }
 });
 
