@@ -1,8 +1,22 @@
 // src/server.js
-// FULL REPLACEMENT — V2 COLOR ENGINE + GHOST PIPELINE (single-file backend)
-// Fixes multipart edge-cases by accepting ANY upload field name (upload.any())
-// Adds /api/debug/status to confirm env presence (booleans only)
-// Adds step-based errors for fast diagnosis
+// FULL REPLACEMENT — V2 Palette Engine + V3 Structural Scoring Overlay (single-file backend)
+//
+// ✅ POST /api/images/transform  (upload -> Cloudinary -> Pixelcut -> Cloudinary colors -> V2 palettes + V3 scores)
+// ✅ POST /api/recommendations   (ghostImageUrl -> colors -> V2 palette mode + V3 score for that mode)
+// ✅ GET /, GET /health
+//
+// Upload hardening:
+// ✅ upload.any() to accept any multipart field name (image/file/etc)
+//
+// REQUIRED Render env vars:
+// - CLOUDINARY_CLOUD_NAME
+// - CLOUDINARY_API_KEY
+// - CLOUDINARY_API_SECRET
+// - PIXELCUT_API_KEY
+// - PIXELCUT_ENDPOINT (e.g. https://api.developer.pixelcut.ai/v1/remove-background)
+//
+// Deps:
+// npm i express cors multer dotenv cloudinary chroma-js
 
 import express from "express";
 import cors from "cors";
@@ -16,9 +30,6 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-/* =========================
-   CORS (DEV / PREVIEW SAFE)
-   ========================= */
 app.use(
   cors({
     origin: "*",
@@ -28,14 +39,11 @@ app.use(
 );
 app.options("*", cors());
 
-/* =========================
-   BODY PARSING
-   ========================= */
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 /* =========================
-   UPLOAD (Multer)
+   MULTER
    ========================= */
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -53,29 +61,13 @@ cloudinary.config({
 });
 
 /* =========================
-   HEALTH + DEBUG
+   HEALTH
    ========================= */
 app.get("/", (_req, res) => res.json({ ok: true, service: "cie-core-backend" }));
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// Debug env presence (booleans only)
-app.get("/api/debug/status", (_req, res) => {
-  res.json({
-    ok: true,
-    service: "cie-core-backend",
-    engine: "V2",
-    env: {
-      CLOUDINARY_CLOUD_NAME: !!process.env.CLOUDINARY_CLOUD_NAME,
-      CLOUDINARY_API_KEY: !!process.env.CLOUDINARY_API_KEY,
-      CLOUDINARY_API_SECRET: !!process.env.CLOUDINARY_API_SECRET,
-      PIXELCUT_API_KEY: !!process.env.PIXELCUT_API_KEY,
-      PIXELCUT_ENDPOINT: !!process.env.PIXELCUT_ENDPOINT,
-    },
-  });
-});
-
 /* =========================
-   HELPERS
+   UTILS
    ========================= */
 function clamp01(x) {
   return Math.max(0, Math.min(1, x));
@@ -89,20 +81,25 @@ function safeHex(hex) {
   }
 }
 
-function rotateHue(hex, deg) {
-  const c = chroma(hex);
-  const [h, s, l] = c.hsl();
-  const hh = ((h || 0) + deg + 360) % 360;
-  return chroma.hsl(hh, clamp01(s || 0), clamp01(l || 0)).hex().toUpperCase();
+function angleDist(a, b) {
+  const d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
 }
 
-function setTone(hex, { sMul = 1, lMul = 1, lAdd = 0, sAdd = 0 } = {}) {
-  const c = chroma(hex);
-  let [h, s, l] = c.hsl();
-  h = Number.isFinite(h) ? h : 0;
-  s = clamp01((s || 0) * sMul + sAdd);
-  l = clamp01((l || 0) * lMul + lAdd);
-  return chroma.hsl(h, s, l).hex().toUpperCase();
+function luminance01(hex) {
+  // chroma luminance is already relative-ish but we’ll use WCAG style via RGB conversion
+  const [r, g, b] = chroma(hex).rgb();
+  const srgb = [r, g, b].map((v) => {
+    const x = v / 255;
+    return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * srgb[0] + 0.7152 * srgb[1] + 0.0722 * srgb[2];
+}
+
+function contrastRatio(L1, L2) {
+  const a = Math.max(L1, L2);
+  const b = Math.min(L1, L2);
+  return (a + 0.05) / (b + 0.05);
 }
 
 function uniqHexes(arr) {
@@ -118,8 +115,24 @@ function uniqHexes(arr) {
   return out;
 }
 
+function rotateHue(hex, deg) {
+  const c = chroma(hex);
+  const [h, s, l] = c.hsl();
+  const hh = ((Number.isFinite(h) ? h : 0) + deg + 360) % 360;
+  return chroma.hsl(hh, clamp01(s || 0), clamp01(l || 0)).hex().toUpperCase();
+}
+
+function setTone(hex, { sMul = 1, lAdd = 0 } = {}) {
+  const c = chroma(hex);
+  let [h, s, l] = c.hsl();
+  h = Number.isFinite(h) ? h : 0;
+  s = clamp01((s || 0) * sMul);
+  l = clamp01((l || 0) + lAdd);
+  return chroma.hsl(h, s, l).hex().toUpperCase();
+}
+
 /* =========================
-   COLOR FAMILY (V2 TAXONOMY)
+   V2 CLASSIFICATION
    ========================= */
 function classifyColorV2(dominantHex) {
   const c = chroma(dominantHex);
@@ -156,7 +169,7 @@ function classifyColorV2(dominantHex) {
 }
 
 /* =========================
-   V2 PALETTE ENGINE
+   V2 PALETTE ENGINE (already working)
    ========================= */
 function generatePalettesV2(dominantHex) {
   const base = safeHex(dominantHex);
@@ -212,7 +225,6 @@ function generatePalettesV2(dominantHex) {
   const tri2 = rotateHue(base, 240);
   const tet1 = rotateHue(base, 90);
   const tet2 = rotateHue(base, 270);
-
   const explore = uniqHexes([
     setTone(tri1, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
     setTone(tri2, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
@@ -231,18 +243,165 @@ function generatePalettesV2(dominantHex) {
       l: Number(meta.l.toFixed(3)),
     },
     palettes: {
-      balance: { hexes: balance, reason: "Neutral anchors for stability + wearable balance." },
+      balance: { hexes: balance, reason: "Neutral anchors for stability + broad compatibility." },
       contrast: { hexes: contrast, reason: "Complementary + split-complementary accents, tonally normalized." },
       cohesion: { hexes: cohesion, reason: "Same-hue tonal ladder (light → deep) for cohesive systems." },
-      emphasis: {
-        hexes: emphasis,
-        reason: meta.vivid
-          ? "Vivid base: controlled accents (muted saturation + safe luminance shifts)."
-          : "Muted base: saturation boost + high-energy hue shift.",
-      },
+      emphasis: { hexes: emphasis, reason: meta.vivid ? "Vivid base: controlled accents." : "Muted base: boosted accents." },
       natural: { hexes: natural, reason: "Earth blends via LAB mixing + muted toning." },
       explore: { hexes: explore, reason: "Triad + tetrad harmonies with tonal normalization." },
     },
+  };
+}
+
+/* =========================
+   V3 SCORING OVERLAY (DETERMINISTIC)
+   ========================= */
+function scorePaletteV3(modeName, hexes, dominantHex) {
+  // role mapping (deterministic)
+  const base = hexes[0];
+  const secondary = hexes.slice(1, 3);
+  const accent = hexes.slice(-2);
+
+  const baseHSL = chroma(base).hsl();
+  const baseHue = Number.isFinite(baseHSL[0]) ? baseHSL[0] : 0;
+
+  const all = [base, ...secondary, ...accent].filter(Boolean);
+  const hsls = all.map((h) => chroma(h).hsl());
+  const hues = hsls.map((x) => (Number.isFinite(x[0]) ? x[0] : 0));
+  const sats = hsls.map((x) => clamp01(x[1] || 0));
+  const ls = hsls.map((x) => clamp01(x[2] || 0));
+
+  // ---- Harmony components
+  const bestFits = hues.slice(1).map((h) => {
+    const d = angleDist(baseHue, h);
+    const analogFit = clamp01(1 - d / 30);
+    const complementFit = clamp01(1 - Math.abs(180 - d) / 30);
+    const splitFit = clamp01(1 - Math.min(Math.abs(150 - d), Math.abs(210 - d)) / 30);
+    const triadFit = clamp01(1 - Math.abs(120 - d) / 30);
+    return Math.max(analogFit, complementFit, splitFit, triadFit);
+  });
+  const hueRelationshipFit = bestFits.length ? bestFits.reduce((a, b) => a + b, 0) / bestFits.length : 0.5;
+
+  const rangeL = Math.max(...ls) - Math.min(...ls);
+  const toneCohesion = clamp01(1 - rangeL / 0.75);
+
+  const vividCount = sats.filter((s) => s >= 0.7).length;
+  const saturationBalance = vividCount <= 1 ? 1 : vividCount === 2 ? 0.75 : 0.5;
+
+  const warmCount = hues.filter((h) => h < 75 || h >= 345).length;
+  const coolCount = hues.filter((h) => h >= 180 && h <= 300).length;
+  const temperatureCoherence =
+    (warmCount >= coolCount && coolCount <= 1) || (coolCount >= warmCount && warmCount <= 1) ? 1 : 0.7;
+
+  const harmony01 =
+    0.45 * hueRelationshipFit + 0.25 * toneCohesion + 0.2 * saturationBalance + 0.1 * temperatureCoherence;
+  const harmony = Math.round(clamp01(harmony01) * 100);
+
+  // ---- Applicability components
+  const baseLum = luminance01(base);
+  const accentLums = accent.map(luminance01);
+  const bestRatio = accentLums.length ? Math.max(...accentLums.map((L) => contrastRatio(baseLum, L))) : 1.0;
+  const contrastSafety = clamp01((bestRatio - 1) / 4); // ratio ~5 => 1.0
+
+  const neutralExists = sats.some((s) => s < 0.2);
+  const anchorPresence = neutralExists ? 1 : 0.65;
+
+  const chromaModeration = vividCount <= 1 ? 1 : vividCount === 2 ? 0.75 : 0.55;
+
+  let conflictPenalty = 1.0;
+  // conflict: two vivid accents far apart
+  const vividAccentHues = accent
+    .map((h) => chroma(h).hsl())
+    .filter((x) => clamp01(x[1] || 0) >= 0.7)
+    .map((x) => (Number.isFinite(x[0]) ? x[0] : 0));
+  if (vividAccentHues.length >= 2) {
+    const d = angleDist(vividAccentHues[0], vividAccentHues[1]);
+    conflictPenalty = d > 90 ? 0.55 : 0.75;
+  }
+
+  const applicability01 =
+    0.4 * contrastSafety + 0.25 * anchorPresence + 0.2 * chromaModeration + 0.15 * conflictPenalty;
+  const applicability = Math.round(clamp01(applicability01) * 100);
+
+  // ---- Versatility components
+  const neutralCount = sats.filter((s) => s < 0.2).length;
+  const neutralSupport = neutralCount === 0 ? 0.55 : neutralCount === 1 ? 0.8 : 1.0;
+
+  let toneRangeUsability = 0.75;
+  if (rangeL < 0.2) toneRangeUsability = 0.65;
+  else if (rangeL <= 0.55) toneRangeUsability = 1.0;
+  else toneRangeUsability = 0.75;
+
+  const overSpecificityPenalty = vividCount <= 1 ? 1.0 : vividCount === 2 ? 0.8 : 0.6;
+
+  const versatility01 = 0.45 * neutralSupport + 0.35 * toneRangeUsability + 0.2 * overSpecificityPenalty;
+  const versatility = Math.round(clamp01(versatility01) * 100);
+
+  // ---- Boldness
+  const avgSat = sats.reduce((a, b) => a + b, 0) / Math.max(1, sats.length);
+  const hueSpread = hues.length > 1 ? hues.slice(1).map((h) => angleDist(baseHue, h) / 180).reduce((a, b) => a + b, 0) / (hues.length - 1) : 0.2;
+  const contrastEnergy = clamp01((bestRatio - 1) / 6);
+  const boldness01 = clamp01(0.5 * avgSat + 0.3 * hueSpread + 0.2 * contrastEnergy);
+  const boldness = Math.round(boldness01 * 100);
+
+  // ---- Composite (fixed deterministic weights)
+  const composite01 = clamp01(0.35 * (harmony / 100) + 0.35 * (applicability / 100) + 0.2 * (versatility / 100) + 0.1 * (boldness / 100));
+  const composite = Math.round(composite01 * 100);
+
+  // Explanation (universal)
+  const rules = [];
+  if (neutralExists) rules.push("ANCHOR_PRESENT");
+  if (vividCount <= 1) rules.push("LOW_VIVID_COUNT");
+  if (bestRatio >= 3) rules.push("SAFE_CONTRAST");
+  if (rangeL <= 0.55) rules.push("USABLE_TONE_RANGE");
+
+  const user = (() => {
+    if (composite >= 85) return "High-confidence direction with stable structure and strong real-world applicability.";
+    if (composite >= 70) return "Solid direction with good balance between harmony and practical usability.";
+    if (composite >= 55) return "Viable but more niche—use with intention and controlled accents.";
+    return "Experimental direction—best for creative exploration rather than broad usability.";
+  })();
+
+  const pro = `hueFit=${hueRelationshipFit.toFixed(2)} rangeL=${rangeL.toFixed(2)} vividCount=${vividCount} contrastRatio=${bestRatio.toFixed(2)} neutralCount=${neutralCount}`;
+
+  return {
+    mode: modeName,
+    scores: { harmony, applicability, versatility, boldness, composite },
+    explanation: {
+      user,
+      pro,
+      weights: { harmony: 0.35, applicability: 0.35, versatility: 0.2, boldness: 0.1 },
+      rules,
+    },
+  };
+}
+
+function buildV3FromV2(v2) {
+  const modeScores = {};
+  const explanations = {};
+  const rankings = [];
+
+  for (const mode of ["balance", "contrast", "cohesion", "emphasis", "natural", "explore"]) {
+    const hexes = v2.palettes?.[mode]?.hexes || [];
+    const scored = scorePaletteV3(mode, hexes, v2.dominantHex);
+    modeScores[mode] = scored.scores;
+    explanations[mode] = scored.explanation;
+    rankings.push({ mode, composite: scored.scores.composite });
+  }
+
+  rankings.sort((a, b) => b.composite - a.composite);
+
+  return {
+    context: {
+      dominantHex: v2.dominantHex,
+      ...v2.classification,
+      paletteCountPerMode: Object.fromEntries(
+        Object.entries(v2.palettes).map(([k, v]) => [k, (v.hexes || []).length])
+      ),
+    },
+    modeScores,
+    rankings,
+    explanations,
   };
 }
 
@@ -304,66 +463,22 @@ async function analyzeGhostColors(ghostUrl) {
 /* =========================
    ROUTES
    ========================= */
-
-// Upload → ghost → V2 palettes
-// IMPORTANT: upload.any() makes this resilient to frontend field-name mismatches
 app.post("/api/images/transform", upload.any(), async (req, res) => {
-  const t0 = Date.now();
-
   try {
     const file = req.files?.[0];
-    if (!file) {
-      return res.status(400).json({
-        success: false,
-        step: "upload",
-        error: "No image file received (multipart payload had no files).",
-      });
-    }
+    if (!file) return res.status(400).json({ success: false, error: "No image file received" });
 
-    // Helpful server-side trace (no secrets)
-    console.log("[TRANSFORM] file field:", file.fieldname, "type:", file.mimetype, "bytes:", file.size);
+    const publicUrl = await uploadToCloudinary(file);
+    const ghostUrl = await callPixelcutRemoveBg(publicUrl);
+    const analysis = await analyzeGhostColors(ghostUrl);
 
-    const tUploadStart = Date.now();
-    let publicUrl;
-    try {
-      publicUrl = await uploadToCloudinary(file);
-    } catch (e) {
-      return res.status(500).json({ success: false, step: "cloudinary_upload", error: e?.message || String(e) });
-    }
-    const tUpload = Date.now() - tUploadStart;
-
-    const tPixelcutStart = Date.now();
-    let ghostUrl;
-    try {
-      ghostUrl = await callPixelcutRemoveBg(publicUrl);
-    } catch (e) {
-      return res.status(500).json({ success: false, step: "pixelcut", error: e?.message || String(e) });
-    }
-    const tPixelcut = Date.now() - tPixelcutStart;
-
-    const tAnalyzeStart = Date.now();
-    let analysis;
-    try {
-      analysis = await analyzeGhostColors(ghostUrl);
-    } catch (e) {
-      return res.status(500).json({ success: false, step: "cloudinary_colors", error: e?.message || String(e) });
-    }
-    const tAnalyze = Date.now() - tAnalyzeStart;
-
-    const tPalStart = Date.now();
-    let v2;
-    try {
-      v2 = generatePalettesV2(analysis.dominantHex);
-    } catch (e) {
-      return res.status(500).json({ success: false, step: "palette_engine", error: e?.message || String(e) });
-    }
-    const tPal = Date.now() - tPalStart;
-
-    const totalMs = Date.now() - t0;
+    const v2 = generatePalettesV2(analysis.dominantHex);
+    const v3 = buildV3FromV2(v2);
 
     return res.json({
       success: true,
       engine: "V2",
+      v3Engine: "V3.0",
       ghostImageUrl: ghostUrl,
       dominantHex: v2.dominantHex,
       garmentColorFamily: v2.classification.family,
@@ -371,68 +486,45 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       classification: v2.classification,
       topColors: analysis.topColors,
       palettes: v2.palettes,
-      summary:
-        "Primary color detected. Use Balance/Contrast/Cohesion/Emphasis/Natural/Explore for structured, mode-specific directions.",
-      timing: {
-        upload_cloudinary_ms: tUpload,
-        pixelcut_ms: tPixelcut,
-        analyze_cloudinary_colors_ms: tAnalyze,
-        palette_engine_ms: tPal,
-        total_ms: totalMs,
-      },
+      v3,
+      summary: "V2 palettes generated. V3 scoring ranks each mode with Harmony/Applicability/Versatility/Boldness.",
     });
   } catch (err) {
-    console.error("transform fatal error:", err?.message || err);
-    return res.status(500).json({ success: false, step: "unknown", error: err?.message || "Unknown error" });
-  }
-});
-
-// Recommendations — one mode palette from ghostImageUrl
-app.post("/api/recommendations", async (req, res) => {
-  try {
-    const { ghostImageUrl, mode, itemType } = req.body || {};
-    if (!ghostImageUrl) return res.status(400).json({ success: false, error: "ghostImageUrl is required" });
-
-    const analysis = await analyzeGhostColors(ghostImageUrl);
-    const v2 = generatePalettesV2(analysis.dominantHex);
-
-    const m = String(mode || "").toLowerCase().trim();
-    const map = {
-      balance: "balance",
-      contrast: "contrast",
-      cohesion: "cohesion",
-      emphasis: "emphasis",
-      natural: "natural",
-      explore: "explore",
-      neutrals: "balance",
-      earth: "natural",
-      earthtones: "natural",
-      earth_tones: "natural",
-      bold: "emphasis",
-    };
-
-    const key = map[m] || "balance";
-    const pack = v2.palettes[key];
-
-    return res.json({
-      success: true,
-      engine: "V2",
-      mode: key,
-      itemType: itemType || null,
-      dominantHex: v2.dominantHex,
-      garmentColorFamily: v2.classification.family,
-      colorLane: v2.classification.lane,
-      recommendation: { paletteHexes: pack.hexes, reason: pack.reason },
-    });
-  } catch (err) {
-    console.error("recommendations error:", err?.message || err);
     return res.status(500).json({ success: false, error: err?.message || "Unknown error" });
   }
 });
 
-/* =========================
-   START
-   ========================= */
-app.listen(PORT, () => {
-  console.log(`✅ CIE Core backend running on port ${PORT}`);
+app.post("/api/recommendations", async (req, res) => {
+  try {
+    const { ghostImageUrl, mode } = req.body || {};
+    if (!ghostImageUrl) return res.status(400).json({ success: false, error: "ghostImageUrl is required" });
+
+    const analysis = await analyzeGhostColors(ghostImageUrl);
+    const v2 = generatePalettesV2(analysis.dominantHex);
+    const v3 = buildV3FromV2(v2);
+
+    const m = String(mode || "balance").toLowerCase().trim();
+    const key = ["balance","contrast","cohesion","emphasis","natural","explore"].includes(m) ? m : "balance";
+
+    return res.json({
+      success: true,
+      engine: "V2",
+      v3Engine: "V3.0",
+      mode: key,
+      dominantHex: v2.dominantHex,
+      classification: v2.classification,
+      recommendation: {
+        paletteHexes: v2.palettes[key].hexes,
+        reason: v2.palettes[key].reason,
+      },
+      v3: {
+        scores: v3.modeScores[key],
+        explanation: v3.explanations[key],
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err?.message || "Unknown error" });
+  }
 });
+
+app.listen(PORT, () => console.log(`✅ CIE Core backend running on port ${PORT}`));
