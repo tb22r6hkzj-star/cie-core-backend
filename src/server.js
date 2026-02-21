@@ -1,22 +1,25 @@
 // src/server.js
-// FULL REPLACEMENT — V2 Palette Engine + V3 Structural Scoring Overlay (single-file backend)
+// FULL REPLACEMENT — V2 COLOR ENGINE + GHOST PIPELINE + V3 SCI SCORING (single-file backend)
 //
-// ✅ POST /api/images/transform  (upload -> Cloudinary -> Pixelcut -> Cloudinary colors -> V2 palettes + V3 scores)
-// ✅ POST /api/recommendations   (ghostImageUrl -> colors -> V2 palette mode + V3 score for that mode)
-// ✅ GET /, GET /health
-//
-// Upload hardening:
-// ✅ upload.any() to accept any multipart field name (image/file/etc)
+// ✅ POST /api/images/transform  (upload -> Cloudinary -> Pixelcut remove-bg -> Cloudinary color analysis -> V2 palettes -> V3 scoring)
+// ✅ POST /api/recommendations   (takes ghostImageUrl + mode -> returns selected mode palette + V3 scores for that mode)
+// ✅ GET /health, GET /
+// ✅ CORS dev-safe for Famous previews + custom domains
 //
 // REQUIRED Render env vars:
 // - CLOUDINARY_CLOUD_NAME
 // - CLOUDINARY_API_KEY
 // - CLOUDINARY_API_SECRET
 // - PIXELCUT_API_KEY
-// - PIXELCUT_ENDPOINT (e.g. https://api.developer.pixelcut.ai/v1/remove-background)
+// - PIXELCUT_ENDPOINT   (e.g. https://api.developer.pixelcut.ai/v1/remove-background)
 //
 // Deps:
 // npm i express cors multer dotenv cloudinary chroma-js
+//
+// Notes:
+// - V2 palettes are MODE-SEPARATED and TONALLY EXPANDED
+// - V3 scoring is UNIVERSAL (fashion + interiors): Harmony / Applicability / Versatility / Boldness
+// - Output is deterministic.
 
 import express from "express";
 import cors from "cors";
@@ -30,6 +33,9 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+/* =========================
+   CORS (DEV / PREVIEW SAFE)
+   ========================= */
 app.use(
   cors({
     origin: "*",
@@ -39,11 +45,14 @@ app.use(
 );
 app.options("*", cors());
 
+/* =========================
+   BODY PARSING
+   ========================= */
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 /* =========================
-   MULTER
+   UPLOAD (Multer)
    ========================= */
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -67,12 +76,11 @@ app.get("/", (_req, res) => res.json({ ok: true, service: "cie-core-backend" }))
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 /* =========================
-   UTILS
+   HELPERS
    ========================= */
 function clamp01(x) {
   return Math.max(0, Math.min(1, x));
 }
-
 function safeHex(hex) {
   try {
     return chroma(hex).hex().toUpperCase();
@@ -80,28 +88,20 @@ function safeHex(hex) {
     return null;
   }
 }
-
-function angleDist(a, b) {
-  const d = Math.abs(a - b) % 360;
-  return d > 180 ? 360 - d : d;
+function rotateHue(hex, deg) {
+  const c = chroma(hex);
+  const [h, s, l] = c.hsl();
+  const hh = ((h || 0) + deg + 360) % 360;
+  return chroma.hsl(hh, clamp01(s || 0), clamp01(l || 0)).hex().toUpperCase();
 }
-
-function luminance01(hex) {
-  // chroma luminance is already relative-ish but we’ll use WCAG style via RGB conversion
-  const [r, g, b] = chroma(hex).rgb();
-  const srgb = [r, g, b].map((v) => {
-    const x = v / 255;
-    return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
-  });
-  return 0.2126 * srgb[0] + 0.7152 * srgb[1] + 0.0722 * srgb[2];
+function setTone(hex, { sMul = 1, lMul = 1, lAdd = 0, sAdd = 0 } = {}) {
+  const c = chroma(hex);
+  let [h, s, l] = c.hsl();
+  h = Number.isFinite(h) ? h : 0;
+  s = clamp01((s || 0) * sMul + sAdd);
+  l = clamp01((l || 0) * lMul + lAdd);
+  return chroma.hsl(h, s, l).hex().toUpperCase();
 }
-
-function contrastRatio(L1, L2) {
-  const a = Math.max(L1, L2);
-  const b = Math.min(L1, L2);
-  return (a + 0.05) / (b + 0.05);
-}
-
 function uniqHexes(arr) {
   const seen = new Set();
   const out = [];
@@ -115,24 +115,8 @@ function uniqHexes(arr) {
   return out;
 }
 
-function rotateHue(hex, deg) {
-  const c = chroma(hex);
-  const [h, s, l] = c.hsl();
-  const hh = ((Number.isFinite(h) ? h : 0) + deg + 360) % 360;
-  return chroma.hsl(hh, clamp01(s || 0), clamp01(l || 0)).hex().toUpperCase();
-}
-
-function setTone(hex, { sMul = 1, lAdd = 0 } = {}) {
-  const c = chroma(hex);
-  let [h, s, l] = c.hsl();
-  h = Number.isFinite(h) ? h : 0;
-  s = clamp01((s || 0) * sMul);
-  l = clamp01((l || 0) + lAdd);
-  return chroma.hsl(h, s, l).hex().toUpperCase();
-}
-
 /* =========================
-   V2 CLASSIFICATION
+   COLOR FAMILY (V2 TAXONOMY)
    ========================= */
 function classifyColorV2(dominantHex) {
   const c = chroma(dominantHex);
@@ -141,6 +125,7 @@ function classifyColorV2(dominantHex) {
   const s = clamp01(sRaw || 0);
   const l = clamp01(lRaw || 0);
 
+  // broad family
   let family = "neutral";
   if (s < 0.12) family = "neutral";
   else if (l > 0.78 && s < 0.35) family = "pastel";
@@ -151,6 +136,7 @@ function classifyColorV2(dominantHex) {
     else family = "neutral";
   }
 
+  // hue lane
   let lane = "other";
   if (h >= 345 || h < 15) lane = "red";
   else if (h >= 15 && h < 45) lane = "orange";
@@ -169,7 +155,7 @@ function classifyColorV2(dominantHex) {
 }
 
 /* =========================
-   V2 PALETTE ENGINE (already working)
+   V2 PALETTE ENGINE
    ========================= */
 function generatePalettesV2(dominantHex) {
   const base = safeHex(dominantHex);
@@ -182,6 +168,7 @@ function generatePalettesV2(dominantHex) {
   const comp = rotateHue(base, 180);
   const split1 = rotateHue(base, 150);
   const split2 = rotateHue(base, 210);
+
   const contrast = uniqHexes([
     setTone(comp, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
     setTone(split1, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
@@ -225,6 +212,7 @@ function generatePalettesV2(dominantHex) {
   const tri2 = rotateHue(base, 240);
   const tet1 = rotateHue(base, 90);
   const tet2 = rotateHue(base, 270);
+
   const explore = uniqHexes([
     setTone(tri1, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
     setTone(tri2, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
@@ -243,165 +231,230 @@ function generatePalettesV2(dominantHex) {
       l: Number(meta.l.toFixed(3)),
     },
     palettes: {
-      balance: { hexes: balance, reason: "Neutral anchors for stability + broad compatibility." },
-      contrast: { hexes: contrast, reason: "Complementary + split-complementary accents, tonally normalized." },
-      cohesion: { hexes: cohesion, reason: "Same-hue tonal ladder (light → deep) for cohesive systems." },
-      emphasis: { hexes: emphasis, reason: meta.vivid ? "Vivid base: controlled accents." : "Muted base: boosted accents." },
-      natural: { hexes: natural, reason: "Earth blends via LAB mixing + muted toning." },
-      explore: { hexes: explore, reason: "Triad + tetrad harmonies with tonal normalization." },
+      balance: {
+        hexes: balance,
+        reason: "Neutral anchors (low-saturation + high-compatibility) for stability and broad applicability.",
+      },
+      contrast: {
+        hexes: contrast,
+        reason: "Complementary + split-complementary accents (H+180, H±150/210) tonally normalized for usability.",
+      },
+      cohesion: {
+        hexes: cohesion,
+        reason: "Same-hue tonal ladder (light → deep) for cohesive systems across fashion and interiors.",
+      },
+      emphasis: {
+        hexes: emphasis,
+        reason: meta.vivid
+          ? "Vivid base detected: emphasis uses controlled accents (muted saturation + safe luminance shifts)."
+          : "Muted base detected: emphasis boosts saturation + introduces a high-energy hue shift.",
+      },
+      natural: {
+        hexes: natural,
+        reason: "Earth blends (olive/tan/clay/copper) via LAB mixing + muted toning for grounded styling.",
+      },
+      explore: {
+        hexes: explore,
+        reason: "Exploratory harmonies (triad + tetrad) with tonal normalization for broader valid directions.",
+      },
     },
   };
 }
 
-/* =========================
-   V3 SCORING OVERLAY (DETERMINISTIC)
-   ========================= */
-function scorePaletteV3(modeName, hexes, dominantHex) {
-  // role mapping (deterministic)
-  const base = hexes[0];
-  const secondary = hexes.slice(1, 3);
-  const accent = hexes.slice(-2);
+/* =========================================================
+   V3 — Structural Color Intelligence (SCI) Scoring Layer
+   Scores each V2 mode with Harmony / Applicability / Versatility / Boldness
+   ========================================================= */
+function clamp(x, a, b) {
+  return Math.max(a, Math.min(b, x));
+}
+function hexToRgb01(hex) {
+  const c = chroma(hex).rgb();
+  return { r: c[0] / 255, g: c[1] / 255, b: c[2] / 255 };
+}
+function relLuminance(hex) {
+  const { r, g, b } = hexToRgb01(hex);
+  const f = (u) => (u <= 0.03928 ? u / 12.92 : Math.pow((u + 0.055) / 1.055, 2.4));
+  const R = f(r),
+    G = f(g),
+    B = f(b);
+  return 0.2126 * R + 0.7152 * G + 0.0722 * B;
+}
+function contrastRatio(hexA, hexB) {
+  const L1 = relLuminance(hexA);
+  const L2 = relLuminance(hexB);
+  const lighter = Math.max(L1, L2);
+  const darker = Math.min(L1, L2);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+function hueDeg(hex) {
+  const [h] = chroma(hex).hsl();
+  return Number.isFinite(h) ? h : 0;
+}
+function sat(hex) {
+  const [, s] = chroma(hex).hsl();
+  return clamp01(s || 0);
+}
+function light(hex) {
+  const [, , l] = chroma(hex).hsl();
+  return clamp01(l || 0);
+}
+function hueDistance(a, b) {
+  const d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
+}
+function closenessToAngle(hDist, target, tolerance) {
+  const delta = Math.abs(hDist - target);
+  return clamp01(1 - delta / tolerance);
+}
+function avg(arr) {
+  if (!arr.length) return 0;
+  return arr.reduce((s, x) => s + x, 0) / arr.length;
+}
 
-  const baseHSL = chroma(base).hsl();
-  const baseHue = Number.isFinite(baseHSL[0]) ? baseHSL[0] : 0;
+function scoreModeV3({ modeKey, dominantHex, hexes }) {
+  const base = chroma(dominantHex).hex().toUpperCase();
+  const palette = hexes.map((h) => chroma(h).hex().toUpperCase());
 
-  const all = [base, ...secondary, ...accent].filter(Boolean);
-  const hsls = all.map((h) => chroma(h).hsl());
-  const hues = hsls.map((x) => (Number.isFinite(x[0]) ? x[0] : 0));
-  const sats = hsls.map((x) => clamp01(x[1] || 0));
-  const ls = hsls.map((x) => clamp01(x[2] || 0));
+  const baseHue = hueDeg(base);
 
-  // ---- Harmony components
-  const bestFits = hues.slice(1).map((h) => {
-    const d = angleDist(baseHue, h);
-    const analogFit = clamp01(1 - d / 30);
-    const complementFit = clamp01(1 - Math.abs(180 - d) / 30);
-    const splitFit = clamp01(1 - Math.min(Math.abs(150 - d), Math.abs(210 - d)) / 30);
-    const triadFit = clamp01(1 - Math.abs(120 - d) / 30);
-    return Math.max(analogFit, complementFit, splitFit, triadFit);
-  });
-  const hueRelationshipFit = bestFits.length ? bestFits.reduce((a, b) => a + b, 0) / bestFits.length : 0.5;
+  const contrasts = palette.map((h) => contrastRatio(base, h)); // 1..21
+  const hueDists = palette.map((h) => hueDistance(baseHue, hueDeg(h))); // 0..180
+  const sats = palette.map((h) => sat(h));
+  const lights = palette.map((h) => light(h));
 
-  const rangeL = Math.max(...ls) - Math.min(...ls);
-  const toneCohesion = clamp01(1 - rangeL / 0.75);
+  const avgContrast = avg(contrasts);
+  const maxContrast = Math.max(...contrasts, 0);
+  const avgHueDist = avg(hueDists);
+  const satMean = avg(sats);
+  const satVar = avg(sats.map((s) => Math.abs(s - satMean)));
+  const lightMean = avg(lights);
+  const lightVar = avg(lights.map((l) => Math.abs(l - lightMean)));
 
-  const vividCount = sats.filter((s) => s >= 0.7).length;
-  const saturationBalance = vividCount <= 1 ? 1 : vividCount === 2 ? 0.75 : 0.5;
+  const neutralCount = palette.filter((h) => sat(h) < 0.12).length;
+  const safeLightCount = palette.filter((h) => {
+    const l = light(h);
+    return l >= 0.18 && l <= 0.86;
+  }).length;
 
-  const warmCount = hues.filter((h) => h < 75 || h >= 345).length;
-  const coolCount = hues.filter((h) => h >= 180 && h <= 300).length;
-  const temperatureCoherence =
-    (warmCount >= coolCount && coolCount <= 1) || (coolCount >= warmCount && warmCount <= 1) ? 1 : 0.7;
+  const compCloseness = avg(hueDists.map((d) => closenessToAngle(d, 180, 35)));
+  const splitCloseness = avg(
+    hueDists.map((d) => Math.max(closenessToAngle(d, 150, 25), closenessToAngle(d, 210, 25)))
+  );
+  const analogCloseness = avg(hueDists.map((d) => closenessToAngle(d, 30, 25)));
+  const triadCloseness = avg(hueDists.map((d) => closenessToAngle(d, 120, 30)));
 
-  const harmony01 =
-    0.45 * hueRelationshipFit + 0.25 * toneCohesion + 0.2 * saturationBalance + 0.1 * temperatureCoherence;
-  const harmony = Math.round(clamp01(harmony01) * 100);
+  const contrastBandScore = (() => {
+    const ideal = 4.5;
+    const delta = Math.abs(avgContrast - ideal);
+    return clamp(100 - delta * 18, 0, 100);
+  })();
+  const satStabilityScore = clamp(100 - satVar * 180, 0, 100);
+  const lightStabilityScore = clamp(100 - lightVar * 160, 0, 100);
 
-  // ---- Applicability components
-  const baseLum = luminance01(base);
-  const accentLums = accent.map(luminance01);
-  const bestRatio = accentLums.length ? Math.max(...accentLums.map((L) => contrastRatio(baseLum, L))) : 1.0;
-  const contrastSafety = clamp01((bestRatio - 1) / 4); // ratio ~5 => 1.0
+  let relBonus = 0;
+  if (modeKey === "contrast") relBonus = 25 * clamp01(0.6 * compCloseness + 0.4 * splitCloseness);
+  if (modeKey === "cohesion") relBonus = 25 * clamp01(analogCloseness + (1 - avgHueDist / 180));
+  if (modeKey === "explore")
+    relBonus = 25 * clamp01(0.5 * triadCloseness + 0.25 * compCloseness + 0.25 * splitCloseness);
+  if (modeKey === "balance") relBonus = 25 * clamp01(neutralCount / Math.max(1, palette.length));
+  if (modeKey === "natural")
+    relBonus =
+      25 * clamp01((neutralCount * 0.6 + safeLightCount * 0.4) / Math.max(1, palette.length));
+  if (modeKey === "emphasis") relBonus = 25 * clamp01(maxContrast / 10);
 
-  const neutralExists = sats.some((s) => s < 0.2);
-  const anchorPresence = neutralExists ? 1 : 0.65;
+  const harmony = clamp(
+    0.45 * contrastBandScore + 0.25 * satStabilityScore + 0.2 * lightStabilityScore + relBonus,
+    0,
+    100
+  );
 
-  const chromaModeration = vividCount <= 1 ? 1 : vividCount === 2 ? 0.75 : 0.55;
+  const neutralScore = clamp((neutralCount / Math.max(1, palette.length)) * 100, 0, 100);
+  const safeLightScore = clamp((safeLightCount / Math.max(1, palette.length)) * 100, 0, 100);
 
-  let conflictPenalty = 1.0;
-  // conflict: two vivid accents far apart
-  const vividAccentHues = accent
-    .map((h) => chroma(h).hsl())
-    .filter((x) => clamp01(x[1] || 0) >= 0.7)
-    .map((x) => (Number.isFinite(x[0]) ? x[0] : 0));
-  if (vividAccentHues.length >= 2) {
-    const d = angleDist(vividAccentHues[0], vividAccentHues[1]);
-    conflictPenalty = d > 90 ? 0.55 : 0.75;
-  }
-
-  const applicability01 =
-    0.4 * contrastSafety + 0.25 * anchorPresence + 0.2 * chromaModeration + 0.15 * conflictPenalty;
-  const applicability = Math.round(clamp01(applicability01) * 100);
-
-  // ---- Versatility components
-  const neutralCount = sats.filter((s) => s < 0.2).length;
-  const neutralSupport = neutralCount === 0 ? 0.55 : neutralCount === 1 ? 0.8 : 1.0;
-
-  let toneRangeUsability = 0.75;
-  if (rangeL < 0.2) toneRangeUsability = 0.65;
-  else if (rangeL <= 0.55) toneRangeUsability = 1.0;
-  else toneRangeUsability = 0.75;
-
-  const overSpecificityPenalty = vividCount <= 1 ? 1.0 : vividCount === 2 ? 0.8 : 0.6;
-
-  const versatility01 = 0.45 * neutralSupport + 0.35 * toneRangeUsability + 0.2 * overSpecificityPenalty;
-  const versatility = Math.round(clamp01(versatility01) * 100);
-
-  // ---- Boldness
-  const avgSat = sats.reduce((a, b) => a + b, 0) / Math.max(1, sats.length);
-  const hueSpread = hues.length > 1 ? hues.slice(1).map((h) => angleDist(baseHue, h) / 180).reduce((a, b) => a + b, 0) / (hues.length - 1) : 0.2;
-  const contrastEnergy = clamp01((bestRatio - 1) / 6);
-  const boldness01 = clamp01(0.5 * avgSat + 0.3 * hueSpread + 0.2 * contrastEnergy);
-  const boldness = Math.round(boldness01 * 100);
-
-  // ---- Composite (fixed deterministic weights)
-  const composite01 = clamp01(0.35 * (harmony / 100) + 0.35 * (applicability / 100) + 0.2 * (versatility / 100) + 0.1 * (boldness / 100));
-  const composite = Math.round(composite01 * 100);
-
-  // Explanation (universal)
-  const rules = [];
-  if (neutralExists) rules.push("ANCHOR_PRESENT");
-  if (vividCount <= 1) rules.push("LOW_VIVID_COUNT");
-  if (bestRatio >= 3) rules.push("SAFE_CONTRAST");
-  if (rangeL <= 0.55) rules.push("USABLE_TONE_RANGE");
-
-  const user = (() => {
-    if (composite >= 85) return "High-confidence direction with stable structure and strong real-world applicability.";
-    if (composite >= 70) return "Solid direction with good balance between harmony and practical usability.";
-    if (composite >= 55) return "Viable but more niche—use with intention and controlled accents.";
-    return "Experimental direction—best for creative exploration rather than broad usability.";
+  const satPenalty = (() => {
+    const highSatCount = palette.filter((h) => sat(h) > 0.75).length;
+    const ratio = highSatCount / Math.max(1, palette.length);
+    const multiplier = modeKey === "emphasis" || modeKey === "explore" ? 0.55 : 1.0;
+    return ratio * 45 * multiplier;
   })();
 
-  const pro = `hueFit=${hueRelationshipFit.toFixed(2)} rangeL=${rangeL.toFixed(2)} vividCount=${vividCount} contrastRatio=${bestRatio.toFixed(2)} neutralCount=${neutralCount}`;
+  const applicability = clamp(0.45 * safeLightScore + 0.35 * neutralScore + 0.2 * harmony - satPenalty, 0, 100);
+
+  const hueSpreadScore = clamp((avgHueDist / 180) * 100, 0, 100);
+  const usableContrastScore = clamp((avgContrast / 7) * 100, 0, 100);
+  const notChaoticScore = clamp(100 - (satVar * 160 + lightVar * 120), 0, 100);
+
+  const versatility = clamp(
+    0.3 * neutralScore + 0.25 * usableContrastScore + 0.25 * notChaoticScore + 0.2 * hueSpreadScore,
+    0,
+    100
+  );
+
+  const boldness = clamp(
+    0.45 * clamp((maxContrast / 10) * 100, 0, 100) +
+      0.35 * clamp(satMean * 100, 0, 100) +
+      0.2 * clamp((avgHueDist / 180) * 100, 0, 100),
+    0,
+    100
+  );
+
+  const weights = { harmony: 0.34, applicability: 0.28, versatility: 0.24, boldness: 0.14 };
+  const total =
+    harmony * weights.harmony +
+    applicability * weights.applicability +
+    versatility * weights.versatility +
+    boldness * weights.boldness;
 
   return {
-    mode: modeName,
-    scores: { harmony, applicability, versatility, boldness, composite },
+    mode: modeKey,
+    scores: {
+      harmony: Math.round(harmony),
+      applicability: Math.round(applicability),
+      versatility: Math.round(versatility),
+      boldness: Math.round(boldness),
+    },
+    weightedScore: Number(total.toFixed(2)),
     explanation: {
-      user,
-      pro,
-      weights: { harmony: 0.35, applicability: 0.35, versatility: 0.2, boldness: 0.1 },
-      rules,
+      harmony: `Contrast band=${avgContrast.toFixed(2)} (ideal ~4.5), satVar=${satVar.toFixed(
+        2
+      )}, lightVar=${lightVar.toFixed(2)}.`,
+      applicability: `Neutral anchors=${neutralCount}/${palette.length}, safeLight=${safeLightCount}/${palette.length}, satPenalty=${satPenalty.toFixed(
+        1
+      )}.`,
+      versatility: `HueSpread(avgDist)=${avgHueDist.toFixed(
+        1
+      )}°, avgContrast=${avgContrast.toFixed(2)}, stability=${notChaoticScore.toFixed(0)}.`,
+      boldness: `MaxContrast=${maxContrast.toFixed(2)}, satMean=${satMean.toFixed(
+        2
+      )}, avgHueDist=${avgHueDist.toFixed(1)}°.`,
+    },
+    debug: {
+      avgContrast: Number(avgContrast.toFixed(2)),
+      maxContrast: Number(maxContrast.toFixed(2)),
+      neutralCount,
+      safeLightCount,
+      satMean: Number(satMean.toFixed(2)),
+      satVar: Number(satVar.toFixed(2)),
+      lightMean: Number(lightMean.toFixed(2)),
+      lightVar: Number(lightVar.toFixed(2)),
+      avgHueDist: Number(avgHueDist.toFixed(1)),
     },
   };
 }
 
-function buildV3FromV2(v2) {
-  const modeScores = {};
-  const explanations = {};
-  const rankings = [];
+function scorePalettesV3({ dominantHex, palettes }) {
+  const modeKeys = ["balance", "contrast", "cohesion", "emphasis", "natural", "explore"];
 
-  for (const mode of ["balance", "contrast", "cohesion", "emphasis", "natural", "explore"]) {
-    const hexes = v2.palettes?.[mode]?.hexes || [];
-    const scored = scorePaletteV3(mode, hexes, v2.dominantHex);
-    modeScores[mode] = scored.scores;
-    explanations[mode] = scored.explanation;
-    rankings.push({ mode, composite: scored.scores.composite });
-  }
-
-  rankings.sort((a, b) => b.composite - a.composite);
+  const scored = modeKeys
+    .filter((k) => palettes?.[k]?.hexes?.length)
+    .map((k) => scoreModeV3({ modeKey: k, dominantHex, hexes: palettes[k].hexes }))
+    .sort((a, b) => b.weightedScore - a.weightedScore);
 
   return {
-    context: {
-      dominantHex: v2.dominantHex,
-      ...v2.classification,
-      paletteCountPerMode: Object.fromEntries(
-        Object.entries(v2.palettes).map(([k, v]) => [k, (v.hexes || []).length])
-      ),
-    },
-    modeScores,
-    rankings,
-    explanations,
+    bestMode: scored[0]?.mode || null,
+    rankedModes: scored,
+    weightsUsed: { harmony: 0.34, applicability: 0.28, versatility: 0.24, boldness: 0.14 },
   };
 }
 
@@ -409,7 +462,7 @@ function buildV3FromV2(v2) {
    IMAGE OPS: Cloudinary + Pixelcut
    ========================= */
 async function uploadToCloudinary(file) {
-  const dataUri = `data:${file.mimetype};base64,${Buffer.from(file.buffer).toString("base64")}`;
+  const dataUri = `data:${file.mimetype};base64,${file.buffer.toString("base64")}`;
   const result = await cloudinary.uploader.upload(dataUri, {
     folder: "cie",
     resource_type: "image",
@@ -421,7 +474,8 @@ async function uploadToCloudinary(file) {
 async function callPixelcutRemoveBg(imageUrl) {
   const apiKey = process.env.PIXELCUT_API_KEY;
   const endpoint = process.env.PIXELCUT_ENDPOINT;
-  if (!apiKey || !endpoint) throw new Error("Missing Pixelcut env vars");
+
+  if (!apiKey || !endpoint) throw new Error("Missing Pixelcut env vars (PIXELCUT_API_KEY / PIXELCUT_ENDPOINT)");
 
   const resp = await fetch(endpoint, {
     method: "POST",
@@ -463,22 +517,38 @@ async function analyzeGhostColors(ghostUrl) {
 /* =========================
    ROUTES
    ========================= */
-app.post("/api/images/transform", upload.any(), async (req, res) => {
+
+// Upload → ghost → V2 palettes → V3 scoring
+app.post("/api/images/transform", upload.single("image"), async (req, res) => {
+  const t0 = Date.now();
   try {
-    const file = req.files?.[0];
-    if (!file) return res.status(400).json({ success: false, error: "No image file received" });
+    if (!req.file) return res.status(400).json({ success: false, step: "multer", error: "No image uploaded" });
 
-    const publicUrl = await uploadToCloudinary(file);
+    const tUploadStart = Date.now();
+    const publicUrl = await uploadToCloudinary(req.file);
+    const tUpload = Date.now() - tUploadStart;
+
+    const tPixelcutStart = Date.now();
     const ghostUrl = await callPixelcutRemoveBg(publicUrl);
-    const analysis = await analyzeGhostColors(ghostUrl);
+    const tPixelcut = Date.now() - tPixelcutStart;
 
+    const tAnalyzeStart = Date.now();
+    const analysis = await analyzeGhostColors(ghostUrl);
+    const tAnalyze = Date.now() - tAnalyzeStart;
+
+    const tPalStart = Date.now();
     const v2 = generatePalettesV2(analysis.dominantHex);
-    const v3 = buildV3FromV2(v2);
+    const tPal = Date.now() - tPalStart;
+
+    const tScoreStart = Date.now();
+    const v3 = scorePalettesV3({ dominantHex: v2.dominantHex, palettes: v2.palettes });
+    const tScore = Date.now() - tScoreStart;
+
+    const totalMs = Date.now() - t0;
 
     return res.json({
       success: true,
       engine: "V2",
-      v3Engine: "V3.0",
       ghostImageUrl: ghostUrl,
       dominantHex: v2.dominantHex,
       garmentColorFamily: v2.classification.family,
@@ -486,45 +556,94 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       classification: v2.classification,
       topColors: analysis.topColors,
       palettes: v2.palettes,
-      v3,
-      summary: "V2 palettes generated. V3 scoring ranks each mode with Harmony/Applicability/Versatility/Boldness.",
+      v3: {
+        bestMode: v3.bestMode,
+        rankedModes: v3.rankedModes,
+        weightsUsed: v3.weightsUsed,
+      },
+      summary:
+        "V2 palettes generated. V3 scores rank each mode with Harmony/Applicability/Versatility/Boldness for a universal intelligence layer.",
+      timing: {
+        upload_cloudinary_ms: tUpload,
+        pixelcut_ms: tPixelcut,
+        analyze_cloudinary_colors_ms: tAnalyze,
+        palette_engine_ms: tPal,
+        v3_scoring_ms: tScore,
+        total_ms: totalMs,
+      },
     });
   } catch (err) {
-    return res.status(500).json({ success: false, error: err?.message || "Unknown error" });
+    const msg = err?.message || String(err);
+    console.error("transform error:", msg);
+
+    // Step hints for the frontend (optional but useful)
+    let step = "unknown";
+    if (msg.toLowerCase().includes("pixelcut")) step = "pixelcut";
+    else if (msg.toLowerCase().includes("cloudinary upload")) step = "cloudinary_upload";
+    else if (msg.toLowerCase().includes("color analysis")) step = "cloudinary_colors";
+    else if (msg.toLowerCase().includes("dominanthex")) step = "palette_engine";
+
+    return res.status(500).json({ success: false, step, error: msg });
   }
 });
 
+// Recommendations — return one mode palette + that mode's V3 score object
 app.post("/api/recommendations", async (req, res) => {
   try {
-    const { ghostImageUrl, mode } = req.body || {};
+    const { ghostImageUrl, mode, itemType } = req.body || {};
     if (!ghostImageUrl) return res.status(400).json({ success: false, error: "ghostImageUrl is required" });
 
     const analysis = await analyzeGhostColors(ghostImageUrl);
     const v2 = generatePalettesV2(analysis.dominantHex);
-    const v3 = buildV3FromV2(v2);
 
-    const m = String(mode || "balance").toLowerCase().trim();
-    const key = ["balance","contrast","cohesion","emphasis","natural","explore"].includes(m) ? m : "balance";
+    const m = String(mode || "").toLowerCase().trim();
+    const map = {
+      balance: "balance",
+      contrast: "contrast",
+      cohesion: "cohesion",
+      emphasis: "emphasis",
+      natural: "natural",
+      explore: "explore",
+      neutrals: "balance",
+      earth: "natural",
+      earthtones: "natural",
+      earth_tones: "natural",
+      bold: "emphasis",
+    };
+    const key = map[m] || "balance";
+    const pack = v2.palettes[key];
+
+    const v3 = scorePalettesV3({ dominantHex: v2.dominantHex, palettes: v2.palettes });
+    const scoreForMode = v3.rankedModes.find((x) => x.mode === key) || null;
 
     return res.json({
       success: true,
       engine: "V2",
-      v3Engine: "V3.0",
       mode: key,
+      itemType: itemType || null,
       dominantHex: v2.dominantHex,
-      classification: v2.classification,
+      garmentColorFamily: v2.classification.family,
+      colorLane: v2.classification.lane,
       recommendation: {
-        paletteHexes: v2.palettes[key].hexes,
-        reason: v2.palettes[key].reason,
+        paletteHexes: pack.hexes,
+        reason: pack.reason,
       },
       v3: {
-        scores: v3.modeScores[key],
-        explanation: v3.explanations[key],
+        bestMode: v3.bestMode,
+        scoreForMode,
+        weightsUsed: v3.weightsUsed,
       },
     });
   } catch (err) {
-    return res.status(500).json({ success: false, error: err?.message || "Unknown error" });
+    const msg = err?.message || String(err);
+    console.error("recommendations error:", msg);
+    return res.status(500).json({ success: false, error: msg });
   }
 });
 
-app.listen(PORT, () => console.log(`✅ CIE Core backend running on port ${PORT}`));
+/* =========================
+   START
+   ========================= */
+app.listen(PORT, () => {
+  console.log(`✅ CIE Core backend running on port ${PORT}`);
+});
