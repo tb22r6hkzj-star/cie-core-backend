@@ -1,7 +1,7 @@
 // src/server.js
-// FULL REPLACEMENT — V2 COLOR ENGINE + GHOST PIPELINE (multer-hardened)
+// FULL REPLACEMENT — V2 COLOR ENGINE + GHOST PIPELINE + OUTFIT SCORING (multer-hardened)
 //
-// ✅ POST /api/images/transform  (multipart -> Cloudinary -> Pixelcut -> Cloudinary colors -> V2 palettes)
+// ✅ POST /api/images/transform  (multipart -> Cloudinary -> Pixelcut -> Cloudinary colors -> V2 palettes + outfit scoring)
 // ✅ POST /api/recommendations   (ghostImageUrl -> Cloudinary colors -> V2 palettes)
 // ✅ GET /, GET /health
 // ✅ Dev-safe CORS
@@ -74,10 +74,18 @@ app.get("/", (_req, res) => res.json({ ok: true, service: "cie-core-backend" }))
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 /* =========================
-   HELPERS
+   GENERIC HELPERS
    ========================= */
 function clamp01(x) {
   return Math.max(0, Math.min(1, x));
+}
+
+function clamp100(x) {
+  return Math.max(0, Math.min(100, x));
+}
+
+function round2(x) {
+  return Math.round(Number(x || 0) * 100) / 100;
 }
 
 function safeHex(hex) {
@@ -107,7 +115,7 @@ function setTone(hex, { sMul = 1, lMul = 1, lAdd = 0, sAdd = 0 } = {}) {
 function uniqHexes(arr) {
   const seen = new Set();
   const out = [];
-  for (const h of arr) {
+  for (const h of arr || []) {
     const hx = safeHex(h);
     if (!hx) continue;
     if (seen.has(hx)) continue;
@@ -115,6 +123,68 @@ function uniqHexes(arr) {
     out.push(hx);
   }
   return out;
+}
+
+function avg(nums) {
+  const clean = (nums || []).filter((n) => Number.isFinite(n));
+  if (!clean.length) return 0;
+  return clean.reduce((a, b) => a + b, 0) / clean.length;
+}
+
+function titleCase(s) {
+  const str = String(s || "").trim().toLowerCase();
+  return str ? str.charAt(0).toUpperCase() + str.slice(1) : "";
+}
+
+function getHue(hex) {
+  try {
+    const [h] = chroma(hex).hsl();
+    return Number.isFinite(h) ? h : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function getSat(hex) {
+  try {
+    const [, s] = chroma(hex).hsl();
+    return clamp01(s || 0);
+  } catch {
+    return 0;
+  }
+}
+
+function getLight(hex) {
+  try {
+    const [, , l] = chroma(hex).hsl();
+    return clamp01(l || 0);
+  } catch {
+    return 0;
+  }
+}
+
+function hueDistance(a, b) {
+  const ha = getHue(a);
+  const hb = getHue(b);
+  const d = Math.abs(ha - hb);
+  return Math.min(d, 360 - d);
+}
+
+function colorDistanceLab(a, b) {
+  try {
+    return chroma.distance(a, b, "lab");
+  } catch {
+    return 0;
+  }
+}
+
+function topNColorsByPct(topColors, n = 5) {
+  return (topColors || [])
+    .slice()
+    .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0))
+    .slice(0, n)
+    .map((x) => x.hex)
+    .filter(Boolean);
 }
 
 /* =========================
@@ -154,7 +224,7 @@ function classifyColorV2(dominantHex) {
 }
 
 /* =========================
-   V2 PALETTE ENGINE (mode-separated + tonal ladder)
+   V2 PALETTE ENGINE
    ========================= */
 function generatePalettesV2(dominantHex) {
   const base = safeHex(dominantHex);
@@ -235,11 +305,265 @@ function generatePalettesV2(dominantHex) {
       cohesion: { hexes: cohesion, reason: "Same-hue tonal ladder (light → deep) for cohesive systems." },
       emphasis: {
         hexes: emphasis,
-        reason: meta.vivid ? "Vivid base: controlled accents." : "Muted base: boosted saturation + energetic shift.",
+        reason: meta.vivid
+          ? "Vivid base: controlled accents."
+          : "Muted base: boosted saturation + energetic shift.",
       },
       natural: { hexes: natural, reason: "Earth blends via LAB mixing + muted toning." },
       explore: { hexes: explore, reason: "Triad + tetrad harmonies with tonal normalization." },
     },
+  };
+}
+
+/* =========================
+   OUTFIT SCORING ENGINE
+   ========================= */
+const MODE_RULES = {
+  Balance: { harmony: 0.34, applicability: 0.28, versatility: 0.24, boldness: 0.14 },
+  Contrast: { harmony: 0.2, applicability: 0.2, versatility: 0.2, boldness: 0.4 },
+  Cohesion: { harmony: 0.44, applicability: 0.24, versatility: 0.22, boldness: 0.1 },
+  Natural: { harmony: 0.4, applicability: 0.3, versatility: 0.2, boldness: 0.1 },
+  Explore: { harmony: 0.25, applicability: 0.25, versatility: 0.25, boldness: 0.25 },
+};
+
+function normalizeDetectedColors(topColors, dominantHex) {
+  const pool = uniqHexes([dominantHex, ...topNColorsByPct(topColors, 6)]);
+  return pool.slice(0, 6).map((hex, idx) => {
+    const pct =
+      idx === 0
+        ? Math.max(0.3, Number(topColors?.find((x) => x.hex === hex)?.pct || 0) || 0.3)
+        : Number(topColors?.find((x) => x.hex === hex)?.pct || 0);
+
+    const classification = classifyColorV2(hex);
+    return {
+      hex,
+      pct: round2(pct),
+      hue: round2(getHue(hex)),
+      sat: round2(getSat(hex)),
+      light: round2(getLight(hex)),
+      family: classification.family,
+      lane: classification.lane,
+      vivid: classification.vivid,
+    };
+  });
+}
+
+function assignColorRoles(normalizedColors) {
+  const colors = [...(normalizedColors || [])];
+  if (!colors.length) return [];
+
+  const anchor = colors[0];
+
+  const supportCandidates = colors
+    .filter((c) => c.hex !== anchor.hex)
+    .map((c) => {
+      const hueGap = hueDistance(anchor.hex, c.hex);
+      const dist = colorDistanceLab(anchor.hex, c.hex);
+      const vividBoost = c.vivid ? 4 : 0;
+      const score = clamp100(65 - Math.abs(hueGap - 35) * 0.45 - Math.abs(dist - 35) * 0.35 + vividBoost + c.pct * 18);
+      return { ...c, _roleScore: score };
+    })
+    .sort((a, b) => b._roleScore - a._roleScore);
+
+  const support = supportCandidates[0] || anchor;
+
+  const accentCandidates = colors
+    .filter((c) => c.hex !== anchor.hex && c.hex !== support.hex)
+    .map((c) => {
+      const hueGap = hueDistance(anchor.hex, c.hex);
+      const sat = getSat(c.hex);
+      const lightGap = Math.abs(getLight(anchor.hex) - getLight(c.hex));
+      const score = clamp100(30 + hueGap * 0.28 + sat * 30 + lightGap * 18);
+      return { ...c, _roleScore: score };
+    })
+    .sort((a, b) => b._roleScore - a._roleScore);
+
+  const accent = accentCandidates[0] || support;
+
+  const stabilizerCandidates = colors
+    .filter((c) => ![anchor.hex, support.hex, accent.hex].includes(c.hex))
+    .map((c) => {
+      const sat = getSat(c.hex);
+      const light = getLight(c.hex);
+      const neutralBoost = c.family === "neutral" ? 18 : 0;
+      const groundingBoost = light < 0.35 ? 12 : 0;
+      const score = clamp100(58 + neutralBoost + groundingBoost + (1 - sat) * 18);
+      return { ...c, _roleScore: score };
+    })
+    .sort((a, b) => b._roleScore - a._roleScore);
+
+  const stabilizer =
+    stabilizerCandidates[0] ||
+    colors.filter((c) => c.hex !== anchor.hex && c.hex !== support.hex).sort((a, b) => getSat(a.hex) - getSat(b.hex))[0] ||
+    anchor;
+
+  return [
+    { hex: anchor.hex, role: "anchor", family: titleCase(anchor.family), weight: 0.34 },
+    { hex: support.hex, role: "support", family: titleCase(support.family), weight: 0.28 },
+    { hex: accent.hex, role: "accent", family: titleCase(accent.family), weight: 0.14 },
+    { hex: stabilizer.hex, role: "stabilizer", family: titleCase(stabilizer.family), weight: 0.24 },
+  ];
+}
+
+function buildDetectedPalette(colorRoles, normalizedColors) {
+  const primary = [];
+  const secondary = [];
+  const accent = [];
+
+  const roleMap = Object.fromEntries((colorRoles || []).map((r) => [r.role, r.hex]));
+
+  if (roleMap.anchor) primary.push(roleMap.anchor);
+  if (roleMap.support) primary.push(roleMap.support);
+  if (roleMap.stabilizer) secondary.push(roleMap.stabilizer);
+
+  const extraSecondary = (normalizedColors || [])
+    .map((c) => c.hex)
+    .filter((hex) => !primary.includes(hex) && !secondary.includes(hex) && hex !== roleMap.accent)
+    .slice(0, 2);
+
+  secondary.push(...extraSecondary);
+  if (roleMap.accent) accent.push(roleMap.accent);
+
+  return {
+    primary: uniqHexes(primary),
+    secondary: uniqHexes(secondary),
+    accent: uniqHexes(accent),
+  };
+}
+
+function computeHarmonyScore(colors) {
+  if (!colors.length) return 70;
+  const distances = [];
+  for (let i = 0; i < colors.length; i += 1) {
+    for (let j = i + 1; j < colors.length; j += 1) {
+      distances.push(colorDistanceLab(colors[i], colors[j]));
+    }
+  }
+  if (!distances.length) return 84;
+  const avgDist = avg(distances);
+  return Math.round(clamp100(92 - Math.abs(avgDist - 42) * 0.75));
+}
+
+function computeApplicabilityScore(colors, colorRoles) {
+  if (!colors.length) return 70;
+  const neutralCount = colors.filter((hex) => classifyColorV2(hex).family === "neutral").length;
+  const earthCount = colors.filter((hex) => classifyColorV2(hex).family === "earth").length;
+  const stabilizerExists = (colorRoles || []).some((r) => r.role === "stabilizer");
+  const anchorExists = (colorRoles || []).some((r) => r.role === "anchor");
+  return Math.round(clamp100(62 + neutralCount * 8 + earthCount * 5 + (stabilizerExists ? 8 : 0) + (anchorExists ? 5 : 0)));
+}
+
+function computeVersatilityScore(colors) {
+  if (!colors.length) return 70;
+  const sats = colors.map((hex) => getSat(hex));
+  const lights = colors.map((hex) => getLight(hex));
+  const neutralCount = colors.filter((hex) => classifyColorV2(hex).family === "neutral").length;
+  const satAvg = avg(sats);
+  const lightSpread = Math.max(...lights) - Math.min(...lights);
+  return Math.round(clamp100(58 + neutralCount * 7 + (1 - satAvg) * 18 + Math.min(16, lightSpread * 28)));
+}
+
+function computeBoldnessScore(colors) {
+  if (!colors.length) return 60;
+  const distances = [];
+  const sats = colors.map((hex) => getSat(hex));
+  const lights = colors.map((hex) => getLight(hex));
+  for (let i = 0; i < colors.length; i += 1) {
+    for (let j = i + 1; j < colors.length; j += 1) {
+      distances.push(hueDistance(colors[i], colors[j]));
+    }
+  }
+  const hueAvg = avg(distances);
+  const satAvg = avg(sats);
+  const lightSpread = Math.max(...lights) - Math.min(...lights);
+  return Math.round(clamp100(22 + Math.min(38, hueAvg * 0.18) + satAvg * 24 + lightSpread * 20));
+}
+
+function computeScoreBreakdown(colorRoles, normalizedColors) {
+  const roleOrdered = (colorRoles || []).map((r) => r.hex);
+  const fallback = (normalizedColors || []).map((c) => c.hex);
+  const colors = uniqHexes([...roleOrdered, ...fallback]).slice(0, 5);
+
+  return {
+    harmony: computeHarmonyScore(colors),
+    applicability: computeApplicabilityScore(colors, colorRoles),
+    versatility: computeVersatilityScore(colors),
+    boldness: computeBoldnessScore(colors),
+  };
+}
+
+function computeModeScores(scoreBreakdown) {
+  return Object.entries(MODE_RULES)
+    .map(([mode, weights]) => ({
+      mode,
+      score: Math.round(
+        clamp100(
+          scoreBreakdown.harmony * weights.harmony +
+            scoreBreakdown.applicability * weights.applicability +
+            scoreBreakdown.versatility * weights.versatility +
+            scoreBreakdown.boldness * weights.boldness
+        )
+      ),
+    }))
+    .sort((a, b) => b.score - a.score);
+}
+
+function buildWhyThisWorks(colorRoles) {
+  const anchor = colorRoles.find((r) => r.role === "anchor")?.hex;
+  const support = colorRoles.find((r) => r.role === "support")?.hex;
+  const accent = colorRoles.find((r) => r.role === "accent")?.hex;
+  const stabilizer = colorRoles.find((r) => r.role === "stabilizer")?.hex;
+
+  return `The ${anchor || "anchor tone"} anchor establishes the visual center, while ${support || "the support tone"} extends the palette with compatible support. ${stabilizer || "The stabilizer tone"} adds grounding stability, and ${accent || "the accent tone"} introduces controlled emphasis without overwhelming the overall structure.`;
+}
+
+function buildSuggestedAdjustment(scoreBreakdown, colorRoles) {
+  const accent = colorRoles.find((r) => r.role === "accent")?.hex;
+  const stabilizer = colorRoles.find((r) => r.role === "stabilizer")?.hex;
+
+  if (scoreBreakdown.boldness > 84 && scoreBreakdown.harmony < 78) {
+    return "Reducing the saturation of the accent color slightly would improve harmony without losing visual energy.";
+  }
+  if (scoreBreakdown.versatility < 74) {
+    return "Introducing one more neutral or muted support tone would improve versatility and make the palette easier to extend.";
+  }
+  if (scoreBreakdown.applicability < 75) {
+    return "A softer support tone or cleaner neutral anchor would make this palette more usable across real-world combinations.";
+  }
+  if (accent && stabilizer) {
+    return `Keeping ${accent} as a controlled accent and leaning more on ${stabilizer} for grounding would increase cohesion and improve the overall outfit score.`;
+  }
+  return "A slightly darker grounding tone or a less saturated accent would improve cohesion and increase the overall outfit score.";
+}
+
+function buildOutfitAnalysis({ dominantHex, topColors }) {
+  const normalizedColors = normalizeDetectedColors(topColors, dominantHex);
+  const colorRoles = assignColorRoles(normalizedColors);
+  const scoreBreakdown = computeScoreBreakdown(colorRoles, normalizedColors);
+  const modeScores = computeModeScores(scoreBreakdown);
+  const best = modeScores[0] || { mode: "Balance", score: 0 };
+  const detectedPalette = buildDetectedPalette(colorRoles, normalizedColors);
+
+  const outfitScore = Math.round(
+    clamp100(
+      scoreBreakdown.harmony * 0.32 +
+        scoreBreakdown.applicability * 0.28 +
+        scoreBreakdown.versatility * 0.24 +
+        scoreBreakdown.boldness * 0.16
+    )
+  );
+
+  return {
+    analysis_type: "outfit_score",
+    outfit_score: outfitScore,
+    best_mode: best.mode,
+    best_mode_score: best.score,
+    score_breakdown: scoreBreakdown,
+    mode_scores: modeScores,
+    detected_palette: detectedPalette,
+    color_roles: colorRoles,
+    why_this_works: buildWhyThisWorks(colorRoles),
+    suggested_adjustment: buildSuggestedAdjustment(scoreBreakdown, colorRoles),
   };
 }
 
@@ -301,12 +625,9 @@ async function analyzeGhostColors(ghostUrl) {
 /* =========================
    ROUTES
    ========================= */
-
-// Multer-hardened upload → ghost → V2 palettes
 app.post("/api/images/transform", upload.any(), async (req, res) => {
   const t0 = Date.now();
   try {
-    // upload.any() puts files on req.files (array)
     const files = Array.isArray(req.files) ? req.files : [];
     const file = files[0];
 
@@ -332,6 +653,10 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
 
     const tPalStart = Date.now();
     const v2 = generatePalettesV2(analysis.dominantHex);
+    const outfitAnalysis = buildOutfitAnalysis({
+      dominantHex: analysis.dominantHex,
+      topColors: analysis.topColors,
+    });
     const tPal = Date.now() - tPalStart;
 
     const totalMs = Date.now() - t0;
@@ -346,6 +671,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       classification: v2.classification,
       topColors: analysis.topColors,
       palettes: v2.palettes,
+      outfit_analysis: outfitAnalysis,
       summary:
         "Primary color detected. Use Balance/Contrast/Cohesion/Emphasis/Natural/Explore for structured, mode-specific directions.",
       timing: {
@@ -362,7 +688,6 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
   }
 });
 
-// Recommendations — mode palette from ghostImageUrl
 app.post("/api/recommendations", async (req, res) => {
   try {
     const { ghostImageUrl, mode, itemType } = req.body || {};
@@ -406,10 +731,9 @@ app.post("/api/recommendations", async (req, res) => {
 });
 
 /* =========================
-   MULTER ERROR HANDLER (critical)
+   MULTER ERROR HANDLER
    ========================= */
 app.use((err, _req, res, _next) => {
-  // Multer errors (file too large, malformed multipart, etc.)
   if (err?.name === "MulterError") {
     return res.status(400).json({
       success: false,
@@ -417,7 +741,6 @@ app.use((err, _req, res, _next) => {
       error: err.message || "Upload failed: server could not parse your image.",
     });
   }
-  // Busboy/multipart parse errors sometimes come through here
   if (String(err?.message || "").toLowerCase().includes("multipart")) {
     return res.status(400).json({
       success: false,
