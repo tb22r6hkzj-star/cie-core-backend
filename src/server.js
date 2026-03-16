@@ -1,8 +1,9 @@
 // src/server.js
-// FULL REPLACEMENT — V2 COLOR ENGINE + GHOST PIPELINE + OUTFIT SCORING (multer-hardened)
+// FULL REPLACEMENT — V2 COLOR ENGINE + GHOST PIPELINE + OUTFIT SCORING + RETRIEVAL INTENT + SHOPPING ASSIST (multer-hardened)
 //
-// ✅ POST /api/images/transform  (multipart -> Cloudinary -> Pixelcut -> Cloudinary colors -> V2 palettes + outfit scoring)
-// ✅ POST /api/recommendations   (ghostImageUrl -> Cloudinary colors -> V2 palettes)
+// ✅ POST /api/images/transform   (multipart -> Cloudinary -> Pixelcut -> Cloudinary colors -> V2 palettes + outfit scoring)
+// ✅ POST /api/recommendations    (ghostImageUrl -> Cloudinary colors -> V2 palettes + optional retrieval intent + optional piece scoring + shopping assist)
+// ✅ POST /api/retrieval/preview  (outfitAnalysis/ghostImageUrl -> retrieval intent + ranked product scoring preview + shopping assist)
 // ✅ GET /, GET /health
 // ✅ Dev-safe CORS
 //
@@ -17,6 +18,7 @@
 // - CLOUDINARY_API_SECRET
 // - PIXELCUT_API_KEY
 // - PIXELCUT_ENDPOINT  (e.g. https://api.developer.pixelcut.ai/v1/remove-background)
+// - AMAZON_PARTNER_TAG (for affiliate search links, e.g. visioncore-20)
 
 import express from "express";
 import cors from "cors";
@@ -44,7 +46,6 @@ app.options("*", cors());
 
 /* =========================
    BODY PARSING
-   (safe: express.json ignores multipart requests)
    ========================= */
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
@@ -54,7 +55,7 @@ app.use(express.urlencoded({ extended: true }));
    ========================= */
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  limits: { fileSize: 10 * 1024 * 1024 },
 });
 
 /* =========================
@@ -136,6 +137,10 @@ function titleCase(s) {
   return str ? str.charAt(0).toUpperCase() + str.slice(1) : "";
 }
 
+function normalizeText(s) {
+  return String(s || "").trim().toLowerCase();
+}
+
 function getHue(hex) {
   try {
     const [h] = chroma(hex).hsl();
@@ -185,6 +190,86 @@ function topNColorsByPct(topColors, n = 5) {
     .slice(0, n)
     .map((x) => x.hex)
     .filter(Boolean);
+}
+
+function normalizeModeLabel(mode) {
+  const m = normalizeText(mode);
+  const map = {
+    balance: "Balance",
+    contrast: "Contrast",
+    cohesion: "Cohesion",
+    natural: "Natural",
+    explore: "Explore",
+    emphasis: "Explore",
+  };
+  return map[m] || "Balance";
+}
+
+function normalizeCategoryLabel(value, fallback = "piece") {
+  const text = normalizeText(value);
+  if (!text) return fallback;
+
+  const map = {
+    jackets: "jacket",
+    jacket: "jacket",
+    outerwear: "jacket",
+    coat: "jacket",
+    bomber: "jacket",
+    overshirt: "jacket",
+    shirts: "shirt",
+    shirt: "shirt",
+    tee: "shirt",
+    "t-shirt": "shirt",
+    top: "shirt",
+    tops: "shirt",
+    sweaters: "sweater",
+    sweater: "sweater",
+    knit: "sweater",
+    cardigans: "sweater",
+    hoodies: "hoodie",
+    hoodie: "hoodie",
+    pants: "pants",
+    trousers: "pants",
+    jeans: "pants",
+    chinos: "pants",
+    bottoms: "pants",
+    shorts: "shorts",
+    shoes: "shoes",
+    footwear: "shoes",
+    boots: "boots",
+    sneakers: "sneakers",
+    accessories: "accessory",
+    accessory: "accessory",
+    bag: "accessory",
+    hat: "accessory",
+    hats: "accessory",
+  };
+
+  return map[text] || text;
+}
+
+function familyBiasForCategory(category) {
+  const c = normalizeCategoryLabel(category, "piece");
+  const defaults = {
+    jacket: ["anchor", "support", "stabilizer", "accent"],
+    shirt: ["support", "anchor", "stabilizer", "accent"],
+    sweater: ["support", "anchor", "stabilizer", "accent"],
+    hoodie: ["support", "anchor", "stabilizer", "accent"],
+    pants: ["stabilizer", "anchor", "support", "accent"],
+    shorts: ["stabilizer", "support", "anchor", "accent"],
+    shoes: ["stabilizer", "anchor", "support", "accent"],
+    boots: ["stabilizer", "anchor", "support", "accent"],
+    sneakers: ["stabilizer", "support", "anchor", "accent"],
+    accessory: ["accent", "support", "stabilizer", "anchor"],
+    piece: ["anchor", "support", "stabilizer", "accent"],
+  };
+  return defaults[c] || defaults.piece;
+}
+
+function buildAmazonSearchLink(query) {
+  const tag = process.env.AMAZON_PARTNER_TAG || "visioncore-20";
+  const encoded = encodeURIComponent(String(query || "").trim());
+  return `https://www.amazon.com/s?k=${encoded}&tag=${tag}`;
 }
 
 /* =========================
@@ -245,10 +330,10 @@ function generatePalettesV2(dominantHex) {
   ]);
 
   const cohesion = uniqHexes([
-    setTone(base, { sMul: 0.85, lAdd: +0.18 }),
-    setTone(base, { sMul: 0.75, lAdd: +0.08 }),
+    setTone(base, { sMul: 0.85, lAdd: 0.18 }),
+    setTone(base, { sMul: 0.75, lAdd: 0.08 }),
     setTone(base, { sMul: 1.0, lAdd: 0.0 }),
-    setTone(base, { sMul: 0.9, lAdd: -0.10 }),
+    setTone(base, { sMul: 0.9, lAdd: -0.1 }),
     setTone(base, { sMul: 0.8, lAdd: -0.18 }),
   ]);
 
@@ -270,7 +355,7 @@ function generatePalettesV2(dominantHex) {
   const natural = uniqHexes(
     [
       chroma.mix(base, "#556B2F", 0.55, "lab").hex().toUpperCase(),
-      chroma.mix(base, "#8B4513", 0.50, "lab").hex().toUpperCase(),
+      chroma.mix(base, "#8B4513", 0.5, "lab").hex().toUpperCase(),
       chroma.mix(base, "#B87333", 0.45, "lab").hex().toUpperCase(),
       chroma.mix(base, "#D2B48C", 0.55, "lab").hex().toUpperCase(),
       chroma.mix(base, "#2F5D50", 0.55, "lab").hex().toUpperCase(),
@@ -305,9 +390,7 @@ function generatePalettesV2(dominantHex) {
       cohesion: { hexes: cohesion, reason: "Same-hue tonal ladder (light → deep) for cohesive systems." },
       emphasis: {
         hexes: emphasis,
-        reason: meta.vivid
-          ? "Vivid base: controlled accents."
-          : "Muted base: boosted saturation + energetic shift.",
+        reason: meta.vivid ? "Vivid base: controlled accents." : "Muted base: boosted saturation + energetic shift.",
       },
       natural: { hexes: natural, reason: "Earth blends via LAB mixing + muted toning." },
       explore: { hexes: explore, reason: "Triad + tetrad harmonies with tonal normalization." },
@@ -514,7 +597,7 @@ function buildWhyThisWorks(colorRoles) {
   const accent = colorRoles.find((r) => r.role === "accent")?.hex;
   const stabilizer = colorRoles.find((r) => r.role === "stabilizer")?.hex;
 
-  return `The ${anchor || "anchor tone"} anchor establishes the visual center, while ${support || "the support tone"} extends the palette with compatible support. ${stabilizer || "The stabilizer tone"} adds grounding stability, and ${accent || "the accent tone"} introduces controlled emphasis without overwhelming the overall structure.`;
+  return `The ${anchor || "anchor tone"} anchor establishes the visual center, while ${support || "the support tone"} extends the palette with compatible support. ${stabilizer || "the stabilizer tone"} adds grounding stability, and ${accent || "the accent tone"} introduces controlled emphasis without overwhelming the overall structure.`;
 }
 
 function buildSuggestedAdjustment(scoreBreakdown, colorRoles) {
@@ -564,6 +647,577 @@ function buildOutfitAnalysis({ dominantHex, topColors }) {
     color_roles: colorRoles,
     why_this_works: buildWhyThisWorks(colorRoles),
     suggested_adjustment: buildSuggestedAdjustment(scoreBreakdown, colorRoles),
+  };
+}
+
+/* =========================
+   RETRIEVAL INTENT + PIECE SCORING
+   ========================= */
+function getRoleHexMap(outfitAnalysis) {
+  const roles = Array.isArray(outfitAnalysis?.color_roles) ? outfitAnalysis.color_roles : [];
+  return {
+    anchor: roles.find((r) => r.role === "anchor")?.hex || null,
+    support: roles.find((r) => r.role === "support")?.hex || null,
+    accent: roles.find((r) => r.role === "accent")?.hex || null,
+    stabilizer: roles.find((r) => r.role === "stabilizer")?.hex || null,
+  };
+}
+
+function getDisplayPaletteForRetrieval(outfitAnalysis) {
+  const roleMap = getRoleHexMap(outfitAnalysis);
+  const detected = outfitAnalysis?.detected_palette || {};
+
+  return {
+    anchor: roleMap.anchor,
+    support: roleMap.support,
+    stabilizer: roleMap.stabilizer,
+    accent: roleMap.accent,
+    primary: Array.isArray(detected.primary) ? detected.primary : [],
+    secondary: Array.isArray(detected.secondary) ? detected.secondary : [],
+    accent_group: Array.isArray(detected.accent) ? detected.accent : [],
+  };
+}
+
+function getRetailColorKeywords(hex) {
+  const safe = safeHex(hex);
+  if (!safe) return [];
+
+  const h = getHue(safe);
+  const s = getSat(safe);
+  const l = getLight(safe);
+
+  if (s < 0.08 && l < 0.18) return ["black", "jet black", "deep black"];
+  if (s < 0.12 && l < 0.42) return ["charcoal", "dark gray", "graphite"];
+  if (s < 0.12 && l < 0.68) return ["gray", "slate gray", "stone"];
+  if (s < 0.16 && l >= 0.82) return ["white", "off white", "ivory"];
+  if (s < 0.18 && l >= 0.68) return ["cream", "light beige", "oatmeal"];
+
+  if (h >= 345 || h < 15) return l < 0.45 ? ["burgundy", "wine", "oxblood"] : ["red", "crimson", "rose"];
+  if (h >= 15 && h < 35) return l < 0.5 ? ["brown", "cognac", "rust"] : ["tan", "camel", "caramel"];
+  if (h >= 35 && h < 55) return l < 0.5 ? ["mustard", "golden brown", "amber"] : ["beige", "sand", "khaki"];
+  if (h >= 55 && h < 85) return ["olive", "sage", "moss"];
+  if (h >= 85 && h < 165) return l < 0.45 ? ["forest green", "olive green", "deep green"] : ["sage green", "muted green", "green"];
+  if (h >= 165 && h < 210) return ["teal", "blue green", "sea green"];
+  if (h >= 210 && h < 255) return l < 0.45 ? ["navy", "deep blue", "midnight blue"] : ["blue", "steel blue", "powder blue"];
+  if (h >= 255 && h < 315) return l < 0.45 ? ["plum", "eggplant", "deep purple"] : ["lavender", "soft purple", "mauve"];
+  return ["neutral", "muted", "classic"];
+}
+
+function dedupeKeywords(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const value of arr || []) {
+    const key = normalizeText(value);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
+function getNegativeKeywordsForMode(mode) {
+  const selectedMode = normalizeModeLabel(mode);
+  const map = {
+    Balance: ["neon", "rainbow", "multi-color", "graphic"],
+    Contrast: ["washed out", "faded neutral only"],
+    Cohesion: ["neon", "multi-color", "graphic", "rainbow"],
+    Natural: ["neon", "patent", "highlighter", "fluorescent"],
+    Explore: [],
+  };
+  return map[selectedMode] || [];
+}
+
+function getStyleKeywordsForMode(mode) {
+  const selectedMode = normalizeModeLabel(mode);
+  const map = {
+    Balance: ["balanced", "versatile", "clean"],
+    Contrast: ["contrast", "bold", "statement"],
+    Cohesion: ["cohesive", "tonal", "clean"],
+    Natural: ["natural", "earth tone", "muted"],
+    Explore: ["experimental", "creative", "expressive"],
+  };
+  return map[selectedMode] || [];
+}
+
+function getRolePriorityForModeAndTarget(mode, targetItem) {
+  const selectedMode = normalizeModeLabel(mode);
+  const categoryBias = familyBiasForCategory(targetItem);
+
+  const modeBias = {
+    Balance: ["anchor", "stabilizer", "support", "accent"],
+    Contrast: ["accent", "anchor", "support", "stabilizer"],
+    Cohesion: ["anchor", "support", "stabilizer", "accent"],
+    Natural: ["support", "anchor", "stabilizer", "accent"],
+    Explore: ["accent", "support", "anchor", "stabilizer"],
+  }[selectedMode] || ["anchor", "support", "stabilizer", "accent"];
+
+  const merged = [];
+  for (const role of [...categoryBias, ...modeBias]) {
+    if (!merged.includes(role)) merged.push(role);
+  }
+  return merged;
+}
+
+function buildSearchTermsFromIntent(retrievalIntent) {
+  const category = normalizeCategoryLabel(retrievalIntent?.target_item, "piece");
+  const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
+  const mode = normalizeModeLabel(retrievalIntent?.selected_mode);
+
+  const categoryKeywordsMap = {
+    jacket: ["jacket", "overshirt", "bomber jacket"],
+    shirt: ["shirt", "tee", "top"],
+    sweater: ["sweater", "knit", "pullover"],
+    hoodie: ["hoodie", "sweatshirt", "pullover"],
+    pants: ["pants", "trousers", "jeans"],
+    shorts: ["shorts"],
+    shoes: ["shoes", "footwear"],
+    boots: ["boots"],
+    sneakers: ["sneakers", "trainers"],
+    accessory: ["accessory", "bag", "hat"],
+    piece: ["fashion piece"],
+  };
+
+  const colorKeywords = dedupeKeywords(palettePriority.flatMap((entry) => getRetailColorKeywords(entry?.hex)));
+
+  return {
+    primary_keywords: categoryKeywordsMap[category] || categoryKeywordsMap.piece,
+    color_keywords: colorKeywords,
+    style_keywords: getStyleKeywordsForMode(mode),
+    negative_keywords: getNegativeKeywordsForMode(mode),
+  };
+}
+
+function buildRetrievalIntent(outfitAnalysis, opts = {}) {
+  const selectedMode = normalizeModeLabel(opts.selectedMode || outfitAnalysis?.best_mode || "Balance");
+  const sourceItem = normalizeCategoryLabel(opts.sourceItem || "piece", "piece");
+  const targetItem = normalizeCategoryLabel(opts.targetItem || "piece", "piece");
+  const industry = normalizeText(opts.industry || "fashion") || "fashion";
+  const matchStrictness = normalizeText(opts.matchStrictness || "medium") || "medium";
+  const resultCount = Number.isFinite(Number(opts.resultCount))
+    ? Math.max(1, Math.min(60, Number(opts.resultCount)))
+    : 24;
+  const rolePriorityOrder = getRolePriorityForModeAndTarget(selectedMode, targetItem);
+  const roleMap = getRoleHexMap(outfitAnalysis);
+
+  const palettePriority = rolePriorityOrder
+    .map((role, idx) => {
+      const roleHex = roleMap[role];
+      if (!roleHex) return null;
+      return {
+        role,
+        hex: roleHex,
+        priority: idx + 1,
+        usage_bias: familyBiasForCategory(targetItem),
+      };
+    })
+    .filter(Boolean);
+
+  const intent = {
+    analysis_type: "inventory_retrieval",
+    selected_mode: selectedMode,
+    best_mode_score: outfitAnalysis?.best_mode_score ?? 0,
+    source_item: sourceItem,
+    target_item: targetItem,
+    industry,
+    retrieval_goal: opts.retrievalGoal || "extend_palette",
+    match_strictness: matchStrictness,
+    result_count: resultCount,
+    initial_display_count: 4,
+    expanded_display_count: Math.max(8, Math.min(resultCount, 12)),
+    role_priority: rolePriorityOrder,
+    palette_priority: palettePriority,
+    palette: getDisplayPaletteForRetrieval(outfitAnalysis),
+    ranking_rules: {
+      prefer_role_order: rolePriorityOrder,
+      prefer_neutrals_first:
+        selectedMode === "Natural" || targetItem === "pants" || targetItem === "shoes" || targetItem === "boots",
+      allow_accent_results: true,
+      accent_max_ratio: selectedMode === "Contrast" || selectedMode === "Explore" ? 0.35 : 0.15,
+      min_color_fit_score: matchStrictness === "strict" ? 78 : matchStrictness === "loose" ? 52 : 64,
+    },
+  };
+
+  intent.search_terms = buildSearchTermsFromIntent(intent);
+  return intent;
+}
+
+function normalizeInventoryProduct(product, idx = 0) {
+  const title = String(product?.title || product?.name || product?.product_title || `Product ${idx + 1}`);
+  const category = normalizeCategoryLabel(product?.category || product?.type || product?.itemType || "piece", "piece");
+  const colorHex = safeHex(
+    product?.color_hex ||
+      product?.colorHex ||
+      product?.hex ||
+      product?.dominantHex ||
+      product?.dominant_hex
+  );
+
+  const styleTags = Array.isArray(product?.style_tags)
+    ? product.style_tags
+    : Array.isArray(product?.styleTags)
+      ? product.styleTags
+      : [];
+
+  return {
+    ...product,
+    id: product?.id || product?.product_id || `product_${idx + 1}`,
+    title,
+    category,
+    color_hex: colorHex,
+    brand: product?.brand || null,
+    image_url: product?.image_url || product?.imageUrl || null,
+    affiliate_link: product?.affiliate_link || product?.affiliateLink || null,
+    style_tags: styleTags,
+  };
+}
+
+function getStrictnessScalar(matchStrictness) {
+  const m = normalizeText(matchStrictness);
+  if (m === "strict") return 1.2;
+  if (m === "loose") return 0.8;
+  return 1.0;
+}
+
+function computeRoleFitForProduct(productHex, retrievalIntent) {
+  const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
+  if (!productHex || !palettePriority.length) {
+    return { score: 55, matchedRole: null, matchedHex: null };
+  }
+
+  const strictnessScalar = getStrictnessScalar(retrievalIntent.match_strictness);
+  let best = { score: 0, matchedRole: null, matchedHex: null };
+
+  palettePriority.forEach((entry) => {
+    const dist = colorDistanceLab(productHex, entry.hex);
+    const priorityWeight = Math.max(0.2, 1 - (entry.priority - 1) * 0.18);
+    const baseScore = clamp100(100 - dist * 1.15 * strictnessScalar);
+    const score = clamp100(baseScore * priorityWeight);
+    if (score > best.score) {
+      best = { score: Math.round(score), matchedRole: entry.role, matchedHex: entry.hex };
+    }
+  });
+
+  return best;
+}
+
+function computeModeAlignmentForProduct(productHex, retrievalIntent) {
+  if (!productHex) return 45;
+
+  const mode = normalizeModeLabel(retrievalIntent?.selected_mode);
+  const roleMap = {
+    anchor: retrievalIntent?.palette_priority?.find((x) => x.role === "anchor")?.hex || null,
+    support: retrievalIntent?.palette_priority?.find((x) => x.role === "support")?.hex || null,
+    stabilizer: retrievalIntent?.palette_priority?.find((x) => x.role === "stabilizer")?.hex || null,
+    accent: retrievalIntent?.palette_priority?.find((x) => x.role === "accent")?.hex || null,
+  };
+
+  const anchor = roleMap.anchor;
+  const support = roleMap.support;
+  const stabilizer = roleMap.stabilizer;
+  const accent = roleMap.accent;
+
+  const family = classifyColorV2(productHex).family;
+  const sat = getSat(productHex);
+
+  if (mode === "Cohesion") {
+    const d1 = anchor ? colorDistanceLab(productHex, anchor) : 40;
+    const d2 = support ? colorDistanceLab(productHex, support) : 40;
+    return Math.round(clamp100(96 - Math.min(d1, d2) * 1.05));
+  }
+
+  if (mode === "Contrast") {
+    const ref = anchor || support || stabilizer || accent;
+    const hueGap = ref ? hueDistance(productHex, ref) : 90;
+    return Math.round(clamp100(30 + Math.min(60, hueGap * 0.55) + sat * 12));
+  }
+
+  if (mode === "Natural") {
+    const goodFamily = family === "earth" || family === "neutral" || family === "pastel";
+    return Math.round(clamp100((goodFamily ? 82 : 58) + (1 - sat) * 12));
+  }
+
+  if (mode === "Balance") {
+    const d1 = anchor ? colorDistanceLab(productHex, anchor) : 40;
+    const d2 = stabilizer ? colorDistanceLab(productHex, stabilizer) : 40;
+    const avgDist = avg([d1, d2]);
+    return Math.round(clamp100(88 - Math.abs(avgDist - 30) * 0.9));
+  }
+
+  if (mode === "Explore") {
+    return Math.round(clamp100(62 + sat * 18));
+  }
+
+  return 70;
+}
+
+function computeCategoryFitForProduct(product, retrievalIntent) {
+  const target = normalizeCategoryLabel(retrievalIntent?.target_item, "piece");
+  const category = normalizeCategoryLabel(product?.category || "piece", "piece");
+  const title = normalizeText(product?.title || "");
+
+  if (target === category) return 96;
+  if (title.includes(target)) return 88;
+  if (target === "jacket" && ["coat", "outerwear", "overshirt"].includes(category)) return 85;
+  if (target === "shirt" && ["top", "tee"].includes(category)) return 85;
+  if (target === "pants" && ["jeans", "trousers"].includes(category)) return 86;
+  if (target === "shoes" && ["boots", "sneakers", "footwear"].includes(category)) return 84;
+  return 58;
+}
+
+function computeVersatilityFitForProduct(productHex) {
+  if (!productHex) return 55;
+  const family = classifyColorV2(productHex).family;
+  const sat = getSat(productHex);
+  const light = getLight(productHex);
+
+  let score = 58;
+  if (family === "neutral") score += 24;
+  if (family === "earth") score += 15;
+  if (family === "pastel") score += 10;
+  score += (1 - sat) * 10;
+  if (light > 0.15 && light < 0.86) score += 8;
+  return Math.round(clamp100(score));
+}
+
+function computeColorFitForProduct(productHex, retrievalIntent) {
+  if (!productHex) return 0;
+  const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
+  if (!palettePriority.length) return 0;
+
+  const strictnessScalar = getStrictnessScalar(retrievalIntent.match_strictness);
+  const distances = palettePriority.map((entry) => colorDistanceLab(productHex, entry.hex));
+  const bestDist = Math.min(...distances);
+  return Math.round(clamp100(100 - bestDist * 1.2 * strictnessScalar));
+}
+
+function scoreProductFit(product, retrievalIntent) {
+  const normalized = normalizeInventoryProduct(product);
+  const roleFit = computeRoleFitForProduct(normalized.color_hex, retrievalIntent);
+  const colorFit = computeColorFitForProduct(normalized.color_hex, retrievalIntent);
+  const modeAlignment = computeModeAlignmentForProduct(normalized.color_hex, retrievalIntent);
+  const categoryFit = computeCategoryFitForProduct(normalized, retrievalIntent);
+  const versatilityFit = computeVersatilityFitForProduct(normalized.color_hex);
+
+  const pieceFitScore = Math.round(
+    clamp100(
+      colorFit * 0.28 +
+        roleFit.score * 0.24 +
+        modeAlignment * 0.18 +
+        categoryFit * 0.18 +
+        versatilityFit * 0.12
+    )
+  );
+
+  return {
+    ...normalized,
+    piece_fit_score: pieceFitScore,
+    score_breakdown: {
+      color_fit: colorFit,
+      role_fit: roleFit.score,
+      mode_alignment: modeAlignment,
+      category_fit: categoryFit,
+      versatility_fit: versatilityFit,
+    },
+    matched_role: roleFit.matchedRole,
+    matched_mode: retrievalIntent?.selected_mode || null,
+    why_it_matches:
+      roleFit.matchedRole
+        ? `Strong ${roleFit.matchedRole} alignment for ${retrievalIntent?.selected_mode || "selected"} mode with solid category relevance.`
+        : `General palette fit for ${retrievalIntent?.selected_mode || "selected"} mode.`,
+  };
+}
+
+function rankProducts(products, retrievalIntent) {
+  const rows = Array.isArray(products) ? products : [];
+  return rows
+    .map((product, idx) => scoreProductFit(normalizeInventoryProduct(product, idx), retrievalIntent))
+    .filter((item) => item.piece_fit_score >= (retrievalIntent?.ranking_rules?.min_color_fit_score || 0) * 0.9)
+    .sort((a, b) => b.piece_fit_score - a.piece_fit_score);
+}
+
+function generateRetrievalPreviewProducts(retrievalIntent) {
+  const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
+  const target = normalizeCategoryLabel(retrievalIntent?.target_item, "piece");
+
+  const categoryTitleMap = {
+    jacket: ["Suede Jacket", "Bomber Jacket", "Overshirt", "Utility Jacket"],
+    shirt: ["Oxford Shirt", "Tee", "Button Up", "Layering Top"],
+    sweater: ["Knit Sweater", "Crewneck", "Pullover", "Cardigan"],
+    hoodie: ["Pullover Hoodie", "Zip Hoodie", "Sweatshirt"],
+    pants: ["Trousers", "Jeans", "Chinos", "Cargo Pants"],
+    shorts: ["Shorts", "Tailored Shorts"],
+    shoes: ["Low Top Shoes", "Leather Shoes", "Runner"],
+    boots: ["Chelsea Boots", "Combat Boots", "Leather Boots"],
+    sneakers: ["Low Top Sneakers", "Retro Sneakers", "Minimal Sneakers"],
+    accessory: ["Crossbody Bag", "Cap", "Belt", "Watch Strap"],
+    piece: ["Style Piece", "Layer", "Fashion Item"],
+  };
+
+  const titles = categoryTitleMap[target] || categoryTitleMap.piece;
+  const out = [];
+
+  palettePriority.forEach((entry, idx) => {
+    const keyword = getRetailColorKeywords(entry.hex)[0] || "Classic";
+    out.push({
+      id: `preview_${entry.role}_${idx + 1}`,
+      title: `${titleCase(keyword)} ${titles[idx % titles.length]}`,
+      category: target,
+      color_hex: entry.hex,
+      brand: "Preview",
+      affiliate_link: buildAmazonSearchLink(`${keyword} ${target}`),
+      image_url: null,
+      style_tags: [normalizeModeLabel(retrievalIntent.selected_mode).toLowerCase(), entry.role],
+    });
+  });
+
+  if (palettePriority[0]?.hex) {
+    out.push({
+      id: "preview_distractor_1",
+      title: `Bright Accent ${titles[0]}`,
+      category: target,
+      color_hex: safeHex(rotateHue(palettePriority[0].hex, 130)) || "#FF4D4D",
+      brand: "Preview",
+      affiliate_link: buildAmazonSearchLink(`bright ${target}`),
+      image_url: null,
+      style_tags: ["experimental"],
+    });
+  }
+
+  return out;
+}
+
+function shopperLabelForRole(role) {
+  const map = {
+    anchor: "Best Match",
+    support: "Soft Match",
+    stabilizer: "Safe Neutral",
+    accent: "Bold Option",
+  };
+  return map[role] || titleCase(role);
+}
+
+function shopperReasonForRole(role) {
+  const map = {
+    anchor: "Best extension for maintaining the look.",
+    support: "Blends smoothly with the palette.",
+    stabilizer: "Grounds the outfit with a stable neutral.",
+    accent: "Adds a stronger pop if you want more energy.",
+  };
+  return map[role] || "Recommended match for this direction.";
+}
+
+function buildRoleQueries(retrievalIntent) {
+  const target = normalizeCategoryLabel(retrievalIntent?.target_item, "piece");
+  const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
+
+  return palettePriority.map((entry) => {
+    const keywords = getRetailColorKeywords(entry.hex);
+    const primaryQuery = `${keywords[0]} ${target}`;
+    const expandedQueries = dedupeKeywords(
+      keywords.map((keyword) => `${keyword} ${target}`)
+    ).slice(0, 3);
+
+    return {
+      role: entry.role,
+      shopper_label: shopperLabelForRole(entry.role),
+      color_hex: entry.hex,
+      primary_query: primaryQuery,
+      expanded_queries: expandedQueries,
+      amazon_link: buildAmazonSearchLink(primaryQuery),
+      expanded_links: expandedQueries.map((q) => ({
+        query: q,
+        amazon_link: buildAmazonSearchLink(q),
+      })),
+      reason: shopperReasonForRole(entry.role),
+    };
+  });
+}
+
+function buildAlternativeDirections(outfitAnalysis, opts = {}) {
+  const current = normalizeModeLabel(opts.currentMode || outfitAnalysis?.best_mode || "Balance");
+  const targetItem = normalizeCategoryLabel(opts.targetItem || "piece", "piece");
+
+  return (Array.isArray(outfitAnalysis?.mode_scores) ? outfitAnalysis.mode_scores : [])
+    .filter((row) => normalizeModeLabel(row.mode) !== current)
+    .slice(0, 3)
+    .map((row) => ({
+      mode: normalizeModeLabel(row.mode),
+      score: row.score,
+      target_item: targetItem,
+      action_label: `Try ${normalizeModeLabel(row.mode)}`,
+    }));
+}
+
+function buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts = []) {
+  const displayCount = retrievalIntent?.initial_display_count || 4;
+  const expandedCount = retrievalIntent?.expanded_display_count || 12;
+
+  const roleQueries = buildRoleQueries(retrievalIntent);
+  const roleQueryMap = Object.fromEntries(roleQueries.map((row) => [row.role, row]));
+
+  const topResults = rankedProducts.slice(0, displayCount).map((product) => {
+    const fallbackRole = product.matched_role || "support";
+    const roleRow = roleQueryMap[fallbackRole] || roleQueries[0] || null;
+
+    return {
+      id: product.id,
+      title: product.title,
+      shopper_label: shopperLabelForRole(fallbackRole),
+      role: fallbackRole,
+      reason: roleRow?.reason || shopperReasonForRole(fallbackRole),
+      piece_fit_score: product.piece_fit_score,
+      matched_mode: product.matched_mode,
+      color_hex: product.color_hex,
+      amazon_link:
+        product.affiliate_link ||
+        roleRow?.amazon_link ||
+        buildAmazonSearchLink(`${getRetailColorKeywords(product.color_hex)[0] || "classic"} ${retrievalIntent.target_item}`),
+      query:
+        roleRow?.primary_query ||
+        `${getRetailColorKeywords(product.color_hex)[0] || "classic"} ${retrievalIntent.target_item}`,
+      why_it_matches: product.why_it_matches,
+    };
+  });
+
+  const moreOptions = rankedProducts.slice(displayCount, expandedCount).map((product) => {
+    const fallbackRole = product.matched_role || "support";
+    const roleRow = roleQueryMap[fallbackRole] || roleQueries[0] || null;
+
+    return {
+      id: product.id,
+      title: product.title,
+      shopper_label: shopperLabelForRole(fallbackRole),
+      role: fallbackRole,
+      piece_fit_score: product.piece_fit_score,
+      color_hex: product.color_hex,
+      amazon_link:
+        product.affiliate_link ||
+        roleRow?.amazon_link ||
+        buildAmazonSearchLink(`${getRetailColorKeywords(product.color_hex)[0] || "classic"} ${retrievalIntent.target_item}`),
+      query:
+        roleRow?.primary_query ||
+        `${getRetailColorKeywords(product.color_hex)[0] || "classic"} ${retrievalIntent.target_item}`,
+    };
+  });
+
+  return {
+    target_item: retrievalIntent.target_item,
+    source_item: retrievalIntent.source_item,
+    selected_mode: retrievalIntent.selected_mode,
+    best_mode_score: retrievalIntent.best_mode_score,
+    intro: `Top picks for building this look further with a ${retrievalIntent.target_item}.`,
+    top_paths: topResults,
+    more_options: {
+      available: moreOptions.length > 0,
+      count: moreOptions.length,
+      label: "More Options",
+      items: moreOptions,
+    },
+    role_search_paths: roleQueries,
+    try_another_direction: buildAlternativeDirections(outfitAnalysis, {
+      currentMode: retrievalIntent.selected_mode,
+      targetItem: retrievalIntent.target_item,
+    }),
   };
 }
 
@@ -690,11 +1344,29 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
 
 app.post("/api/recommendations", async (req, res) => {
   try {
-    const { ghostImageUrl, mode, itemType } = req.body || {};
-    if (!ghostImageUrl) return res.status(400).json({ success: false, error: "ghostImageUrl is required" });
+    const {
+      ghostImageUrl,
+      mode,
+      itemType,
+      sourceItem,
+      targetItem,
+      industry,
+      matchStrictness,
+      resultCount,
+      inventory,
+      usePreviewInventory = true,
+    } = req.body || {};
+
+    if (!ghostImageUrl) {
+      return res.status(400).json({ success: false, error: "ghostImageUrl is required" });
+    }
 
     const analysis = await analyzeGhostColors(ghostImageUrl);
     const v2 = generatePalettesV2(analysis.dominantHex);
+    const outfitAnalysis = buildOutfitAnalysis({
+      dominantHex: analysis.dominantHex,
+      topColors: analysis.topColors,
+    });
 
     const m = String(mode || "").toLowerCase().trim();
     const map = {
@@ -714,6 +1386,31 @@ app.post("/api/recommendations", async (req, res) => {
     const key = map[m] || "balance";
     const pack = v2.palettes[key];
 
+    let retrievalIntent = null;
+    let rankedProducts = null;
+    let shoppingAssist = null;
+
+    if (targetItem) {
+      retrievalIntent = buildRetrievalIntent(outfitAnalysis, {
+        selectedMode: normalizeModeLabel(mode || outfitAnalysis.best_mode),
+        sourceItem: sourceItem || itemType || "piece",
+        targetItem,
+        industry: industry || "fashion",
+        matchStrictness: matchStrictness || "medium",
+        resultCount: resultCount || 24,
+      });
+
+      const inputInventory =
+        Array.isArray(inventory) && inventory.length
+          ? inventory
+          : usePreviewInventory
+            ? generateRetrievalPreviewProducts(retrievalIntent)
+            : [];
+
+      rankedProducts = inputInventory.length ? rankProducts(inputInventory, retrievalIntent) : [];
+      shoppingAssist = buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts);
+    }
+
     return res.json({
       success: true,
       engine: "V2",
@@ -723,9 +1420,82 @@ app.post("/api/recommendations", async (req, res) => {
       garmentColorFamily: v2.classification.family,
       colorLane: v2.classification.lane,
       recommendation: { paletteHexes: pack.hexes, reason: pack.reason },
+      retrieval_intent: retrievalIntent,
+      ranked_products: rankedProducts,
+      shopping_assist: shoppingAssist,
     });
   } catch (err) {
     console.error("recommendations error:", err?.message || err);
+    return res.status(500).json({ success: false, error: err?.message || "Unknown error" });
+  }
+});
+
+app.post("/api/retrieval/preview", async (req, res) => {
+  try {
+    const {
+      ghostImageUrl,
+      outfitAnalysis: providedOutfitAnalysis,
+      sourceItem,
+      targetItem,
+      selectedMode,
+      industry,
+      matchStrictness,
+      resultCount,
+      inventory,
+      usePreviewInventory = true,
+    } = req.body || {};
+
+    if (!providedOutfitAnalysis && !ghostImageUrl) {
+      return res.status(400).json({
+        success: false,
+        error: "Provide either outfitAnalysis or ghostImageUrl.",
+      });
+    }
+
+    let outfitAnalysis = providedOutfitAnalysis || null;
+    let dominantHex = null;
+
+    if (!outfitAnalysis && ghostImageUrl) {
+      const analysis = await analyzeGhostColors(ghostImageUrl);
+      dominantHex = analysis.dominantHex;
+      outfitAnalysis = buildOutfitAnalysis({
+        dominantHex: analysis.dominantHex,
+        topColors: analysis.topColors,
+      });
+    }
+
+    const retrievalIntent = buildRetrievalIntent(outfitAnalysis, {
+      selectedMode: selectedMode || outfitAnalysis?.best_mode,
+      sourceItem: sourceItem || "piece",
+      targetItem: targetItem || "piece",
+      industry: industry || "fashion",
+      matchStrictness: matchStrictness || "medium",
+      resultCount: resultCount || 24,
+    });
+
+    const inputInventory =
+      Array.isArray(inventory) && inventory.length
+        ? inventory
+        : usePreviewInventory
+          ? generateRetrievalPreviewProducts(retrievalIntent)
+          : [];
+
+    const rankedProducts = rankProducts(inputInventory, retrievalIntent);
+    const shoppingAssist = buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts);
+
+    return res.json({
+      success: true,
+      engine: "V2",
+      dominantHex,
+      outfit_analysis: outfitAnalysis,
+      retrieval_intent: retrievalIntent,
+      ranked_products: rankedProducts,
+      shopping_assist: shoppingAssist,
+      summary:
+        "Retrieval preview generated. VisionCore used selected mode, target piece, color roles, and piece scoring to rank products.",
+    });
+  } catch (err) {
+    console.error("retrieval/preview error:", err?.message || err);
     return res.status(500).json({ success: false, error: err?.message || "Unknown error" });
   }
 });
