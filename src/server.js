@@ -216,33 +216,52 @@ function normalizeCategoryLabel(value, fallback = "piece") {
     coat: "jacket",
     bomber: "jacket",
     overshirt: "jacket",
+
     shirts: "shirt",
     shirt: "shirt",
     tee: "shirt",
     "t-shirt": "shirt",
     top: "shirt",
     tops: "shirt",
+    "button up": "shirt",
+
     sweaters: "sweater",
     sweater: "sweater",
     knit: "sweater",
+    cardigan: "sweater",
     cardigans: "sweater",
+    pullover: "sweater",
+
     hoodies: "hoodie",
     hoodie: "hoodie",
+    sweatshirt: "hoodie",
+
     pants: "pants",
     trousers: "pants",
     jeans: "pants",
     chinos: "pants",
     bottoms: "pants",
+
     shorts: "shorts",
+
     shoes: "shoes",
     footwear: "shoes",
+    loafers: "shoes",
+
     boots: "boots",
     sneakers: "sneakers",
+    trainers: "sneakers",
+
     accessories: "accessory",
     accessory: "accessory",
     bag: "accessory",
+    bags: "accessory",
     hat: "accessory",
     hats: "accessory",
+    belt: "accessory",
+    belts: "accessory",
+    watch: "accessory",
+    strap: "accessory",
   };
 
   return map[text] || text;
@@ -270,6 +289,91 @@ function buildAmazonSearchLink(query) {
   const tag = process.env.AMAZON_PARTNER_TAG || "visioncore-20";
   const encoded = encodeURIComponent(String(query || "").trim());
   return `https://www.amazon.com/s?k=${encoded}&tag=${tag}`;
+}
+
+/* =========================
+   CATEGORY / CONTEXT LOCK
+   ========================= */
+const CATEGORY_SUBTYPE_MAP = {
+  jacket: ["jacket", "bomber jacket", "overshirt", "coat"],
+  shirt: ["shirt", "tee", "button up", "top"],
+  sweater: ["sweater", "knit sweater", "cardigan", "pullover"],
+  hoodie: ["hoodie", "zip hoodie", "sweatshirt", "pullover hoodie"],
+  pants: ["pants", "trousers", "jeans", "chinos"],
+  shorts: ["shorts", "tailored shorts"],
+  shoes: ["shoes", "sneakers", "loafers", "footwear"],
+  boots: ["boots", "chelsea boots", "leather boots"],
+  sneakers: ["sneakers", "trainers", "low top sneakers"],
+  accessory: ["crossbody bag", "shoulder bag", "belt", "cap", "watch strap"],
+  piece: ["fashion piece", "style piece"],
+};
+
+const CATEGORY_CONTEXT_ANCHORS = {
+  jacket: ["fashion", "outfit", "mens"],
+  shirt: ["fashion", "outfit", "mens"],
+  sweater: ["fashion", "outfit", "mens"],
+  hoodie: ["fashion", "outfit", "mens"],
+  pants: ["fashion", "outfit", "mens"],
+  shorts: ["fashion", "outfit", "mens"],
+  shoes: ["fashion", "outfit", "mens"],
+  boots: ["fashion", "outfit", "mens"],
+  sneakers: ["fashion", "outfit", "mens"],
+  accessory: ["fashion", "outfit", "mens"],
+  piece: ["fashion", "outfit"],
+};
+
+const AMBIGUOUS_COLOR_NEGATIVES = {
+  tan: ["-tanning", "-lotion", "-spray", "-self-tanner", "-bronzer", "-skincare", "-cream"],
+};
+
+function resolveCategorySubtypes(category) {
+  const normalized = normalizeCategoryLabel(category, "piece");
+  return CATEGORY_SUBTYPE_MAP[normalized] || [normalized];
+}
+
+function getCategorySubtypeForIndex(category, idx = 0) {
+  const subtypes = resolveCategorySubtypes(category);
+  return subtypes[idx % subtypes.length] || normalizeCategoryLabel(category, "piece");
+}
+
+function getQueryAnchorsForCategory(category, industry = "fashion") {
+  const normalized = normalizeCategoryLabel(category, "piece");
+  const anchors = CATEGORY_CONTEXT_ANCHORS[normalized] || [industry];
+  const extra = industry && !anchors.includes(industry) ? [industry] : [];
+  return dedupeKeywords([...anchors, ...extra]);
+}
+
+function getNegativeQueryTermsForKeyword(keyword) {
+  const key = normalizeText(keyword);
+  return AMBIGUOUS_COLOR_NEGATIVES[key] || [];
+}
+
+function buildContextualAmazonQueries({ colorKeyword, category, industry = "fashion", limit = 3 }) {
+  const cleanColor = normalizeText(colorKeyword);
+  const normalizedCategory = normalizeCategoryLabel(category, "piece");
+  const subtypes = resolveCategorySubtypes(normalizedCategory);
+  const anchors = getQueryAnchorsForCategory(normalizedCategory, industry);
+  const negatives = getNegativeQueryTermsForKeyword(cleanColor);
+
+  const queries = subtypes.slice(0, limit).map((subtype) => {
+    const parts = [cleanColor, subtype, ...anchors, ...negatives].filter(Boolean);
+    return parts.join(" ");
+  });
+
+  return dedupeKeywords(queries);
+}
+
+function buildPrimaryContextualQuery({ colorKeyword, category, industry = "fashion", subtype = null }) {
+  const cleanColor = normalizeText(colorKeyword);
+  const normalizedCategory = normalizeCategoryLabel(category, "piece");
+  const anchors = getQueryAnchorsForCategory(normalizedCategory, industry);
+  const negatives = getNegativeQueryTermsForKeyword(cleanColor);
+
+  const chosenSubtype =
+    normalizeText(subtype) || resolveCategorySubtypes(normalizedCategory)[0] || normalizedCategory;
+
+  const parts = [cleanColor, chosenSubtype, ...anchors, ...negatives].filter(Boolean);
+  return parts.join(" ");
 }
 
 /* =========================
@@ -533,7 +637,9 @@ function computeApplicabilityScore(colors, colorRoles) {
   const earthCount = colors.filter((hex) => classifyColorV2(hex).family === "earth").length;
   const stabilizerExists = (colorRoles || []).some((r) => r.role === "stabilizer");
   const anchorExists = (colorRoles || []).some((r) => r.role === "anchor");
-  return Math.round(clamp100(62 + neutralCount * 8 + earthCount * 5 + (stabilizerExists ? 8 : 0) + (anchorExists ? 5 : 0)));
+  return Math.round(
+    clamp100(62 + neutralCount * 8 + earthCount * 5 + (stabilizerExists ? 8 : 0) + (anchorExists ? 5 : 0))
+  );
 }
 
 function computeVersatilityScore(colors) {
@@ -764,16 +870,16 @@ function buildSearchTermsFromIntent(retrievalIntent) {
   const mode = normalizeModeLabel(retrievalIntent?.selected_mode);
 
   const categoryKeywordsMap = {
-    jacket: ["jacket", "overshirt", "bomber jacket"],
-    shirt: ["shirt", "tee", "top"],
-    sweater: ["sweater", "knit", "pullover"],
-    hoodie: ["hoodie", "sweatshirt", "pullover"],
-    pants: ["pants", "trousers", "jeans"],
-    shorts: ["shorts"],
-    shoes: ["shoes", "footwear"],
-    boots: ["boots"],
-    sneakers: ["sneakers", "trainers"],
-    accessory: ["accessory", "bag", "hat"],
+    jacket: ["jacket", "overshirt", "bomber jacket", "coat"],
+    shirt: ["shirt", "tee", "button up", "top"],
+    sweater: ["sweater", "knit sweater", "cardigan", "pullover"],
+    hoodie: ["hoodie", "zip hoodie", "sweatshirt", "pullover hoodie"],
+    pants: ["pants", "trousers", "jeans", "chinos"],
+    shorts: ["shorts", "tailored shorts"],
+    shoes: ["shoes", "sneakers", "loafers", "footwear"],
+    boots: ["boots", "chelsea boots", "leather boots"],
+    sneakers: ["sneakers", "trainers", "low top sneakers"],
+    accessory: ["crossbody bag", "shoulder bag", "belt", "cap", "watch strap"],
     piece: ["fashion piece"],
   };
 
@@ -827,6 +933,12 @@ function buildRetrievalIntent(outfitAnalysis, opts = {}) {
     role_priority: rolePriorityOrder,
     palette_priority: palettePriority,
     palette: getDisplayPaletteForRetrieval(outfitAnalysis),
+    context: {
+      domain: industry,
+      category: targetItem,
+      subtypes: resolveCategorySubtypes(targetItem),
+      anchors: getQueryAnchorsForCategory(targetItem, industry),
+    },
     ranking_rules: {
       prefer_role_order: rolePriorityOrder,
       prefer_neutrals_first:
@@ -960,7 +1072,8 @@ function computeCategoryFitForProduct(product, retrievalIntent) {
   if (target === "jacket" && ["coat", "outerwear", "overshirt"].includes(category)) return 85;
   if (target === "shirt" && ["top", "tee"].includes(category)) return 85;
   if (target === "pants" && ["jeans", "trousers"].includes(category)) return 86;
-  if (target === "shoes" && ["boots", "sneakers", "footwear"].includes(category)) return 84;
+  if (target === "shoes" && ["boots", "sneakers", "footwear", "loafers"].includes(category)) return 84;
+  if (target === "accessory" && ["bag", "cap", "belt", "watch"].some((x) => title.includes(x))) return 84;
   return 58;
 }
 
@@ -1038,33 +1151,26 @@ function rankProducts(products, retrievalIntent) {
 function generateRetrievalPreviewProducts(retrievalIntent) {
   const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
   const target = normalizeCategoryLabel(retrievalIntent?.target_item, "piece");
-
-  const categoryTitleMap = {
-    jacket: ["Suede Jacket", "Bomber Jacket", "Overshirt", "Utility Jacket"],
-    shirt: ["Oxford Shirt", "Tee", "Button Up", "Layering Top"],
-    sweater: ["Knit Sweater", "Crewneck", "Pullover", "Cardigan"],
-    hoodie: ["Pullover Hoodie", "Zip Hoodie", "Sweatshirt"],
-    pants: ["Trousers", "Jeans", "Chinos", "Cargo Pants"],
-    shorts: ["Shorts", "Tailored Shorts"],
-    shoes: ["Low Top Shoes", "Leather Shoes", "Runner"],
-    boots: ["Chelsea Boots", "Combat Boots", "Leather Boots"],
-    sneakers: ["Low Top Sneakers", "Retro Sneakers", "Minimal Sneakers"],
-    accessory: ["Crossbody Bag", "Cap", "Belt", "Watch Strap"],
-    piece: ["Style Piece", "Layer", "Fashion Item"],
-  };
-
-  const titles = categoryTitleMap[target] || categoryTitleMap.piece;
   const out = [];
 
   palettePriority.forEach((entry, idx) => {
     const keyword = getRetailColorKeywords(entry.hex)[0] || "Classic";
+    const subtype = getCategorySubtypeForIndex(target, idx);
+
     out.push({
       id: `preview_${entry.role}_${idx + 1}`,
-      title: `${titleCase(keyword)} ${titles[idx % titles.length]}`,
+      title: `${titleCase(keyword)} ${titleCase(subtype)}`,
       category: target,
       color_hex: entry.hex,
       brand: "Preview",
-      affiliate_link: buildAmazonSearchLink(`${keyword} ${target}`),
+      affiliate_link: buildAmazonSearchLink(
+        buildPrimaryContextualQuery({
+          colorKeyword: keyword,
+          category: target,
+          industry: retrievalIntent?.industry || "fashion",
+          subtype,
+        })
+      ),
       image_url: null,
       style_tags: [normalizeModeLabel(retrievalIntent.selected_mode).toLowerCase(), entry.role],
     });
@@ -1073,11 +1179,11 @@ function generateRetrievalPreviewProducts(retrievalIntent) {
   if (palettePriority[0]?.hex) {
     out.push({
       id: "preview_distractor_1",
-      title: `Bright Accent ${titles[0]}`,
+      title: `Bright Accent ${titleCase(getCategorySubtypeForIndex(target, 0))}`,
       category: target,
       color_hex: safeHex(rotateHue(palettePriority[0].hex, 130)) || "#FF4D4D",
       brand: "Preview",
-      affiliate_link: buildAmazonSearchLink(`bright ${target}`),
+      affiliate_link: buildAmazonSearchLink(`bright ${getCategorySubtypeForIndex(target, 0)} fashion outfit`),
       image_url: null,
       style_tags: ["experimental"],
     });
@@ -1110,17 +1216,33 @@ function buildRoleQueries(retrievalIntent) {
   const target = normalizeCategoryLabel(retrievalIntent?.target_item, "piece");
   const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
 
-  return palettePriority.map((entry) => {
+  return palettePriority.map((entry, idx) => {
     const keywords = getRetailColorKeywords(entry.hex);
-    const primaryQuery = `${keywords[0]} ${target}`;
+    const subtype = getCategorySubtypeForIndex(target, idx);
+
+    const primaryQuery = buildPrimaryContextualQuery({
+      colorKeyword: keywords[0],
+      category: target,
+      industry: retrievalIntent?.industry || "fashion",
+      subtype,
+    });
+
     const expandedQueries = dedupeKeywords(
-      keywords.map((keyword) => `${keyword} ${target}`)
+      keywords.flatMap((keyword) =>
+        buildContextualAmazonQueries({
+          colorKeyword: keyword,
+          category: target,
+          industry: retrievalIntent?.industry || "fashion",
+          limit: 3,
+        })
+      )
     ).slice(0, 3);
 
     return {
       role: entry.role,
       shopper_label: shopperLabelForRole(entry.role),
       color_hex: entry.hex,
+      subtype,
       primary_query: primaryQuery,
       expanded_queries: expandedQueries,
       amazon_link: buildAmazonSearchLink(primaryQuery),
@@ -1171,10 +1293,22 @@ function buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts = [
       amazon_link:
         product.affiliate_link ||
         roleRow?.amazon_link ||
-        buildAmazonSearchLink(`${getRetailColorKeywords(product.color_hex)[0] || "classic"} ${retrievalIntent.target_item}`),
+        buildAmazonSearchLink(
+          buildPrimaryContextualQuery({
+            colorKeyword: getRetailColorKeywords(product.color_hex)[0] || "classic",
+            category: retrievalIntent.target_item,
+            industry: retrievalIntent?.industry || "fashion",
+            subtype: roleRow?.subtype || getCategorySubtypeForIndex(retrievalIntent.target_item, 0),
+          })
+        ),
       query:
         roleRow?.primary_query ||
-        `${getRetailColorKeywords(product.color_hex)[0] || "classic"} ${retrievalIntent.target_item}`,
+        buildPrimaryContextualQuery({
+          colorKeyword: getRetailColorKeywords(product.color_hex)[0] || "classic",
+          category: retrievalIntent.target_item,
+          industry: retrievalIntent?.industry || "fashion",
+          subtype: roleRow?.subtype || getCategorySubtypeForIndex(retrievalIntent.target_item, 0),
+        }),
       why_it_matches: product.why_it_matches,
     };
   });
@@ -1193,10 +1327,22 @@ function buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts = [
       amazon_link:
         product.affiliate_link ||
         roleRow?.amazon_link ||
-        buildAmazonSearchLink(`${getRetailColorKeywords(product.color_hex)[0] || "classic"} ${retrievalIntent.target_item}`),
+        buildAmazonSearchLink(
+          buildPrimaryContextualQuery({
+            colorKeyword: getRetailColorKeywords(product.color_hex)[0] || "classic",
+            category: retrievalIntent.target_item,
+            industry: retrievalIntent?.industry || "fashion",
+            subtype: roleRow?.subtype || getCategorySubtypeForIndex(retrievalIntent.target_item, 0),
+          })
+        ),
       query:
         roleRow?.primary_query ||
-        `${getRetailColorKeywords(product.color_hex)[0] || "classic"} ${retrievalIntent.target_item}`,
+        buildPrimaryContextualQuery({
+          colorKeyword: getRetailColorKeywords(product.color_hex)[0] || "classic",
+          category: retrievalIntent.target_item,
+          industry: retrievalIntent?.industry || "fashion",
+          subtype: roleRow?.subtype || getCategorySubtypeForIndex(retrievalIntent.target_item, 0),
+        }),
     };
   });
 
