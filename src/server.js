@@ -19,7 +19,7 @@
 // ✅ Mode-aware suggested adjustments
 // ✅ Retrieval intent
 // ✅ Shopping assist
-// ✅ Human color naming across outputs
+// ✅ Human color naming across ALL surfaced colors
 // ✅ Step-based errors
 //
 // REQUIRED ENV
@@ -286,6 +286,10 @@ function buildNamedHex(hex) {
   return safe ? { hex: safe, name: getColorName(safe) } : null;
 }
 
+function buildNamedHexes(hexes) {
+  return uniqHexes(hexes).map(buildNamedHex).filter(Boolean);
+}
+
 /* =========================
    CATEGORY / MODE HELPERS
 ========================= */
@@ -530,19 +534,19 @@ function generatePalettesV2(dominantHex) {
 
   const meta = classifyColorV2(base);
 
-  const balance = uniqHexes(["#111111", "#2B2B2B", "#7A7A7A", "#CFCFCF", "#F5F1E8"]);
+  const balanceHexes = uniqHexes(["#111111", "#2B2B2B", "#7A7A7A", "#CFCFCF", "#F5F1E8"]);
 
   const comp = rotateHue(base, 180);
   const split1 = rotateHue(base, 150);
   const split2 = rotateHue(base, 210);
 
-  const contrast = uniqHexes([
+  const contrastHexes = uniqHexes([
     setTone(comp, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
     setTone(split1, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
     setTone(split2, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
   ]);
 
-  const cohesion = uniqHexes([
+  const cohesionHexes = uniqHexes([
     setTone(base, { sMul: 0.85, lAdd: 0.18 }),
     setTone(base, { sMul: 0.75, lAdd: 0.08 }),
     setTone(base, { sMul: 1.0, lAdd: 0.0 }),
@@ -550,22 +554,22 @@ function generatePalettesV2(dominantHex) {
     setTone(base, { sMul: 0.8, lAdd: -0.18 }),
   ]);
 
-  let emphasis;
+  let emphasisHexes;
   if (meta.vivid) {
-    emphasis = uniqHexes([
+    emphasisHexes = uniqHexes([
       setTone(rotateHue(base, 200), { sMul: 0.85, lAdd: meta.dark ? 0.22 : 0.06 }),
       setTone(rotateHue(base, -200), { sMul: 0.85, lAdd: meta.dark ? 0.22 : 0.06 }),
       setTone(rotateHue(base, 120), { sMul: 0.8, lAdd: meta.dark ? 0.18 : 0.04 }),
     ]);
   } else {
-    emphasis = uniqHexes([
+    emphasisHexes = uniqHexes([
       setTone(base, { sMul: 1.25, lAdd: 0.02 }),
       setTone(rotateHue(base, 150), { sMul: 1.1, lAdd: 0.06 }),
       setTone(rotateHue(base, 210), { sMul: 1.1, lAdd: 0.06 }),
     ]);
   }
 
-  const natural = uniqHexes(
+  const naturalHexes = uniqHexes(
     [
       chroma.mix(base, "#556B2F", 0.55, "lab").hex().toUpperCase(),
       chroma.mix(base, "#8B4513", 0.5, "lab").hex().toUpperCase(),
@@ -580,7 +584,7 @@ function generatePalettesV2(dominantHex) {
   const tet1 = rotateHue(base, 90);
   const tet2 = rotateHue(base, 270);
 
-  const explore = uniqHexes([
+  const exploreHexes = uniqHexes([
     setTone(tri1, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
     setTone(tri2, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
     setTone(tet1, { sMul: 0.9, lAdd: meta.dark ? 0.22 : 0.05 }),
@@ -600,33 +604,33 @@ function generatePalettesV2(dominantHex) {
     },
     palettes: {
       balance: {
-        hexes: balance,
-        named_hexes: balance.map(buildNamedHex).filter(Boolean),
+        hexes: balanceHexes,
+        named_hexes: buildNamedHexes(balanceHexes),
         reason: "Neutral anchors for stability and broad compatibility.",
       },
       contrast: {
-        hexes: contrast,
-        named_hexes: contrast.map(buildNamedHex).filter(Boolean),
+        hexes: contrastHexes,
+        named_hexes: buildNamedHexes(contrastHexes),
         reason: "Complementary and split-complementary accents with tonal normalization.",
       },
       cohesion: {
-        hexes: cohesion,
-        named_hexes: cohesion.map(buildNamedHex).filter(Boolean),
+        hexes: cohesionHexes,
+        named_hexes: buildNamedHexes(cohesionHexes),
         reason: "Same-hue tonal ladder from light to deep for cohesive systems.",
       },
       emphasis: {
-        hexes: emphasis,
-        named_hexes: emphasis.map(buildNamedHex).filter(Boolean),
+        hexes: emphasisHexes,
+        named_hexes: buildNamedHexes(emphasisHexes),
         reason: meta.vivid ? "Vivid base with controlled accents." : "Muted base with boosted saturation and energetic shift.",
       },
       natural: {
-        hexes: natural,
-        named_hexes: natural.map(buildNamedHex).filter(Boolean),
+        hexes: naturalHexes,
+        named_hexes: buildNamedHexes(naturalHexes),
         reason: "Earth blends via LAB mixing with muted toning.",
       },
       explore: {
-        hexes: explore,
-        named_hexes: explore.map(buildNamedHex).filter(Boolean),
+        hexes: exploreHexes,
+        named_hexes: buildNamedHexes(exploreHexes),
         reason: "Triad and tetrad harmonies with tonal normalization.",
       },
     },
@@ -780,9 +784,9 @@ function buildDetectedPalette(colorRoles, normalizedColors) {
     secondary: secondaryHexes,
     accent: accentHexes,
     named: {
-      primary: primaryHexes.map(buildNamedHex).filter(Boolean),
-      secondary: secondaryHexes.map(buildNamedHex).filter(Boolean),
-      accent: accentHexes.map(buildNamedHex).filter(Boolean),
+      primary: buildNamedHexes(primaryHexes),
+      secondary: buildNamedHexes(secondaryHexes),
+      accent: buildNamedHexes(accentHexes),
     },
   };
 }
@@ -959,7 +963,7 @@ function buildSuggestedAdjustment(scoreBreakdown, colorRoles, bestMode) {
       return `This look performs best in Cohesion mode. Reducing the intensity of ${accentName} would improve tonal unity and strengthen overall harmony.`;
     }
 
-    return `This look performs best in Cohesion mode. Tightening the tonal range around ${anchorName} would create a more seamless and refined visual flow.`;
+    return `This look performs best in Cohesion mode. Tightening the tonal range around the ${anchorName} anchor would create a more seamless and refined visual flow.`;
   }
 
   if (mode === "Contrast") {
@@ -1043,6 +1047,11 @@ function getDisplayPaletteForRetrieval(outfitAnalysis) {
     primary: Array.isArray(detected.primary) ? detected.primary : [],
     secondary: Array.isArray(detected.secondary) ? detected.secondary : [],
     accent_group: Array.isArray(detected.accent) ? detected.accent : [],
+    named: detected.named || {
+      primary: buildNamedHexes(Array.isArray(detected.primary) ? detected.primary : []),
+      secondary: buildNamedHexes(Array.isArray(detected.secondary) ? detected.secondary : []),
+      accent: buildNamedHexes(Array.isArray(detected.accent) ? detected.accent : []),
+    },
   };
 }
 
@@ -1416,6 +1425,7 @@ function generateRetrievalPreviewProducts(retrievalIntent) {
       title: `${titleCase(keyword)} ${titleCase(subtype)}`,
       category: target,
       color_hex: entry.hex,
+      color_name: entry.name || getColorName(entry.hex),
       brand: "Preview",
       affiliate_link: buildAmazonSearchLink(
         buildPrimaryContextualQuery({
@@ -1431,11 +1441,13 @@ function generateRetrievalPreviewProducts(retrievalIntent) {
   });
 
   if (palettePriority[0]?.hex) {
+    const distractorHex = safeHex(rotateHue(palettePriority[0].hex, 130)) || "#FF4D4D";
     out.push({
       id: "preview_distractor_1",
       title: `Bright Accent ${titleCase(getCategorySubtypeForIndex(target, 0))}`,
       category: target,
-      color_hex: safeHex(rotateHue(palettePriority[0].hex, 130)) || "#FF4D4D",
+      color_hex: distractorHex,
+      color_name: getColorName(distractorHex),
       brand: "Preview",
       affiliate_link: buildAmazonSearchLink(`bright ${getCategorySubtypeForIndex(target, 0)} fashion outfit`),
       image_url: null,
