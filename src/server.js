@@ -1,7 +1,8 @@
 // src/server.js
 // FULL REWRITE — VisionCore backend
-// V2 COLOR ENGINE + GHOST PIPELINE + OUTFIT SCORING + RETRIEVAL INTENT
-// + SHOPPING ASSIST + HUMAN COLOR NAMES + DEBUG STATUS + STEP-BASED ERRORS
+// V2 COLOR ENGINE + GHOST PIPELINE + OUTFIT SCORING + STYLE IDENTITY
+// + RETRIEVAL INTENT + SHOPPING ASSIST + HUMAN COLOR NAMES
+// + DEBUG STATUS + STEP-BASED ERRORS
 //
 // ROUTES
 // ✅ GET  /
@@ -16,6 +17,7 @@
 // - No timing block in responses
 // - Clear step-based errors
 // - Human-readable color names included across outputs
+// - Style identity included in outfit analysis
 //
 // REQUIRED ENV
 // - CLOUDINARY_CLOUD_NAME
@@ -674,7 +676,9 @@ function assignColorRoles(normalizedColors) {
       const hueGap = hueDistance(anchor.hex, c.hex);
       const dist = colorDistanceLab(anchor.hex, c.hex);
       const vividBoost = c.vivid ? 4 : 0;
-      const score = clamp100(65 - Math.abs(hueGap - 35) * 0.45 - Math.abs(dist - 35) * 0.35 + vividBoost + c.pct * 18);
+      const score = clamp100(
+        65 - Math.abs(hueGap - 35) * 0.45 - Math.abs(dist - 35) * 0.35 + vividBoost + c.pct * 18
+      );
       return { ...c, _roleScore: score };
     })
     .sort((a, b) => b._roleScore - a._roleScore);
@@ -708,7 +712,9 @@ function assignColorRoles(normalizedColors) {
 
   const stabilizer =
     stabilizerCandidates[0] ||
-    colors.filter((c) => c.hex !== anchor.hex && c.hex !== support.hex).sort((a, b) => getSat(a.hex) - getSat(b.hex))[0] ||
+    colors
+      .filter((c) => c.hex !== anchor.hex && c.hex !== support.hex)
+      .sort((a, b) => getSat(a.hex) - getSat(b.hex))[0] ||
     anchor;
 
   return [
@@ -857,6 +863,60 @@ function computeModeScores(scoreBreakdown) {
     .sort((a, b) => b.score - a.score);
 }
 
+/* =========================
+   STYLE IDENTITY SYSTEM
+========================= */
+function deriveBaseArchetype(bestMode) {
+  const mode = normalizeModeLabel(bestMode);
+
+  const map = {
+    Cohesion: "Minimalist",
+    Natural: "Natural",
+    Balance: "Classic",
+    Contrast: "Statement",
+    Explore: "Creative",
+  };
+
+  return map[mode] || "Classic";
+}
+
+function deriveModifier(scoreBreakdown = {}) {
+  const harmony = Number(scoreBreakdown.harmony || 0);
+  const applicability = Number(scoreBreakdown.applicability || 0);
+  const versatility = Number(scoreBreakdown.versatility || 0);
+  const boldness = Number(scoreBreakdown.boldness || 0);
+
+  if (boldness >= 82) return "Bold";
+  if (harmony >= 86 && boldness <= 45) return "Controlled";
+  if (versatility >= 90) return "Modern";
+  if (applicability >= 88) return "Refined";
+
+  if (
+    harmony >= 78 &&
+    applicability >= 78 &&
+    versatility >= 78 &&
+    boldness >= 40 &&
+    boldness <= 75
+  ) {
+    return "Balanced";
+  }
+
+  if (boldness <= 38) return "Soft";
+
+  return "Modern";
+}
+
+function deriveStyleIdentity(bestMode, scoreBreakdown = {}) {
+  const modifier = deriveModifier(scoreBreakdown);
+  const baseArchetype = deriveBaseArchetype(bestMode);
+
+  return {
+    modifier,
+    base_archetype: baseArchetype,
+    label: `${modifier} ${baseArchetype}`,
+  };
+}
+
 function buildWhyThisWorks(colorRoles) {
   const anchor = colorRoles.find((r) => r.role === "anchor");
   const support = colorRoles.find((r) => r.role === "support");
@@ -892,6 +952,7 @@ function buildOutfitAnalysis({ dominantHex, topColors }) {
   const modeScores = computeModeScores(scoreBreakdown);
   const best = modeScores[0] || { mode: "Balance", score: 0 };
   const detectedPalette = buildDetectedPalette(colorRoles, normalizedColors);
+  const styleIdentity = deriveStyleIdentity(best.mode, scoreBreakdown);
 
   const outfitScore = Math.round(
     clamp100(
@@ -911,6 +972,7 @@ function buildOutfitAnalysis({ dominantHex, topColors }) {
     mode_scores: modeScores,
     detected_palette: detectedPalette,
     color_roles: colorRoles,
+    style_identity: styleIdentity,
     why_this_works: buildWhyThisWorks(colorRoles),
     suggested_adjustment: buildSuggestedAdjustment(scoreBreakdown, colorRoles),
   };
