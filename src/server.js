@@ -1,8 +1,5 @@
 // src/server.js
 // FULL REWRITE — VisionCore backend
-// V2 COLOR ENGINE + GHOST PIPELINE + OUTFIT SCORING + STYLE IDENTITY
-// + RETRIEVAL INTENT + SHOPPING ASSIST + HUMAN COLOR NAMES
-// + DEBUG STATUS + STEP-BASED ERRORS
 //
 // ROUTES
 // ✅ GET  /
@@ -12,12 +9,18 @@
 // ✅ POST /api/recommendations
 // ✅ POST /api/retrieval/preview
 //
-// NOTES
-// - Full rewrite, not a patch
-// - No timing block in responses
-// - Clear step-based errors
-// - Human-readable color names included across outputs
-// - Style identity included in outfit analysis
+// FEATURES
+// ✅ Multer-hardened uploads
+// ✅ Cloudinary upload + color analysis
+// ✅ Pixelcut background removal with timeout handling
+// ✅ V2 palette engine
+// ✅ Outfit scoring
+// ✅ Style identity system
+// ✅ Mode-aware suggested adjustments
+// ✅ Retrieval intent
+// ✅ Shopping assist
+// ✅ Human color naming across outputs
+// ✅ Step-based errors
 //
 // REQUIRED ENV
 // - CLOUDINARY_CLOUD_NAME
@@ -246,33 +249,33 @@ function getColorName(hex) {
 
   if (s < 0.06 && l < 0.12) return "Jet Black";
   if (s < 0.08 && l < 0.18) return "Black";
-  if (s < 0.10 && l < 0.36) return "Charcoal";
+  if (s < 0.1 && l < 0.36) return "Charcoal";
   if (s < 0.12 && l < 0.58) return "Gray";
   if (s < 0.12 && l < 0.78) return "Soft Gray";
-  if (s < 0.10 && l > 0.92) return "Pure White";
+  if (s < 0.1 && l > 0.92) return "Pure White";
   if (s < 0.16 && l > 0.82) return "Ivory";
   if (s < 0.18 && l > 0.68) return "Cream";
 
-  if (h >= 345 || h < 8) return l < 0.50 ? "Crimson" : "Rose";
+  if (h >= 345 || h < 8) return l < 0.5 ? "Crimson" : "Rose";
   if (h >= 8 && h < 18) return l < 0.48 ? "Brick Red" : "Coral";
   if (h >= 315 && h < 345) return l < 0.55 ? "Berry" : "Dusty Rose";
 
   if (h >= 18 && h < 30) return l < 0.45 ? "Rich Brown" : "Warm Tan";
-  if (h >= 30 && h < 40) return l < 0.50 ? "Cognac" : "Camel";
-  if (h >= 40 && h < 55) return l < 0.50 ? "Mustard" : "Sand Beige";
+  if (h >= 30 && h < 40) return l < 0.5 ? "Cognac" : "Camel";
+  if (h >= 40 && h < 55) return l < 0.5 ? "Mustard" : "Sand Beige";
 
-  if (h >= 55 && h < 72) return l < 0.50 ? "Olive" : "Soft Olive";
+  if (h >= 55 && h < 72) return l < 0.5 ? "Olive" : "Soft Olive";
 
-  if (h >= 72 && h < 110) return l < 0.50 ? "Olive Green" : "Muted Sage";
+  if (h >= 72 && h < 110) return l < 0.5 ? "Olive Green" : "Muted Sage";
   if (h >= 110 && h < 150) return l < 0.45 ? "Forest Green" : "Soft Green";
 
   if (h >= 150 && h < 185) return l < 0.45 ? "Deep Teal" : "Teal";
-  if (h >= 185 && h < 205) return l < 0.50 ? "Blue Teal" : "Sea Blue";
+  if (h >= 185 && h < 205) return l < 0.5 ? "Blue Teal" : "Sea Blue";
 
   if (h >= 205 && h < 230) return l < 0.45 ? "Navy" : "Soft Blue";
   if (h >= 230 && h < 250) return l < 0.48 ? "Deep Blue" : "Powder Blue";
 
-  if (h >= 250 && h < 280) return l < 0.50 ? "Royal Purple" : "Periwinkle";
+  if (h >= 250 && h < 280) return l < 0.5 ? "Royal Purple" : "Periwinkle";
   if (h >= 280 && h < 315) return l < 0.55 ? "Plum" : "Lavender";
 
   return "Neutral Tone";
@@ -599,32 +602,32 @@ function generatePalettesV2(dominantHex) {
       balance: {
         hexes: balance,
         named_hexes: balance.map(buildNamedHex).filter(Boolean),
-        reason: "Neutral anchors for stability + broad compatibility.",
+        reason: "Neutral anchors for stability and broad compatibility.",
       },
       contrast: {
         hexes: contrast,
         named_hexes: contrast.map(buildNamedHex).filter(Boolean),
-        reason: "Complementary + split-complementary accents, tonally normalized.",
+        reason: "Complementary and split-complementary accents with tonal normalization.",
       },
       cohesion: {
         hexes: cohesion,
         named_hexes: cohesion.map(buildNamedHex).filter(Boolean),
-        reason: "Same-hue tonal ladder (light → deep) for cohesive systems.",
+        reason: "Same-hue tonal ladder from light to deep for cohesive systems.",
       },
       emphasis: {
         hexes: emphasis,
         named_hexes: emphasis.map(buildNamedHex).filter(Boolean),
-        reason: meta.vivid ? "Vivid base: controlled accents." : "Muted base: boosted saturation + energetic shift.",
+        reason: meta.vivid ? "Vivid base with controlled accents." : "Muted base with boosted saturation and energetic shift.",
       },
       natural: {
         hexes: natural,
         named_hexes: natural.map(buildNamedHex).filter(Boolean),
-        reason: "Earth blends via LAB mixing + muted toning.",
+        reason: "Earth blends via LAB mixing with muted toning.",
       },
       explore: {
         hexes: explore,
         named_hexes: explore.map(buildNamedHex).filter(Boolean),
-        reason: "Triad + tetrad harmonies with tonal normalization.",
+        reason: "Triad and tetrad harmonies with tonal normalization.",
       },
     },
   };
@@ -926,23 +929,60 @@ function buildWhyThisWorks(colorRoles) {
   return `The ${anchor?.name || anchor?.hex || "anchor tone"} anchor establishes the visual center, while ${support?.name || support?.hex || "the support tone"} extends the palette with compatible support. ${stabilizer?.name || stabilizer?.hex || "the stabilizer tone"} adds grounding stability, and ${accent?.name || accent?.hex || "the accent tone"} introduces controlled emphasis without overwhelming the overall structure.`;
 }
 
-function buildSuggestedAdjustment(scoreBreakdown, colorRoles) {
+function buildSuggestedAdjustment(scoreBreakdown, colorRoles, bestMode) {
+  const mode = normalizeModeLabel(bestMode);
+
   const accent = colorRoles.find((r) => r.role === "accent");
   const stabilizer = colorRoles.find((r) => r.role === "stabilizer");
+  const support = colorRoles.find((r) => r.role === "support");
+  const anchor = colorRoles.find((r) => r.role === "anchor");
 
-  if (scoreBreakdown.boldness > 84 && scoreBreakdown.harmony < 78) {
-    return "Reducing the saturation of the accent color slightly would improve harmony without losing visual energy.";
+  const accentName = accent?.name || accent?.hex || "the accent tone";
+  const stabilizerName = stabilizer?.name || stabilizer?.hex || "the stabilizer tone";
+  const supportName = support?.name || support?.hex || "the support tone";
+  const anchorName = anchor?.name || anchor?.hex || "the anchor tone";
+
+  if (mode === "Natural") {
+    if (scoreBreakdown.boldness > 70) {
+      return `This look performs best in Natural mode. Softening the intensity of ${accentName} slightly would create a more grounded and organic balance.`;
+    }
+
+    if (scoreBreakdown.versatility < 75) {
+      return `This look performs best in Natural mode. Introducing a slightly more neutral or earthy support tone alongside ${supportName} would improve versatility.`;
+    }
+
+    return `This look performs best in Natural mode. Deepening ${stabilizerName} slightly would enhance grounding and elevate the overall composition.`;
   }
-  if (scoreBreakdown.versatility < 74) {
-    return "Introducing one more neutral or muted support tone would improve versatility and make the palette easier to extend.";
+
+  if (mode === "Cohesion") {
+    if (scoreBreakdown.boldness > 65) {
+      return `This look performs best in Cohesion mode. Reducing the intensity of ${accentName} would improve tonal unity and strengthen overall harmony.`;
+    }
+
+    return `This look performs best in Cohesion mode. Tightening the tonal range around ${anchorName} would create a more seamless and refined visual flow.`;
   }
-  if (scoreBreakdown.applicability < 75) {
-    return "A softer support tone or cleaner neutral anchor would make this palette more usable across real-world combinations.";
+
+  if (mode === "Contrast") {
+    if (scoreBreakdown.boldness < 60) {
+      return `This look performs best in Contrast mode. Increasing the separation between ${anchorName} and ${accentName} would create stronger visual impact.`;
+    }
+
+    return `This look performs best in Contrast mode. Slightly sharpening the contrast between tones would make the composition feel more dynamic.`;
   }
-  if (accent && stabilizer) {
-    return `Keeping ${accent.name || accent.hex} as a controlled accent and leaning more on ${stabilizer.name || stabilizer.hex} for grounding would increase cohesion and improve the overall outfit score.`;
+
+  if (mode === "Balance") {
+    if (scoreBreakdown.boldness > 75) {
+      return `This look performs best in Balance mode. Slightly reducing the dominance of ${accentName} would improve overall equilibrium.`;
+    }
+
+    return `This look performs best in Balance mode. Reinforcing ${stabilizerName} would create a more even distribution across the palette.`;
   }
-  return "A slightly darker grounding tone or a less saturated accent would improve cohesion and increase the overall outfit score.";
+
+  if (mode === "Explore") {
+    return `This look performs best in Explore mode. You can push variation further by introducing a more unexpected accent while maintaining structure through ${anchorName}.`;
+  }
+
+  return `Refining the relationship between ${anchorName}, ${supportName}, and ${accentName} would improve the overall outfit score.`;
 }
 
 function buildOutfitAnalysis({ dominantHex, topColors }) {
@@ -974,7 +1014,7 @@ function buildOutfitAnalysis({ dominantHex, topColors }) {
     color_roles: colorRoles,
     style_identity: styleIdentity,
     why_this_works: buildWhyThisWorks(colorRoles),
-    suggested_adjustment: buildSuggestedAdjustment(scoreBreakdown, colorRoles),
+    suggested_adjustment: buildSuggestedAdjustment(scoreBreakdown, colorRoles, best.mode),
   };
 }
 
