@@ -1,18 +1,23 @@
 // src/server.js
-// FULL REPLACEMENT — V2 COLOR ENGINE + GHOST PIPELINE + OUTFIT SCORING + RETRIEVAL INTENT
-// + SHOPPING ASSIST + HUMAN COLOR NAMES + STEP-BASED ERRORS + DEBUG STATUS
+// FULL REWRITE — VisionCore backend
+// V2 COLOR ENGINE + GHOST PIPELINE + OUTFIT SCORING + RETRIEVAL INTENT
+// + SHOPPING ASSIST + HUMAN COLOR NAMES + DEBUG STATUS + STEP-BASED ERRORS
 //
+// ROUTES
+// ✅ GET  /
+// ✅ GET  /health
+// ✅ GET  /api/debug/status
 // ✅ POST /api/images/transform
 // ✅ POST /api/recommendations
 // ✅ POST /api/retrieval/preview
-// ✅ GET /, GET /health, GET /api/debug/status
-// ✅ Dev-safe CORS
-// ✅ Multer hardened
-// ✅ Human-readable color names added everywhere relevant
-// ✅ Step-based errors instead of vague "network issues"
-// ✅ Pixelcut timeout handling with clear messages
 //
-// REQUIRED Render env vars:
+// NOTES
+// - Full rewrite, not a patch
+// - No timing block in responses
+// - Clear step-based errors
+// - Human-readable color names included across outputs
+//
+// REQUIRED ENV
 // - CLOUDINARY_CLOUD_NAME
 // - CLOUDINARY_API_KEY
 // - CLOUDINARY_API_SECRET
@@ -34,8 +39,8 @@ const PORT = process.env.PORT || 10000;
 const PIXELCUT_TIMEOUT_MS = 45000;
 
 /* =========================
-   CORS (DEV / PREVIEW SAFE)
-   ========================= */
+   CORS
+========================= */
 app.use(
   cors({
     origin: "*",
@@ -47,21 +52,21 @@ app.options("*", cors());
 
 /* =========================
    BODY PARSING
-   ========================= */
+========================= */
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 /* =========================
-   MULTER (HARDENED)
-   ========================= */
+   MULTER
+========================= */
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
 });
 
 /* =========================
-   CLOUDINARY CONFIG
-   ========================= */
+   CLOUDINARY
+========================= */
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -70,10 +75,15 @@ cloudinary.config({
 });
 
 /* =========================
-   HEALTH + DEBUG
-   ========================= */
-app.get("/", (_req, res) => res.json({ ok: true, service: "cie-core-backend" }));
-app.get("/health", (_req, res) => res.json({ ok: true }));
+   BASIC ROUTES
+========================= */
+app.get("/", (_req, res) => {
+  res.json({ ok: true, service: "cie-core-backend" });
+});
+
+app.get("/health", (_req, res) => {
+  res.json({ ok: true });
+});
 
 app.get("/api/debug/status", (_req, res) => {
   res.json({
@@ -93,22 +103,19 @@ app.get("/api/debug/status", (_req, res) => {
 
 /* =========================
    ERROR HELPERS
-   ========================= */
-function stepError(step, error, status = 500, extra = {}) {
-  return {
-    status,
-    body: {
-      success: false,
-      step,
-      error: error?.message || String(error) || "Unknown error",
-      ...extra,
-    },
-  };
+========================= */
+function sendStepError(res, status, step, error, extra = {}) {
+  return res.status(status).json({
+    success: false,
+    step,
+    error: error?.message || String(error) || "Unknown error",
+    ...extra,
+  });
 }
 
 /* =========================
    GENERIC HELPERS
-   ========================= */
+========================= */
 function clamp01(x) {
   return Math.max(0, Math.min(1, x));
 }
@@ -129,48 +136,32 @@ function safeHex(hex) {
   }
 }
 
-function rotateHue(hex, deg) {
-  const c = chroma(hex);
-  const [h, s, l] = c.hsl();
-  const hh = ((h || 0) + deg + 360) % 360;
-  return chroma.hsl(hh, clamp01(s || 0), clamp01(l || 0)).hex().toUpperCase();
-}
-
-function setTone(hex, { sMul = 1, lMul = 1, lAdd = 0, sAdd = 0 } = {}) {
-  const c = chroma(hex);
-  let [h, s, l] = c.hsl();
-  h = Number.isFinite(h) ? h : 0;
-  s = clamp01((s || 0) * sMul + sAdd);
-  l = clamp01((l || 0) * lMul + lAdd);
-  return chroma.hsl(h, s, l).hex().toUpperCase();
-}
-
-function uniqHexes(arr) {
-  const seen = new Set();
-  const out = [];
-  for (const h of arr || []) {
-    const hx = safeHex(h);
-    if (!hx) continue;
-    if (seen.has(hx)) continue;
-    seen.add(hx);
-    out.push(hx);
-  }
-  return out;
-}
-
 function avg(nums) {
   const clean = (nums || []).filter((n) => Number.isFinite(n));
   if (!clean.length) return 0;
   return clean.reduce((a, b) => a + b, 0) / clean.length;
 }
 
-function titleCase(s) {
-  const str = String(s || "").trim().toLowerCase();
-  return str ? str.charAt(0).toUpperCase() + str.slice(1) : "";
+function uniqHexes(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const hex of arr || []) {
+    const safe = safeHex(hex);
+    if (!safe) continue;
+    if (seen.has(safe)) continue;
+    seen.add(safe);
+    out.push(safe);
+  }
+  return out;
 }
 
-function normalizeText(s) {
-  return String(s || "").trim().toLowerCase();
+function titleCase(value) {
+  const s = String(value || "").trim().toLowerCase();
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
+}
+
+function normalizeText(value) {
+  return String(value || "").trim().toLowerCase();
 }
 
 function getHue(hex) {
@@ -224,9 +215,25 @@ function topNColorsByPct(topColors, n = 5) {
     .filter(Boolean);
 }
 
+function rotateHue(hex, deg) {
+  const c = chroma(hex);
+  const [h, s, l] = c.hsl();
+  const hh = ((h || 0) + deg + 360) % 360;
+  return chroma.hsl(hh, clamp01(s || 0), clamp01(l || 0)).hex().toUpperCase();
+}
+
+function setTone(hex, { sMul = 1, lMul = 1, lAdd = 0, sAdd = 0 } = {}) {
+  const c = chroma(hex);
+  let [h, s, l] = c.hsl();
+  h = Number.isFinite(h) ? h : 0;
+  s = clamp01((s || 0) * sMul + sAdd);
+  l = clamp01((l || 0) * lMul + lAdd);
+  return chroma.hsl(h, s, l).hex().toUpperCase();
+}
+
 /* =========================
-   HUMAN COLOR NAMING
-   ========================= */
+   HUMAN COLOR NAMES
+========================= */
 function getColorName(hex) {
   const safe = safeHex(hex);
   if (!safe) return "Unknown";
@@ -235,43 +242,35 @@ function getColorName(hex) {
   const s = getSat(safe);
   const l = getLight(safe);
 
-  // neutrals
   if (s < 0.06 && l < 0.12) return "Jet Black";
   if (s < 0.08 && l < 0.18) return "Black";
-  if (s < 0.1 && l < 0.36) return "Charcoal";
+  if (s < 0.10 && l < 0.36) return "Charcoal";
   if (s < 0.12 && l < 0.58) return "Gray";
   if (s < 0.12 && l < 0.78) return "Soft Gray";
-  if (s < 0.1 && l > 0.92) return "Pure White";
+  if (s < 0.10 && l > 0.92) return "Pure White";
   if (s < 0.16 && l > 0.82) return "Ivory";
   if (s < 0.18 && l > 0.68) return "Cream";
 
-  // reds / pinks
-  if (h >= 345 || h < 8) return l < 0.5 ? "Crimson" : "Rose";
+  if (h >= 345 || h < 8) return l < 0.50 ? "Crimson" : "Rose";
   if (h >= 8 && h < 18) return l < 0.48 ? "Brick Red" : "Coral";
   if (h >= 315 && h < 345) return l < 0.55 ? "Berry" : "Dusty Rose";
 
-  // orange / tan / brown
   if (h >= 18 && h < 30) return l < 0.45 ? "Rich Brown" : "Warm Tan";
-  if (h >= 30 && h < 40) return l < 0.5 ? "Cognac" : "Camel";
-  if (h >= 40 && h < 55) return l < 0.5 ? "Mustard" : "Sand Beige";
+  if (h >= 30 && h < 40) return l < 0.50 ? "Cognac" : "Camel";
+  if (h >= 40 && h < 55) return l < 0.50 ? "Mustard" : "Sand Beige";
 
-  // yellow / olive
-  if (h >= 55 && h < 72) return l < 0.5 ? "Olive" : "Soft Olive";
+  if (h >= 55 && h < 72) return l < 0.50 ? "Olive" : "Soft Olive";
 
-  // greens
-  if (h >= 72 && h < 110) return l < 0.5 ? "Olive Green" : "Muted Sage";
+  if (h >= 72 && h < 110) return l < 0.50 ? "Olive Green" : "Muted Sage";
   if (h >= 110 && h < 150) return l < 0.45 ? "Forest Green" : "Soft Green";
 
-  // teal / cyan
   if (h >= 150 && h < 185) return l < 0.45 ? "Deep Teal" : "Teal";
-  if (h >= 185 && h < 205) return l < 0.5 ? "Blue Teal" : "Sea Blue";
+  if (h >= 185 && h < 205) return l < 0.50 ? "Blue Teal" : "Sea Blue";
 
-  // blues
   if (h >= 205 && h < 230) return l < 0.45 ? "Navy" : "Soft Blue";
   if (h >= 230 && h < 250) return l < 0.48 ? "Deep Blue" : "Powder Blue";
 
-  // purple / lavender
-  if (h >= 250 && h < 280) return l < 0.5 ? "Royal Purple" : "Periwinkle";
+  if (h >= 250 && h < 280) return l < 0.50 ? "Royal Purple" : "Periwinkle";
   if (h >= 280 && h < 315) return l < 0.55 ? "Plum" : "Lavender";
 
   return "Neutral Tone";
@@ -283,8 +282,8 @@ function buildNamedHex(hex) {
 }
 
 /* =========================
-   TEXT / LABEL HELPERS
-   ========================= */
+   CATEGORY / MODE HELPERS
+========================= */
 function normalizeModeLabel(mode) {
   const m = normalizeText(mode);
   const map = {
@@ -386,7 +385,7 @@ function buildAmazonSearchLink(query) {
 
 /* =========================
    CATEGORY / CONTEXT LOCK
-   ========================= */
+========================= */
 const CATEGORY_SUBTYPE_MAP = {
   jacket: ["jacket", "bomber jacket", "overshirt", "coat"],
   shirt: ["shirt", "tee", "button up", "top"],
@@ -483,7 +482,7 @@ function buildPrimaryContextualQuery({ colorKeyword, category, industry = "fashi
 
 /* =========================
    COLOR FAMILY (V2 TAXONOMY)
-   ========================= */
+========================= */
 function classifyColorV2(dominantHex) {
   const c = chroma(dominantHex);
   const [hRaw, sRaw, lRaw] = c.hsl();
@@ -519,7 +518,7 @@ function classifyColorV2(dominantHex) {
 
 /* =========================
    V2 PALETTE ENGINE
-   ========================= */
+========================= */
 function generatePalettesV2(dominantHex) {
   const base = safeHex(dominantHex);
   if (!base) throw new Error("Invalid dominantHex");
@@ -631,7 +630,7 @@ function generatePalettesV2(dominantHex) {
 
 /* =========================
    OUTFIT SCORING ENGINE
-   ========================= */
+========================= */
 const MODE_RULES = {
   Balance: { harmony: 0.34, applicability: 0.28, versatility: 0.24, boldness: 0.14 },
   Contrast: { harmony: 0.2, applicability: 0.2, versatility: 0.2, boldness: 0.4 },
@@ -919,7 +918,7 @@ function buildOutfitAnalysis({ dominantHex, topColors }) {
 
 /* =========================
    RETRIEVAL INTENT + PIECE SCORING
-   ========================= */
+========================= */
 function getRoleHexMap(outfitAnalysis) {
   const roles = Array.isArray(outfitAnalysis?.color_roles) ? outfitAnalysis.color_roles : [];
   return {
@@ -1525,14 +1524,18 @@ function buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts = [
 
 /* =========================
    IMAGE OPS
-   ========================= */
+========================= */
 async function uploadToCloudinary(file) {
   const dataUri = `data:${file.mimetype};base64,${file.buffer.toString("base64")}`;
   const result = await cloudinary.uploader.upload(dataUri, {
     folder: "cie",
     resource_type: "image",
   });
-  if (!result?.secure_url) throw new Error("Cloudinary upload failed (no secure_url)");
+
+  if (!result?.secure_url) {
+    throw new Error("Cloudinary upload failed (no secure_url)");
+  }
+
   return result.secure_url;
 }
 
@@ -1555,7 +1558,10 @@ async function callPixelcutRemoveBg(imageUrl) {
         "X-API-KEY": apiKey,
         Accept: "application/json",
       },
-      body: JSON.stringify({ image_url: imageUrl, format: "png" }),
+      body: JSON.stringify({
+        image_url: imageUrl,
+        format: "png",
+      }),
       signal: controller.signal,
     });
 
@@ -1595,7 +1601,9 @@ async function analyzeGhostColors(ghostUrl) {
   });
 
   const colors = Array.isArray(res.colors) ? res.colors : [];
-  if (!colors.length) throw new Error("Color analysis failed (no colors returned)");
+  if (!colors.length) {
+    throw new Error("Color analysis failed (no colors returned)");
+  }
 
   const dominantHex = safeHex(String(colors[0][0])) || "#000000";
   const topColors = colors
@@ -1619,7 +1627,7 @@ async function analyzeGhostColors(ghostUrl) {
 
 /* =========================
    ROUTES
-   ========================= */
+========================= */
 app.post("/api/images/transform", upload.any(), async (req, res) => {
   try {
     const files = Array.isArray(req.files) ? req.files : [];
@@ -1637,24 +1645,21 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
     try {
       publicUrl = await uploadToCloudinary(file);
     } catch (error) {
-      const payload = stepError("upload_cloudinary", error, 500);
-      return res.status(payload.status).json(payload.body);
+      return sendStepError(res, 500, "upload_cloudinary", error);
     }
 
     let ghostUrl;
     try {
       ghostUrl = await callPixelcutRemoveBg(publicUrl);
     } catch (error) {
-      const payload = stepError("pixelcut_remove_bg", error, 502);
-      return res.status(payload.status).json(payload.body);
+      return sendStepError(res, 502, "pixelcut_remove_bg", error);
     }
 
     let analysis;
     try {
       analysis = await analyzeGhostColors(ghostUrl);
     } catch (error) {
-      const payload = stepError("analyze_cloudinary_colors", error, 500);
-      return res.status(payload.status).json(payload.body);
+      return sendStepError(res, 500, "analyze_cloudinary_colors", error);
     }
 
     let v2;
@@ -1666,8 +1671,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         topColors: analysis.topColors,
       });
     } catch (error) {
-      const payload = stepError("palette_engine", error, 500);
-      return res.status(payload.status).json(payload.body);
+      return sendStepError(res, 500, "palette_engine", error);
     }
 
     return res.json({
@@ -1721,8 +1725,7 @@ app.post("/api/recommendations", async (req, res) => {
     try {
       analysis = await analyzeGhostColors(ghostImageUrl);
     } catch (error) {
-      const payload = stepError("analyze_cloudinary_colors", error, 500);
-      return res.status(payload.status).json(payload.body);
+      return sendStepError(res, 500, "analyze_cloudinary_colors", error);
     }
 
     let v2;
@@ -1734,12 +1737,11 @@ app.post("/api/recommendations", async (req, res) => {
         topColors: analysis.topColors,
       });
     } catch (error) {
-      const payload = stepError("palette_engine", error, 500);
-      return res.status(payload.status).json(payload.body);
+      return sendStepError(res, 500, "palette_engine", error);
     }
 
     const m = String(mode || "").toLowerCase().trim();
-    const map = {
+    const modeMap = {
       balance: "balance",
       contrast: "contrast",
       cohesion: "cohesion",
@@ -1753,7 +1755,7 @@ app.post("/api/recommendations", async (req, res) => {
       bold: "emphasis",
     };
 
-    const key = map[m] || "balance";
+    const key = modeMap[m] || "balance";
     const pack = v2.palettes[key];
 
     let retrievalIntent = null;
@@ -1840,8 +1842,7 @@ app.post("/api/retrieval/preview", async (req, res) => {
       try {
         analysis = await analyzeGhostColors(ghostImageUrl);
       } catch (error) {
-        const payload = stepError("analyze_cloudinary_colors", error, 500);
-        return res.status(payload.status).json(payload.body);
+        return sendStepError(res, 500, "analyze_cloudinary_colors", error);
       }
 
       dominantHex = analysis.dominantHex;
@@ -1853,8 +1854,7 @@ app.post("/api/retrieval/preview", async (req, res) => {
           topColors: analysis.topColors,
         });
       } catch (error) {
-        const payload = stepError("palette_engine", error, 500);
-        return res.status(payload.status).json(payload.body);
+        return sendStepError(res, 500, "palette_engine", error);
       }
     }
 
@@ -1901,7 +1901,7 @@ app.post("/api/retrieval/preview", async (req, res) => {
 
 /* =========================
    MULTER ERROR HANDLER
-   ========================= */
+========================= */
 app.use((err, _req, res, _next) => {
   if (err?.name === "MulterError") {
     return res.status(400).json({
@@ -1928,7 +1928,7 @@ app.use((err, _req, res, _next) => {
 
 /* =========================
    START
-   ========================= */
+========================= */
 app.listen(PORT, () => {
   console.log(`✅ CIE Core backend running on port ${PORT}`);
 });
