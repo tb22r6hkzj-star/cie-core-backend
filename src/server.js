@@ -24,7 +24,6 @@
 // ✅ Step-based errors
 // ✅ LAB / perceptual intelligence layer added safely
 // ✅ Visual importance layer added safely
-// ✅ Better white / black / structural accent promotion
 //
 // REQUIRED ENV
 // - CLOUDINARY_CLOUD_NAME
@@ -91,7 +90,7 @@ app.get("/", (_req, res) => {
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "cie-core-backend" });
+  res.json({ ok: true });
 });
 
 app.get("/api/debug/status", (_req, res) => {
@@ -311,48 +310,6 @@ function getPerceptualTraits(hex) {
   };
 }
 
-function getRelativeLuminance(hex) {
-  try {
-    const [r, g, b] = chroma(hex).rgb().map((channel) => {
-      const v = channel / 255;
-      return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
-    });
-
-    return round2(0.2126 * r + 0.7152 * g + 0.0722 * b);
-  } catch {
-    return 0;
-  }
-}
-
-function getContrastRatio(a, b) {
-  try {
-    const l1 = getRelativeLuminance(a);
-    const l2 = getRelativeLuminance(b);
-    const lighter = Math.max(l1, l2);
-    const darker = Math.min(l1, l2);
-    return round2((lighter + 0.05) / (darker + 0.05));
-  } catch {
-    return 1;
-  }
-}
-
-function isNearWhiteHex(hex) {
-  const lab = getLab(hex);
-  const sat = getSat(hex);
-  return lab.l >= 84 && sat <= 0.18;
-}
-
-function isNearBlackHex(hex) {
-  const lab = getLab(hex);
-  const sat = getSat(hex);
-  return lab.l <= 18 && sat <= 0.18;
-}
-
-function isStructuralNeutralHex(hex) {
-  const sat = getSat(hex);
-  return sat <= 0.16;
-}
-
 function buildColorProfile(hex, pct = 0) {
   const safe = safeHex(hex);
   if (!safe) return null;
@@ -370,69 +327,10 @@ function buildColorProfile(hex, pct = 0) {
     light: round2(getLight(safe)),
     lab,
     perceptual: traits,
-    luminance: getRelativeLuminance(safe),
     family: classification.family,
     lane: classification.lane,
     vivid: classification.vivid,
   };
-}
-
-function computeVisualImportanceScore(profile, dominantHex) {
-  if (!profile?.hex) return 0;
-
-  const contrastToDominant = dominantHex ? getContrastRatio(profile.hex, dominantHex) : 1;
-  const chromaMagnitude = Number(profile?.perceptual?.chroma_magnitude || 0);
-  const labL = Number(profile?.lab?.l || 0);
-
-  const pctScore = Number(profile?.pct || 0) * 42;
-  const contrastScore = Math.min(30, Math.max(0, (contrastToDominant - 1) * 8.5));
-  const chromaScore = Math.min(14, chromaMagnitude * 0.18);
-
-  let structuralBoost = 0;
-  if (isNearWhiteHex(profile.hex)) structuralBoost += 22;
-  if (isNearBlackHex(profile.hex)) structuralBoost += 22;
-  if (isStructuralNeutralHex(profile.hex) && contrastToDominant >= 2.5) structuralBoost += 10;
-  if (labL >= 88 || labL <= 14) structuralBoost += 8;
-
-  return Math.round(clamp100(pctScore + contrastScore + chromaScore + structuralBoost));
-}
-
-function buildVisualImportancePool(topColors, dominantHex) {
-  return (topColors || [])
-    .map((entry) => {
-      const profile = buildColorProfile(entry?.hex, entry?.pct || 0);
-      if (!profile) return null;
-
-      return {
-        ...profile,
-        visual_importance: computeVisualImportanceScore(profile, dominantHex),
-        contrast_to_dominant: dominantHex ? getContrastRatio(profile.hex, dominantHex) : 1,
-      };
-    })
-    .filter(Boolean)
-    .sort((a, b) => {
-      const vi = Number(b.visual_importance || 0) - Number(a.visual_importance || 0);
-      if (vi !== 0) return vi;
-      return Number(b.pct || 0) - Number(a.pct || 0);
-    });
-}
-
-function buildRoleDescriptor(roleObj) {
-  if (!roleObj) return "tone";
-
-  const name = roleObj?.name || roleObj?.hex || "tone";
-  const lower = String(name).toLowerCase();
-  const traits = roleObj?.perceptual || {};
-  const descriptors = [];
-
-  for (const value of [traits.depth, traits.temperature, traits.intensity]) {
-    const clean = String(value || "").trim().toLowerCase();
-    if (!clean || clean === "balanced") continue;
-    if (lower.includes(clean)) continue;
-    descriptors.push(clean);
-  }
-
-  return `${descriptors.join(" ")} ${name}`.replace(/\s+/g, " ").trim();
 }
 
 /* =========================
@@ -445,38 +343,42 @@ function getColorName(hex) {
   const h = getHue(safe);
   const s = getSat(safe);
   const l = getLight(safe);
-  const lab = getLab(safe);
 
-  if (lab.l >= 92 && s <= 0.08) return "Soft White";
-  if (lab.l >= 86 && s <= 0.12) return "Linen White";
-  if (lab.l >= 78 && s <= 0.15) return "Ivory";
-  if (lab.l <= 8 && s <= 0.06) return "Jet Black";
-  if (lab.l <= 14 && s <= 0.08) return "Graphite Black";
-  if (lab.l <= 24 && s <= 0.10) return "Charcoal";
-
+  // ultra-neutrals / luxury neutrals
+  if (s < 0.05 && l < 0.10) return "Jet Black";
+  if (s < 0.07 && l < 0.18) return "Graphite Black";
+  if (s < 0.09 && l < 0.28) return "Charcoal";
   if (s < 0.10 && l < 0.40) return "Slate Gray";
   if (s < 0.12 && l < 0.58) return "Stone Gray";
   if (s < 0.12 && l < 0.74) return "Ash Gray";
+  if (s < 0.10 && l > 0.93) return "Soft White";
+  if (s < 0.15 && l > 0.84) return "Linen White";
+  if (s < 0.18 && l > 0.74) return "Ivory";
   if (s < 0.22 && l > 0.64) return "Soft Linen";
 
+  // reds / oxblood / rose
   if (h >= 345 || h < 8) return l < 0.48 ? "Deep Crimson" : "Rose";
   if (h >= 8 && h < 18) return l < 0.46 ? "Brick Red" : "Coral";
   if (h >= 315 && h < 345) return l < 0.54 ? "Berry" : "Dusty Rose";
 
+  // browns / tans / camel
   if (h >= 18 && h < 28) return l < 0.42 ? "Rich Brown" : "Desert Tan";
   if (h >= 28 && h < 40) return l < 0.48 ? "Cognac" : "Camel";
   if (h >= 40 && h < 50) return l < 0.52 ? "Burnt Umber" : "Warm Sand";
   if (h >= 50 && h < 60) return l < 0.56 ? "Golden Amber" : "Sand Beige";
 
+  // olives / greens
   if (h >= 60 && h < 78) return l < 0.48 ? "Olive" : "Soft Olive";
   if (h >= 78 && h < 105) return l < 0.50 ? "Olive Green" : "Muted Sage";
   if (h >= 105 && h < 145) return l < 0.44 ? "Forest Green" : "Sage";
   if (h >= 145 && h < 175) return l < 0.44 ? "Deep Teal" : "Teal";
 
+  // blue-green / blue / navy
   if (h >= 175 && h < 205) return l < 0.50 ? "Steel Teal" : "Sea Blue";
   if (h >= 205 && h < 228) return l < 0.42 ? "Midnight Navy" : "Steel Blue";
   if (h >= 228 && h < 250) return l < 0.48 ? "Deep Navy" : "Powder Blue";
 
+  // purples
   if (h >= 250 && h < 280) return l < 0.48 ? "Royal Purple" : "Periwinkle";
   if (h >= 280 && h < 315) return l < 0.54 ? "Plum" : "Lavender";
 
@@ -490,6 +392,161 @@ function buildNamedHex(hex) {
 
 function buildNamedHexes(hexes) {
   return uniqHexes(hexes).map(buildNamedHex).filter(Boolean);
+}
+
+/* =========================
+   VISUAL IMPORTANCE LAYER
+========================= */
+function isNearWhite(hex) {
+  const safe = safeHex(hex);
+  if (!safe) return false;
+  const lab = getLab(safe);
+  const chromaMagnitude = getChromaMagnitudeFromLab(lab);
+  return lab.l >= 78 && chromaMagnitude <= 22;
+}
+
+function isNearBlack(hex) {
+  const safe = safeHex(hex);
+  if (!safe) return false;
+  const lab = getLab(safe);
+  const chromaMagnitude = getChromaMagnitudeFromLab(lab);
+  return lab.l <= 26 && chromaMagnitude <= 20;
+}
+
+function buildVisualImportance(hex, pct = 0) {
+  const safe = safeHex(hex);
+  if (!safe) return null;
+
+  const lab = getLab(safe);
+  const traits = getPerceptualTraits(safe);
+  const classification = classifyColorV2(safe);
+
+  const light = getLight(safe);
+  const sat = getSat(safe);
+  const chromaMagnitude = Number(traits.chroma_magnitude || 0);
+
+  const highlightStrength = isNearWhite(safe)
+    ? clamp100((lab.l - 72) * 2.2 + (22 - Math.min(chromaMagnitude, 22)) * 1.5)
+    : 0;
+
+  const shadowStrength = isNearBlack(safe)
+    ? clamp100((30 - lab.l) * 2.6 + (20 - Math.min(chromaMagnitude, 20)) * 1.4)
+    : 0;
+
+  const accentStrength = clamp100(
+    Math.min(40, chromaMagnitude * 0.6) +
+      Math.min(34, sat * 38) +
+      Math.min(26, Math.abs(lab.a) * 0.32 + Math.abs(lab.b) * 0.24)
+  );
+
+  const contrastPotential = Math.round(
+    clamp100(
+      highlightStrength * 0.42 +
+        shadowStrength * 0.42 +
+        accentStrength * 0.32 +
+        Number(pct || 0) * 12
+    )
+  );
+
+  const visualWeight = Math.round(
+    clamp100(
+      Number(pct || 0) * 62 +
+        highlightStrength * 0.38 +
+        shadowStrength * 0.38 +
+        accentStrength * 0.26
+    )
+  );
+
+  return {
+    hex: safe,
+    pct: round2(pct),
+    highlight_strength: Math.round(highlightStrength),
+    shadow_strength: Math.round(shadowStrength),
+    accent_strength: Math.round(accentStrength),
+    contrast_potential: contrastPotential,
+    visual_weight: visualWeight,
+    role_hint:
+      highlightStrength >= 60
+        ? "highlight"
+        : shadowStrength >= 60
+          ? "shadow"
+          : accentStrength >= 52
+            ? "accent"
+            : "body",
+    family: classification.family,
+    lane: classification.lane,
+    light: round2(light),
+    sat: round2(sat),
+    lab,
+    perceptual: traits,
+  };
+}
+
+function collectImportantColors(topColors, dominantHex) {
+  const sourceHexes = uniqHexes([dominantHex, ...topNColorsByPct(topColors, 8)]);
+  const out = [];
+
+  for (const hex of sourceHexes) {
+    const pct = Number(topColors?.find((x) => safeHex(x?.hex) === hex)?.pct || 0);
+    const importance = buildVisualImportance(hex, pct);
+    if (!importance) continue;
+    out.push({
+      hex,
+      name: getColorName(hex),
+      pct: round2(pct),
+      importance,
+      lab: importance.lab,
+      perceptual: importance.perceptual,
+    });
+  }
+
+  const sortedByImportance = [...out].sort(
+    (a, b) => Number(b?.importance?.visual_weight || 0) - Number(a?.importance?.visual_weight || 0)
+  );
+
+  const sortedByContrast = [...out].sort(
+    (a, b) => Number(b?.importance?.contrast_potential || 0) - Number(a?.importance?.contrast_potential || 0)
+  );
+
+  return {
+    important_colors: sortedByImportance.slice(0, 6),
+    contrast_colors: sortedByContrast.slice(0, 4),
+  };
+}
+
+function mergeDominantAndImportantColors(topColors, dominantHex) {
+  const dominantPool = uniqHexes([dominantHex, ...topNColorsByPct(topColors, 6)]);
+  const { important_colors } = collectImportantColors(topColors, dominantHex);
+
+  const mergedHexes = uniqHexes([
+    ...dominantPool,
+    ...important_colors.map((x) => x.hex),
+  ]);
+
+  return mergedHexes.slice(0, 8).map((hex, idx) => {
+    const pct =
+      idx === 0
+        ? Math.max(0.3, Number(topColors?.find((x) => safeHex(x?.hex) === hex)?.pct || 0) || 0.3)
+        : Number(topColors?.find((x) => safeHex(x?.hex) === hex)?.pct || 0);
+
+    const profile = buildColorProfile(hex, pct);
+    const importance = buildVisualImportance(hex, pct);
+
+    return {
+      hex: profile.hex,
+      name: profile.name,
+      pct: profile.pct,
+      hue: profile.hue,
+      sat: profile.sat,
+      light: profile.light,
+      lab: profile.lab,
+      perceptual: profile.perceptual,
+      family: profile.family,
+      lane: profile.lane,
+      vivid: profile.vivid,
+      importance,
+    };
+  });
 }
 
 /* =========================
@@ -851,41 +908,7 @@ const MODE_RULES = {
 };
 
 function normalizeDetectedColors(topColors, dominantHex) {
-  const dominantPool = uniqHexes([dominantHex, ...topNColorsByPct(topColors, 8)]);
-  const importancePool = buildVisualImportancePool(topColors, dominantHex)
-    .slice(0, 6)
-    .map((entry) => entry.hex);
-
-  const pool = uniqHexes([...dominantPool, ...importancePool]);
-
-  return pool.slice(0, 8).map((hex, idx) => {
-    const source = (topColors || []).find((x) => safeHex(x?.hex) === hex);
-    const pct =
-      idx === 0
-        ? Math.max(0.3, Number(source?.pct || 0) || 0.3)
-        : Number(source?.pct || 0);
-
-    const profile = buildColorProfile(hex, pct);
-    const visualImportance = computeVisualImportanceScore(profile, dominantHex);
-    const contrastToDominant = dominantHex ? getContrastRatio(profile.hex, dominantHex) : 1;
-
-    return {
-      hex: profile.hex,
-      name: profile.name,
-      pct: profile.pct,
-      hue: profile.hue,
-      sat: profile.sat,
-      light: profile.light,
-      lab: profile.lab,
-      perceptual: profile.perceptual,
-      luminance: profile.luminance,
-      visual_importance: visualImportance,
-      contrast_to_dominant: contrastToDominant,
-      family: profile.family,
-      lane: profile.lane,
-      vivid: profile.vivid,
-    };
-  });
+  return mergeDominantAndImportantColors(topColors, dominantHex).slice(0, 8);
 }
 
 function assignColorRoles(normalizedColors) {
@@ -896,19 +919,19 @@ function assignColorRoles(normalizedColors) {
     .map((c) => {
       const labL = Number(c?.lab?.l || 0);
       const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
-      const visualImportance = Number(c?.visual_importance || 0);
+      const visualWeight = Number(c?.importance?.visual_weight || 0);
 
-      const midDepthScore = 100 - Math.min(50, Math.abs(labL - 52) * 1.4);
-      const pctScore = c.pct * 52;
-      const chromaScore = 100 - Math.min(45, Math.abs(chromaMagnitude - 32) * 1.1);
+      const midDepthScore = 100 - Math.min(50, Math.abs(labL - 50) * 1.35);
+      const pctScore = Number(c?.pct || 0) * 44;
+      const chromaScore = 100 - Math.min(45, Math.abs(chromaMagnitude - 28) * 1.1);
 
       return {
         ...c,
         _anchorScore: clamp100(
           midDepthScore * 0.26 +
-            pctScore * 0.38 +
+            pctScore * 0.28 +
             chromaScore * 0.18 +
-            visualImportance * 0.18
+            visualWeight * 0.28
         ),
       };
     })
@@ -920,9 +943,9 @@ function assignColorRoles(normalizedColors) {
     .filter((c) => c.hex !== anchor.hex)
     .map((c) => {
       const dist = colorDistanceLab(anchor.hex, c.hex);
-      const pctBoost = c.pct * 14;
-      const visualImportance = Number(c?.visual_importance || 0);
-      const score = clamp100(80 - Math.abs(dist - 28) * 1.02 + pctBoost + visualImportance * 0.12);
+      const pctBoost = Number(c?.pct || 0) * 15;
+      const visualWeight = Number(c?.importance?.visual_weight || 0) * 0.18;
+      const score = clamp100(82 - Math.abs(dist - 26) * 1.02 + pctBoost + visualWeight);
       return { ...c, _roleScore: score };
     })
     .sort((a, b) => b._roleScore - a._roleScore);
@@ -934,20 +957,19 @@ function assignColorRoles(normalizedColors) {
     .map((c) => {
       const dist = colorDistanceLab(anchor.hex, c.hex);
       const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
-      const visualImportance = Number(c?.visual_importance || 0);
-      const contrastBoost = Math.min(24, Number(c?.contrast_to_dominant || 1) * 5);
       const vividBoost = c.vivid ? 8 : 0;
-      const whiteBlackBoost =
-        isNearWhiteHex(c.hex) || isNearBlackHex(c.hex) ? 18 : 0;
+      const highlightBoost = Number(c?.importance?.highlight_strength || 0) * 0.22;
+      const shadowBoost = Number(c?.importance?.shadow_strength || 0) * 0.18;
+      const contrastBoost = Number(c?.importance?.contrast_potential || 0) * 0.28;
 
       const score = clamp100(
-        16 +
-          Math.min(46, dist * 0.72) +
-          Math.min(18, chromaMagnitude * 0.22) +
-          contrastBoost +
+        18 +
+          Math.min(54, dist * 0.88) +
+          Math.min(24, chromaMagnitude * 0.3) +
           vividBoost +
-          whiteBlackBoost +
-          visualImportance * 0.16
+          highlightBoost +
+          shadowBoost +
+          contrastBoost
       );
 
       return { ...c, _roleScore: score };
@@ -961,17 +983,12 @@ function assignColorRoles(normalizedColors) {
     .map((c) => {
       const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
       const labL = Number(c?.lab?.l || 0);
-      const visualImportance = Number(c?.visual_importance || 0);
-
       const neutralBoost = c.family === "neutral" ? 18 : 0;
       const mutedBoost = chromaMagnitude < 22 ? 16 : 0;
       const groundingBoost = labL < 42 ? 10 : 0;
-      const blackWhiteBoost =
-        isNearWhiteHex(c.hex) || isNearBlackHex(c.hex) ? 12 : 0;
+      const shadowBoost = Number(c?.importance?.shadow_strength || 0) * 0.2;
 
-      const score = clamp100(
-        48 + neutralBoost + mutedBoost + groundingBoost + blackWhiteBoost + visualImportance * 0.12
-      );
+      const score = clamp100(52 + neutralBoost + mutedBoost + groundingBoost + shadowBoost);
       return { ...c, _roleScore: score };
     })
     .sort((a, b) => b._roleScore - a._roleScore);
@@ -980,13 +997,10 @@ function assignColorRoles(normalizedColors) {
     stabilizerCandidates[0] ||
     colors
       .filter((c) => c.hex !== anchor.hex && c.hex !== support.hex)
-      .sort((a, b) => {
-        const aWeight =
-          Number(a?.perceptual?.chroma_magnitude || 999) - Number(a?.visual_importance || 0) * 0.25;
-        const bWeight =
-          Number(b?.perceptual?.chroma_magnitude || 999) - Number(b?.visual_importance || 0) * 0.25;
-        return aWeight - bWeight;
-      })[0] ||
+      .sort(
+        (a, b) =>
+          Number(a?.perceptual?.chroma_magnitude || 999) - Number(b?.perceptual?.chroma_magnitude || 999)
+      )[0] ||
     anchor;
 
   return [
@@ -998,8 +1012,7 @@ function assignColorRoles(normalizedColors) {
       weight: 0.34,
       lab: anchor.lab,
       perceptual: anchor.perceptual,
-      visual_importance: anchor.visual_importance,
-      contrast_to_dominant: anchor.contrast_to_dominant,
+      importance: anchor.importance,
     },
     {
       hex: support.hex,
@@ -1009,8 +1022,7 @@ function assignColorRoles(normalizedColors) {
       weight: 0.28,
       lab: support.lab,
       perceptual: support.perceptual,
-      visual_importance: support.visual_importance,
-      contrast_to_dominant: support.contrast_to_dominant,
+      importance: support.importance,
     },
     {
       hex: accent.hex,
@@ -1020,8 +1032,7 @@ function assignColorRoles(normalizedColors) {
       weight: 0.14,
       lab: accent.lab,
       perceptual: accent.perceptual,
-      visual_importance: accent.visual_importance,
-      contrast_to_dominant: accent.contrast_to_dominant,
+      importance: accent.importance,
     },
     {
       hex: stabilizer.hex,
@@ -1031,8 +1042,7 @@ function assignColorRoles(normalizedColors) {
       weight: 0.24,
       lab: stabilizer.lab,
       perceptual: stabilizer.perceptual,
-      visual_importance: stabilizer.visual_importance,
-      contrast_to_dominant: stabilizer.contrast_to_dominant,
+      importance: stabilizer.importance,
     },
   ];
 }
@@ -1073,109 +1083,54 @@ function buildDetectedPalette(colorRoles, normalizedColors) {
   };
 }
 
-function computeHarmonyScore(colors, normalizedColors = []) {
+function computeHarmonyScore(colors) {
   if (!colors.length) return 70;
-
-  const lookup = Object.fromEntries((normalizedColors || []).map((c) => [c.hex, c]));
   const distances = [];
-  const contrastPenalties = [];
-
   for (let i = 0; i < colors.length; i += 1) {
     for (let j = i + 1; j < colors.length; j += 1) {
       distances.push(colorDistanceLab(colors[i], colors[j]));
-
-      const a = lookup[colors[i]];
-      const b = lookup[colors[j]];
-      const contrast = getContrastRatio(colors[i], colors[j]);
-
-      if (
-        a?.family === "neutral" &&
-        b?.family === "neutral" &&
-        contrast > 8.5
-      ) {
-        contrastPenalties.push(contrast - 8.5);
-      }
     }
   }
-
   if (!distances.length) return 84;
-
   const avgDist = avg(distances);
-  const penalty = avg(contrastPenalties) * 3.2;
-  return Math.round(clamp100(92 - Math.abs(avgDist - 42) * 0.75 - penalty));
+  return Math.round(clamp100(92 - Math.abs(avgDist - 42) * 0.75));
 }
 
-function computeApplicabilityScore(colors, colorRoles, normalizedColors = []) {
+function computeApplicabilityScore(colors, colorRoles) {
   if (!colors.length) return 70;
-
-  const lookup = Object.fromEntries((normalizedColors || []).map((c) => [c.hex, c]));
   const neutralCount = colors.filter((hex) => classifyColorV2(hex).family === "neutral").length;
   const earthCount = colors.filter((hex) => classifyColorV2(hex).family === "earth").length;
   const stabilizerExists = (colorRoles || []).some((r) => r.role === "stabilizer");
   const anchorExists = (colorRoles || []).some((r) => r.role === "anchor");
-
-  const extremeCount = colors.filter((hex) => {
-    const c = lookup[hex];
-    return isNearWhiteHex(hex) || isNearBlackHex(hex) || Number(c?.contrast_to_dominant || 1) >= 4.5;
-  }).length;
-
   return Math.round(
-    clamp100(
-      60 +
-        neutralCount * 8 +
-        earthCount * 5 +
-        (stabilizerExists ? 8 : 0) +
-        (anchorExists ? 5 : 0) +
-        Math.min(10, extremeCount * 2)
-    )
+    clamp100(62 + neutralCount * 8 + earthCount * 5 + (stabilizerExists ? 8 : 0) + (anchorExists ? 5 : 0))
   );
 }
 
-function computeVersatilityScore(colors, normalizedColors = []) {
+function computeVersatilityScore(colors) {
   if (!colors.length) return 70;
-
-  const lookup = Object.fromEntries((normalizedColors || []).map((c) => [c.hex, c]));
   const sats = colors.map((hex) => getSat(hex));
   const lights = colors.map((hex) => getLight(hex));
   const neutralCount = colors.filter((hex) => classifyColorV2(hex).family === "neutral").length;
   const satAvg = avg(sats);
   const lightSpread = Math.max(...lights) - Math.min(...lights);
-
-  const harshAccentPenalty = colors.filter((hex) => {
-    const c = lookup[hex];
-    return Number(c?.visual_importance || 0) > 80 && Number(c?.perceptual?.chroma_magnitude || 0) > 45;
-  }).length * 3;
-
-  return Math.round(
-    clamp100(58 + neutralCount * 7 + (1 - satAvg) * 18 + Math.min(16, lightSpread * 28) - harshAccentPenalty)
-  );
+  return Math.round(clamp100(58 + neutralCount * 7 + (1 - satAvg) * 18 + Math.min(16, lightSpread * 28)));
 }
 
-function computeBoldnessScore(colors, normalizedColors = []) {
+function computeBoldnessScore(colors) {
   if (!colors.length) return 60;
-
-  const lookup = Object.fromEntries((normalizedColors || []).map((c) => [c.hex, c]));
   const distances = [];
   const sats = colors.map((hex) => getSat(hex));
   const lights = colors.map((hex) => getLight(hex));
-
   for (let i = 0; i < colors.length; i += 1) {
     for (let j = i + 1; j < colors.length; j += 1) {
       distances.push(hueDistance(colors[i], colors[j]));
     }
   }
-
   const hueAvg = avg(distances);
   const satAvg = avg(sats);
   const lightSpread = Math.max(...lights) - Math.min(...lights);
-
-  const importanceBoost = avg(
-    colors.map((hex) => Number(lookup[hex]?.visual_importance || 0))
-  ) * 0.12;
-
-  return Math.round(
-    clamp100(20 + Math.min(36, hueAvg * 0.18) + satAvg * 24 + lightSpread * 20 + importanceBoost)
-  );
+  return Math.round(clamp100(22 + Math.min(38, hueAvg * 0.18) + satAvg * 24 + lightSpread * 20));
 }
 
 function computeScoreBreakdown(colorRoles, normalizedColors) {
@@ -1184,10 +1139,10 @@ function computeScoreBreakdown(colorRoles, normalizedColors) {
   const colors = uniqHexes([...roleOrdered, ...fallback]).slice(0, 5);
 
   return {
-    harmony: computeHarmonyScore(colors, normalizedColors),
-    applicability: computeApplicabilityScore(colors, colorRoles, normalizedColors),
-    versatility: computeVersatilityScore(colors, normalizedColors),
-    boldness: computeBoldnessScore(colors, normalizedColors),
+    harmony: computeHarmonyScore(colors),
+    applicability: computeApplicabilityScore(colors, colorRoles),
+    versatility: computeVersatilityScore(colors),
+    boldness: computeBoldnessScore(colors),
   };
 }
 
@@ -1267,10 +1222,15 @@ function buildWhyThisWorks(colorRoles) {
   const accent = colorRoles.find((r) => r.role === "accent");
   const stabilizer = colorRoles.find((r) => r.role === "stabilizer");
 
-  const anchorDescriptor = buildRoleDescriptor(anchor);
-  const supportDescriptor = buildRoleDescriptor(support);
-  const stabilizerDescriptor = buildRoleDescriptor(stabilizer);
-  const accentDescriptor = buildRoleDescriptor(accent);
+  const anchorTraits = anchor?.perceptual || {};
+  const supportTraits = support?.perceptual || {};
+  const accentTraits = accent?.perceptual || {};
+  const stabilizerTraits = stabilizer?.perceptual || {};
+
+  const anchorDescriptor = `${anchorTraits.depth || "mid"} ${anchorTraits.temperature || "balanced"} ${anchor?.name || anchor?.hex || "anchor tone"}`;
+  const supportDescriptor = `${supportTraits.intensity || "balanced"} ${support?.name || support?.hex || "support tone"}`;
+  const stabilizerDescriptor = `${stabilizerTraits.intensity || "balanced"} ${stabilizer?.name || stabilizer?.hex || "stabilizer tone"}`;
+  const accentDescriptor = `${accentTraits.intensity || "balanced"} ${accent?.name || accent?.hex || "accent tone"}`;
 
   return `The ${anchorDescriptor} anchor establishes the visual center, while ${supportDescriptor} extends the palette with compatible support. ${stabilizerDescriptor} adds grounding stability, and ${accentDescriptor} introduces controlled emphasis without overwhelming the overall structure.`;
 }
@@ -1339,6 +1299,7 @@ function buildOutfitAnalysis({ dominantHex, topColors }) {
   const best = modeScores[0] || { mode: "Balance", score: 0 };
   const detectedPalette = buildDetectedPalette(colorRoles, normalizedColors);
   const styleIdentity = deriveStyleIdentity(best.mode, scoreBreakdown);
+  const visualImportance = collectImportantColors(topColors, dominantHex);
 
   const outfitScore = Math.round(
     clamp100(
@@ -1361,6 +1322,7 @@ function buildOutfitAnalysis({ dominantHex, topColors }) {
     style_identity: styleIdentity,
     why_this_works: buildWhyThisWorks(colorRoles),
     suggested_adjustment: buildSuggestedAdjustment(scoreBreakdown, colorRoles, best.mode),
+    visual_importance: visualImportance,
   };
 }
 
@@ -2062,12 +2024,12 @@ async function analyzeGhostColors(ghostUrl) {
   }
 
   const dominantHex = safeHex(String(colors[0][0])) || "#000000";
-
-  const rawTopColors = colors
-    .slice(0, 12)
+  const topColors = colors
+    .slice(0, 10)
     .map(([hex, pct]) => {
       const safe = safeHex(hex) || "#000000";
       const profile = buildColorProfile(safe, pct);
+      const importance = buildVisualImportance(safe, pct);
 
       return {
         hex: safe,
@@ -2075,26 +2037,15 @@ async function analyzeGhostColors(ghostUrl) {
         pct,
         lab: profile?.lab || getLab(safe),
         perceptual: profile?.perceptual || getPerceptualTraits(safe),
-        luminance: profile?.luminance || getRelativeLuminance(safe),
+        importance,
       };
     })
     .filter((x) => !!x.hex);
 
-  const enriched = buildVisualImportancePool(rawTopColors, dominantHex).map((entry) => ({
-    hex: entry.hex,
-    name: entry.name,
-    pct: entry.pct,
-    lab: entry.lab,
-    perceptual: entry.perceptual,
-    luminance: entry.luminance,
-    visual_importance: entry.visual_importance,
-    contrast_to_dominant: entry.contrast_to_dominant,
-  }));
-
   return {
     dominantHex,
     dominantName: getColorName(dominantHex),
-    topColors: enriched,
+    topColors,
   };
 }
 
