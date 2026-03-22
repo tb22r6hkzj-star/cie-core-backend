@@ -22,6 +22,7 @@
 // ✅ Human color naming across ALL surfaced colors
 // ✅ Premium / luxury naming vocabulary
 // ✅ Step-based errors
+// ✅ LAB / perceptual intelligence layer added safely
 //
 // REQUIRED ENV
 // - CLOUDINARY_CLOUD_NAME
@@ -235,6 +236,100 @@ function setTone(hex, { sMul = 1, lMul = 1, lAdd = 0, sAdd = 0 } = {}) {
   s = clamp01((s || 0) * sMul + sAdd);
   l = clamp01((l || 0) * lMul + lAdd);
   return chroma.hsl(h, s, l).hex().toUpperCase();
+}
+
+/* =========================
+   LAB / PERCEPTUAL HELPERS
+========================= */
+function getLab(hex) {
+  try {
+    const [l, a, b] = chroma(hex).lab();
+    return {
+      l: round2(l),
+      a: round2(a),
+      b: round2(b),
+    };
+  } catch {
+    return {
+      l: 0,
+      a: 0,
+      b: 0,
+    };
+  }
+}
+
+function getChromaMagnitudeFromLab(lab) {
+  const a = Number(lab?.a || 0);
+  const b = Number(lab?.b || 0);
+  return round2(Math.sqrt(a * a + b * b));
+}
+
+function getPerceptualTraits(hex) {
+  const safe = safeHex(hex);
+  if (!safe) {
+    return {
+      depth: "mid",
+      temperature: "balanced",
+      bias: "neutral",
+      intensity: "balanced",
+      chroma_magnitude: 0,
+    };
+  }
+
+  const lab = getLab(safe);
+  const chromaMagnitude = getChromaMagnitudeFromLab(lab);
+
+  let depth = "mid";
+  if (lab.l < 30) depth = "deep";
+  else if (lab.l > 75) depth = "light";
+
+  let temperature = "balanced";
+  if (lab.a >= 8 || lab.b >= 8) temperature = "warm";
+  else if (lab.a <= -8 || lab.b <= -8) temperature = "cool";
+
+  let bias = "neutral";
+  if (Math.abs(lab.a) > Math.abs(lab.b)) {
+    if (lab.a > 8) bias = "red";
+    else if (lab.a < -8) bias = "green";
+  } else {
+    if (lab.b > 8) bias = "yellow";
+    else if (lab.b < -8) bias = "blue";
+  }
+
+  let intensity = "balanced";
+  if (chromaMagnitude < 18) intensity = "muted";
+  else if (chromaMagnitude > 55) intensity = "vivid";
+
+  return {
+    depth,
+    temperature,
+    bias,
+    intensity,
+    chroma_magnitude: chromaMagnitude,
+  };
+}
+
+function buildColorProfile(hex, pct = 0) {
+  const safe = safeHex(hex);
+  if (!safe) return null;
+
+  const classification = classifyColorV2(safe);
+  const lab = getLab(safe);
+  const traits = getPerceptualTraits(safe);
+
+  return {
+    hex: safe,
+    name: getColorName(safe),
+    pct: round2(pct),
+    hue: round2(getHue(safe)),
+    sat: round2(getSat(safe)),
+    light: round2(getLight(safe)),
+    lab,
+    perceptual: traits,
+    family: classification.family,
+    lane: classification.lane,
+    vivid: classification.vivid,
+  };
 }
 
 /* =========================
@@ -658,23 +753,27 @@ const MODE_RULES = {
 
 function normalizeDetectedColors(topColors, dominantHex) {
   const pool = uniqHexes([dominantHex, ...topNColorsByPct(topColors, 6)]);
+
   return pool.slice(0, 6).map((hex, idx) => {
     const pct =
       idx === 0
         ? Math.max(0.3, Number(topColors?.find((x) => x.hex === hex)?.pct || 0) || 0.3)
         : Number(topColors?.find((x) => x.hex === hex)?.pct || 0);
 
-    const classification = classifyColorV2(hex);
+    const profile = buildColorProfile(hex, pct);
+
     return {
-      hex,
-      name: getColorName(hex),
-      pct: round2(pct),
-      hue: round2(getHue(hex)),
-      sat: round2(getSat(hex)),
-      light: round2(getLight(hex)),
-      family: classification.family,
-      lane: classification.lane,
-      vivid: classification.vivid,
+      hex: profile.hex,
+      name: profile.name,
+      pct: profile.pct,
+      hue: profile.hue,
+      sat: profile.sat,
+      light: profile.light,
+      lab: profile.lab,
+      perceptual: profile.perceptual,
+      family: profile.family,
+      lane: profile.lane,
+      vivid: profile.vivid,
     };
   });
 }
@@ -683,17 +782,30 @@ function assignColorRoles(normalizedColors) {
   const colors = [...(normalizedColors || [])];
   if (!colors.length) return [];
 
-  const anchor = colors[0];
+  const anchorCandidates = colors
+    .map((c) => {
+      const labL = Number(c?.lab?.l || 0);
+      const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
+
+      const midDepthScore = 100 - Math.min(50, Math.abs(labL - 52) * 1.4);
+      const pctScore = c.pct * 55;
+      const chromaScore = 100 - Math.min(45, Math.abs(chromaMagnitude - 32) * 1.1);
+
+      return {
+        ...c,
+        _anchorScore: clamp100(midDepthScore * 0.3 + pctScore * 0.45 + chromaScore * 0.25),
+      };
+    })
+    .sort((a, b) => b._anchorScore - a._anchorScore);
+
+  const anchor = anchorCandidates[0] || colors[0];
 
   const supportCandidates = colors
     .filter((c) => c.hex !== anchor.hex)
     .map((c) => {
-      const hueGap = hueDistance(anchor.hex, c.hex);
       const dist = colorDistanceLab(anchor.hex, c.hex);
-      const vividBoost = c.vivid ? 4 : 0;
-      const score = clamp100(
-        65 - Math.abs(hueGap - 35) * 0.45 - Math.abs(dist - 35) * 0.35 + vividBoost + c.pct * 18
-      );
+      const pctBoost = c.pct * 16;
+      const score = clamp100(82 - Math.abs(dist - 28) * 1.05 + pctBoost);
       return { ...c, _roleScore: score };
     })
     .sort((a, b) => b._roleScore - a._roleScore);
@@ -703,10 +815,10 @@ function assignColorRoles(normalizedColors) {
   const accentCandidates = colors
     .filter((c) => c.hex !== anchor.hex && c.hex !== support.hex)
     .map((c) => {
-      const hueGap = hueDistance(anchor.hex, c.hex);
-      const sat = getSat(c.hex);
-      const lightGap = Math.abs(getLight(anchor.hex) - getLight(c.hex));
-      const score = clamp100(30 + hueGap * 0.28 + sat * 30 + lightGap * 18);
+      const dist = colorDistanceLab(anchor.hex, c.hex);
+      const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
+      const vividBoost = c.vivid ? 8 : 0;
+      const score = clamp100(20 + Math.min(55, dist * 0.9) + Math.min(25, chromaMagnitude * 0.32) + vividBoost);
       return { ...c, _roleScore: score };
     })
     .sort((a, b) => b._roleScore - a._roleScore);
@@ -716,11 +828,13 @@ function assignColorRoles(normalizedColors) {
   const stabilizerCandidates = colors
     .filter((c) => ![anchor.hex, support.hex, accent.hex].includes(c.hex))
     .map((c) => {
-      const sat = getSat(c.hex);
-      const light = getLight(c.hex);
+      const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
+      const labL = Number(c?.lab?.l || 0);
       const neutralBoost = c.family === "neutral" ? 18 : 0;
-      const groundingBoost = light < 0.35 ? 12 : 0;
-      const score = clamp100(58 + neutralBoost + groundingBoost + (1 - sat) * 18);
+      const mutedBoost = chromaMagnitude < 22 ? 16 : 0;
+      const groundingBoost = labL < 42 ? 10 : 0;
+
+      const score = clamp100(52 + neutralBoost + mutedBoost + groundingBoost);
       return { ...c, _roleScore: score };
     })
     .sort((a, b) => b._roleScore - a._roleScore);
@@ -729,37 +843,48 @@ function assignColorRoles(normalizedColors) {
     stabilizerCandidates[0] ||
     colors
       .filter((c) => c.hex !== anchor.hex && c.hex !== support.hex)
-      .sort((a, b) => getSat(a.hex) - getSat(b.hex))[0] ||
+      .sort(
+        (a, b) =>
+          Number(a?.perceptual?.chroma_magnitude || 999) - Number(b?.perceptual?.chroma_magnitude || 999)
+      )[0] ||
     anchor;
 
   return [
     {
       hex: anchor.hex,
-      name: getColorName(anchor.hex),
+      name: anchor.name || getColorName(anchor.hex),
       role: "anchor",
       family: titleCase(anchor.family),
       weight: 0.34,
+      lab: anchor.lab,
+      perceptual: anchor.perceptual,
     },
     {
       hex: support.hex,
-      name: getColorName(support.hex),
+      name: support.name || getColorName(support.hex),
       role: "support",
       family: titleCase(support.family),
       weight: 0.28,
+      lab: support.lab,
+      perceptual: support.perceptual,
     },
     {
       hex: accent.hex,
-      name: getColorName(accent.hex),
+      name: accent.name || getColorName(accent.hex),
       role: "accent",
       family: titleCase(accent.family),
       weight: 0.14,
+      lab: accent.lab,
+      perceptual: accent.perceptual,
     },
     {
       hex: stabilizer.hex,
-      name: getColorName(stabilizer.hex),
+      name: stabilizer.name || getColorName(stabilizer.hex),
       role: "stabilizer",
       family: titleCase(stabilizer.family),
       weight: 0.24,
+      lab: stabilizer.lab,
+      perceptual: stabilizer.perceptual,
     },
   ];
 }
@@ -939,7 +1064,17 @@ function buildWhyThisWorks(colorRoles) {
   const accent = colorRoles.find((r) => r.role === "accent");
   const stabilizer = colorRoles.find((r) => r.role === "stabilizer");
 
-  return `The ${anchor?.name || anchor?.hex || "anchor tone"} anchor establishes the visual center, while ${support?.name || support?.hex || "the support tone"} extends the palette with compatible support. ${stabilizer?.name || stabilizer?.hex || "the stabilizer tone"} adds grounding stability, and ${accent?.name || accent?.hex || "the accent tone"} introduces controlled emphasis without overwhelming the overall structure.`;
+  const anchorTraits = anchor?.perceptual || {};
+  const supportTraits = support?.perceptual || {};
+  const accentTraits = accent?.perceptual || {};
+  const stabilizerTraits = stabilizer?.perceptual || {};
+
+  const anchorDescriptor = `${anchorTraits.depth || "mid"} ${anchorTraits.temperature || "balanced"} ${anchor?.name || anchor?.hex || "anchor tone"}`;
+  const supportDescriptor = `${supportTraits.intensity || "balanced"} ${support?.name || support?.hex || "support tone"}`;
+  const stabilizerDescriptor = `${stabilizerTraits.intensity || "balanced"} ${stabilizer?.name || stabilizer?.hex || "stabilizer tone"}`;
+  const accentDescriptor = `${accentTraits.intensity || "balanced"} ${accent?.name || accent?.hex || "accent tone"}`;
+
+  return `The ${anchorDescriptor} anchor establishes the visual center, while ${supportDescriptor} extends the palette with compatible support. ${stabilizerDescriptor} adds grounding stability, and ${accentDescriptor} introduces controlled emphasis without overwhelming the overall structure.`;
 }
 
 function buildSuggestedAdjustment(scoreBreakdown, colorRoles, bestMode) {
@@ -1733,10 +1868,14 @@ async function analyzeGhostColors(ghostUrl) {
     .slice(0, 8)
     .map(([hex, pct]) => {
       const safe = safeHex(hex) || "#000000";
+      const profile = buildColorProfile(safe, pct);
+
       return {
         hex: safe,
-        name: getColorName(safe),
+        name: profile?.name || getColorName(safe),
         pct,
+        lab: profile?.lab || getLab(safe),
+        perceptual: profile?.perceptual || getPerceptualTraits(safe),
       };
     })
     .filter((x) => !!x.hex);
