@@ -576,7 +576,137 @@ function classifyStructuralRole(color) {
 
   return "body";
 }
+/* =========================
+   VISUAL INTELLIGENCE LAYER
+========================= */
 
+function classifySurfaceRole(color, dominantHex = null) {
+  const hex = safeHex(color?.hex);
+  if (!hex) return "body";
+
+  const pct = Number(color?.pct || 0);
+  const labL = Number(color?.lab?.l || 0);
+  const chromaMagnitude = Number(color?.perceptual?.chroma_magnitude || 0);
+  const visualWeight = Number(color?.importance?.visual_weight || 0);
+  const contrastPotential = Number(color?.importance?.contrast_potential || 0);
+  const highlightStrength = Number(color?.importance?.highlight_strength || 0);
+  const shadowStrength = Number(color?.importance?.shadow_strength || 0);
+  const accentStrength = Number(color?.importance?.accent_strength || 0);
+  const structuralRole = normalizeText(color?.structural_role || "body");
+
+  const dominantDist = dominantHex ? colorDistanceLab(hex, dominantHex) : 0;
+
+  if (highlightStrength >= 60 && pct <= 0.3) return "highlight_trim";
+  if (shadowStrength >= 60 && pct <= 0.35) return "shadow_structure";
+
+  if (
+    contrastPotential >= 70 &&
+    accentStrength >= 50 &&
+    pct <= 0.18 &&
+    dominantDist >= 15
+  ) {
+    return "graphic_detail";
+  }
+
+  if (pct >= 0.22 && visualWeight >= 40 && structuralRole === "body") {
+    return "body_fabric";
+  }
+
+  if (pct <= 0.15 && chromaMagnitude <= 25) {
+    return "trim";
+  }
+
+  if (accentStrength >= 50 && pct <= 0.12) {
+    return "micro_accent";
+  }
+
+  return "body";
+}
+
+function buildVisualZones(colors = []) {
+  const sorted = [...colors].sort(
+    (a, b) => Number(b?.importance?.visual_weight || 0) - Number(a?.importance?.visual_weight || 0)
+  );
+
+  return {
+    dominant: sorted[0] || null,
+    secondary: sorted[1] || null,
+    highlight: sorted.find((c) => c.importance?.highlight_strength > 50) || null,
+    shadow: sorted.find((c) => c.importance?.shadow_strength > 50) || null,
+    accent: sorted.find((c) => c.importance?.accent_strength > 50) || null,
+  };
+}
+
+function separateGraphicVsBody(colors = [], dominantHex = null) {
+  const body = [];
+  const detail = [];
+
+  for (const c of colors) {
+    const role = classifySurfaceRole(c, dominantHex);
+
+    const item = {
+      hex: c.hex,
+      name: c.name,
+      pct: c.pct,
+      surface_role: role,
+    };
+
+    if (role === "graphic_detail" || role === "micro_accent") {
+      detail.push(item);
+    } else {
+      body.push(item);
+    }
+  }
+
+  return {
+    body_colors: body,
+    detail_colors: detail,
+  };
+}
+
+function deriveDominantReadOrder(colors = [], dominantHex = null) {
+  const ranked = colors
+    .map((c) => {
+      const weight = Number(c?.importance?.visual_weight || 0);
+      const contrast = Number(c?.importance?.contrast_potential || 0);
+      const pct = Number(c?.pct || 0);
+
+      let score = weight * 0.5 + contrast * 0.3 + pct * 40;
+
+      return {
+        hex: c.hex,
+        name: c.name,
+        score,
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  return {
+    first: ranked[0] || null,
+    second: ranked[1] || null,
+    third: ranked[2] || null,
+  };
+}
+
+function buildVisualIntelligence({ dominantHex, normalizedColors = [], colorRoles = [] }) {
+  const zones = buildVisualZones(normalizedColors);
+  const bodyVsDetail = separateGraphicVsBody(normalizedColors, dominantHex);
+  const readOrder = deriveDominantReadOrder(normalizedColors, dominantHex);
+
+  const dominantBody =
+    bodyVsDetail.body_colors[0] || readOrder.first || null;
+
+  return {
+    dominant_visual_read: readOrder.first,
+    dominant_body_color: dominantBody,
+    visual_zones: zones,
+    body_vs_detail: bodyVsDetail,
+    dominant_read_order: readOrder,
+    composition_summary: dominantBody
+      ? `${dominantBody.name} is driving the main visual read`
+      : "No clear dominant visual read",
+  };
+}
 /* =========================
    CATEGORY / MODE HELPERS
 ========================= */
@@ -1408,6 +1538,12 @@ function buildOutfitAnalysis({ dominantHex, topColors }) {
   const normalizedColors = normalizeDetectedColors(topColors, dominantHex);
   const baseRoles = assignColorRoles(normalizedColors);
   const colorRoles = enforceStructuralPreservation(baseRoles, normalizedColors);
+  const visualIntelligence = buildVisualIntelligence({
+  dominantHex,
+  normalizedColors,
+  colorRoles,
+});
+
   const scoreBreakdown = computeScoreBreakdown(colorRoles, normalizedColors);
   const modeScores = computeModeScores(scoreBreakdown);
   const best = modeScores[0] || { mode: "Balance", score: 0 };
@@ -1437,10 +1573,12 @@ function buildOutfitAnalysis({ dominantHex, topColors }) {
     why_this_works: buildWhyThisWorks(colorRoles),
     suggested_adjustment: buildSuggestedAdjustment(scoreBreakdown, colorRoles, best.mode),
     visual_importance: visualImportance,
+    visual_intelligence: visualIntelligence,
     structural_analysis: normalizedColors.map((c) => ({
       hex: c.hex,
       name: c.name,
       structural_role: c.structural_role,
+      surface_role: classifySurfaceRole(c, dominantHex),
       importance: c.importance,
     })),
   };
