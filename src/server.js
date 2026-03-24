@@ -1170,10 +1170,13 @@ if (c.family === "earth" && chromaMagnitude < 35) {
 // 🔥 Additional penalty
 if (c.family === "earth" && importance < 60) {
   score -= 40;
+
   if (importance < 45) {
-  score -= 50;
+    score -= 50;
+  }
 }
-// 🔥 Boost cool-toned support (denim / blue-gray)
+
+// 🔥 Boost non-earth support (blue / gray / denim / vivid tones)
 if (c.family !== "earth") {
   score += 35;
 }
