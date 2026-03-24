@@ -1144,7 +1144,21 @@ if (surfaceRole === "micro_accent") score -= 30;
     .filter((c) => c.hex !== anchor.hex)
     .map((c) => {
       const dist = colorDistanceLab(anchor.hex, c.hex);
-      const pctBoost = Number(c?.pct || 0) * 16;
+      const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
+      // 🔥 smarter pct weighting
+const pct = Number(c?.pct || 0);
+
+let pctBoost = pct * 16;
+
+// reduce dominance if muted warm
+if (c.family === "earth" && chromaMagnitude < 40) {
+  pctBoost *= 0.3;
+}
+
+// boost high-attention colors
+if (chromaMagnitude > 40) {
+  pctBoost *= 1.3;
+}
       const importance = Number(c?.importance?.visual_weight || 0);
 const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
       let score = 82 - Math.abs(dist - 26) * 1.02 + pctBoost + importance * 0.18;
