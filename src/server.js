@@ -1171,6 +1171,10 @@ if (c.family === "earth" && chromaMagnitude < 35) {
 if (c.family === "earth" && importance < 60) {
   score -= 40;
 }
+// 🔥 Boost cool-toned support (denim / blue-gray)
+if (c.family === "cool") {
+  score += 35;
+}
       if (c.structural_role === "trim") score += 14;
       if (c.structural_role === "body") score += 10;
       if (c.structural_role === "graphic") score -= 4;
