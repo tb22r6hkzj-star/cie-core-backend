@@ -1172,7 +1172,7 @@ if (c.family === "earth" && importance < 60) {
   score -= 40;
 }
 // 🔥 Boost cool-toned support (denim / blue-gray)
-if (c.family === "cool") {
+if (c.family !== "earth") {
   score += 35;
 }
       if (c.structural_role === "trim") score += 14;
