@@ -1160,7 +1160,7 @@ if (chromaMagnitude > 40) {
   pctBoost *= 1.3;
 }
       const importance = Number(c?.importance?.visual_weight || 0);
-const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
+
       let score = 82 - Math.abs(dist - 26) * 1.02 + pctBoost + importance * 0.18;
 // 🔥 HARD BLOCK fake warm support
 if (c.family === "earth" && chromaMagnitude < 35) {
