@@ -1148,7 +1148,18 @@ const surfaceRole = classifySurfaceRole(c, anchor.hex);
       score += 18 + Math.min(54, dist * 0.88);
       score += Math.min(24, chromaMagnitude * 0.3);
       score += importance * 0.18;
-      score += c.vivid ? 8 : 0;
+
+// 🔥 Prevent neutral dominance as accent
+if (c.family === "neutral" && chromaMagnitude < 25) {
+  score -= 35;
+}
+
+// 🔥 Encourage colored accents
+if (c.family !== "neutral") {
+  score += 15;
+}
+
+score += c.vivid ? 8 : 0;
       score += highlightBoost + shadowBoost + contrastBoost;
 
       // Structural
