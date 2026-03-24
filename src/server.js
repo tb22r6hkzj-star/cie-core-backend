@@ -1085,15 +1085,26 @@ function assignColorRoles(normalizedColors) {
       const labL = Number(c?.lab?.l || 0);
       const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
       const importance = Number(c?.importance?.visual_weight || 0);
-
+const surfaceRole = classifySurfaceRole(c, colors[0]?.hex);
       score += Number(c?.pct || 0) * 40;
       score += importance * 0.4;
       score += 100 - Math.abs(labL - 50) * 1.2;
 
-      if (c.structural_role === "body") score += 25;
-      if (c.structural_role === "trim") score += 8;
-      if (c.structural_role === "highlight") score -= 10;
-      if (c.structural_role === "shadow") score -= 6;
+      // Structural
+if (c.structural_role === "body") score += 20;
+if (c.structural_role === "trim") score += 6;
+if (c.structural_role === "highlight") score -= 12;
+if (c.structural_role === "shadow") score -= 8;
+
+// Visual Intelligence
+if (surfaceRole === "body_fabric") score += 30;
+if (surfaceRole === "light_field") score += 15;
+if (surfaceRole === "dark_field") score += 15;
+
+if (surfaceRole === "trim") score -= 10;
+if (surfaceRole === "highlight_trim") score -= 15;
+if (surfaceRole === "graphic_detail") score -= 25;
+if (surfaceRole === "micro_accent") score -= 30;
 
       score += Math.max(0, 22 - Math.abs(chromaMagnitude - 26) * 0.35);
 
