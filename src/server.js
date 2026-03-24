@@ -1146,12 +1146,17 @@ if (surfaceRole === "micro_accent") score -= 30;
       const dist = colorDistanceLab(anchor.hex, c.hex);
       const pctBoost = Number(c?.pct || 0) * 16;
       const importance = Number(c?.importance?.visual_weight || 0);
-// 🔥 Prevent small warm noise from becoming support
-if (c.family === "earth" && c.pct < 0.25 && importance < 50) {
-  score -= 30;
-}
+const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
       let score = 82 - Math.abs(dist - 26) * 1.02 + pctBoost + importance * 0.18;
+// 🔥 HARD BLOCK fake warm support
+if (c.family === "earth" && chromaMagnitude < 35) {
+  score -= 60;
+}
 
+// 🔥 Additional penalty
+if (c.family === "earth" && importance < 60) {
+  score -= 40;
+}
       if (c.structural_role === "trim") score += 14;
       if (c.structural_role === "body") score += 10;
       if (c.structural_role === "graphic") score -= 4;
