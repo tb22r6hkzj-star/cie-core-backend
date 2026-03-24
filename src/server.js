@@ -1144,17 +1144,26 @@ if (surfaceRole === "micro_accent") score -= 30;
       const highlightBoost = Number(c?.importance?.highlight_strength || 0) * 0.22;
       const shadowBoost = Number(c?.importance?.shadow_strength || 0) * 0.18;
       const contrastBoost = Number(c?.importance?.contrast_potential || 0) * 0.28;
-
+const surfaceRole = classifySurfaceRole(c, anchor.hex);
       score += 18 + Math.min(54, dist * 0.88);
       score += Math.min(24, chromaMagnitude * 0.3);
       score += importance * 0.18;
       score += c.vivid ? 8 : 0;
       score += highlightBoost + shadowBoost + contrastBoost;
 
-      if (c.structural_role === "highlight") score += 30;
-      if (c.structural_role === "graphic") score += 25;
-      if (c.structural_role === "accent") score += 16;
-      if (c.structural_role === "body") score -= 8;
+      // Structural
+if (c.structural_role === "highlight") score += 25;
+if (c.structural_role === "graphic") score += 25;
+if (c.structural_role === "accent") score += 14;
+if (c.structural_role === "body") score -= 10;
+
+// Visual Intelligence
+if (surfaceRole === "graphic_detail") score += 35;
+if (surfaceRole === "micro_accent") score += 28;
+if (surfaceRole === "highlight_trim") score += 18;
+
+if (surfaceRole === "body_fabric") score -= 18;
+if (surfaceRole === "dark_field") score -= 12;
 
       return { ...c, _roleScore: clamp100(score) };
     })
