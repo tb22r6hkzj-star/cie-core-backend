@@ -741,6 +741,167 @@ function buildVisualIntelligence({ dominantHex, normalizedColors = [], colorRole
   };
 }
 /* =========================
+   GARMENT ZONE SCAFFOLD
+========================= */
+
+function buildZoneCandidate(color, zone, score) {
+  if (!color?.hex) return null;
+
+  return {
+    zone,
+    hex: color.hex,
+    name: color.name || getColorName(color.hex),
+    pct: round2(color.pct || 0),
+    score: Math.round(score || 0),
+    structural_role: color.structural_role || "body",
+    surface_role: classifySurfaceRole(color),
+    family: color.family || classifyColorV2(color.hex).family,
+    importance: color.importance || null,
+  };
+}
+
+function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelligence = null) {
+  const colors = Array.isArray(normalizedColors) ? normalizedColors : [];
+  const roles = Array.isArray(colorRoles) ? colorRoles : [];
+
+  const anchor = roles.find((r) => r.role === "anchor");
+  const support = roles.find((r) => r.role === "support");
+  const accent = roles.find((r) => r.role === "accent");
+  const stabilizer = roles.find((r) => r.role === "stabilizer");
+
+  const dominantBodyHex =
+    visualIntelligence?.dominant_body_color?.hex ||
+    anchor?.hex ||
+    colors[0]?.hex ||
+    null;
+
+  const dominantBodyColor =
+    colors.find((c) => c.hex === dominantBodyHex) ||
+    (anchor ? colors.find((c) => c.hex === anchor.hex) : null) ||
+    colors[0] ||
+    null;
+
+  const candidates = colors.map((c) => {
+    const family = c.family || classifyColorV2(c.hex).family;
+    const surfaceRole = classifySurfaceRole(c, dominantBodyHex);
+    const pct = Number(c?.pct || 0);
+    const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
+    const light = Number(c?.light || getLight(c.hex));
+    const visualWeight = Number(c?.importance?.visual_weight || 0);
+    const highlightStrength = Number(c?.importance?.highlight_strength || 0);
+    const shadowStrength = Number(c?.importance?.shadow_strength || 0);
+    const accentStrength = Number(c?.importance?.accent_strength || 0);
+
+    let upperScore = 0;
+    let lowerScore = 0;
+    let footwearScore = 0;
+    let accessoryScore = 0;
+
+    // UPPER: usually dominant body / support / readable fabric
+    upperScore += pct * 120;
+    upperScore += visualWeight * 0.55;
+    if (surfaceRole === "body_fabric") upperScore += 28;
+    if (surfaceRole === "body") upperScore += 16;
+    if (c.hex === anchor?.hex) upperScore += 22;
+    if (c.hex === support?.hex) upperScore += 12;
+    if (highlightStrength > 55) upperScore -= 12;
+    if (surfaceRole === "graphic_detail") upperScore -= 20;
+    if (surfaceRole === "micro_accent") upperScore -= 22;
+
+    // LOWER: usually stabilizing / darker / quieter / denim-like / neutral
+    lowerScore += pct * 95;
+    lowerScore += visualWeight * 0.35;
+    if (family === "neutral") lowerScore += 22;
+    if (family === "earth") lowerScore += 10;
+    if (light < 0.42) lowerScore += 18;
+    if (shadowStrength > 42) lowerScore += 16;
+    if (c.hex === stabilizer?.hex) lowerScore += 26;
+    if (surfaceRole === "body_fabric") lowerScore += 10;
+    if (surfaceRole === "graphic_detail") lowerScore -= 18;
+    if (accentStrength > 60) lowerScore -= 10;
+
+    // FOOTWEAR: usually dark / compact / neutral or bold accent shoe
+    footwearScore += visualWeight * 0.28;
+    if (family === "neutral") footwearScore += 20;
+    if (light < 0.35) footwearScore += 24;
+    if (shadowStrength > 48) footwearScore += 22;
+    if (c.hex === stabilizer?.hex) footwearScore += 14;
+    if (c.hex === accent?.hex && accentStrength > 55) footwearScore += 12;
+    if (surfaceRole === "trim") footwearScore += 8;
+    if (surfaceRole === "highlight_trim") footwearScore += 6;
+
+    // ACCESSORY: usually accent / highlight / detail / pop / hat/bag/watch
+    accessoryScore += accentStrength * 0.55;
+    accessoryScore += highlightStrength * 0.3;
+    if (surfaceRole === "graphic_detail") accessoryScore += 36;
+    if (surfaceRole === "micro_accent") accessoryScore += 34;
+    if (surfaceRole === "highlight_trim") accessoryScore += 20;
+    if (c.hex === accent?.hex) accessoryScore += 22;
+    if (pct < 0.18) accessoryScore += 10;
+    if (pct > 0.35) accessoryScore -= 16;
+
+    return {
+      ...c,
+      zone_scores: {
+        upper: Math.round(clamp100(upperScore)),
+        lower: Math.round(clamp100(lowerScore)),
+        footwear: Math.round(clamp100(footwearScore)),
+        accessory: Math.round(clamp100(accessoryScore)),
+      },
+    };
+  });
+
+  const bestUpper =
+    [...candidates].sort((a, b) => b.zone_scores.upper - a.zone_scores.upper)[0] || null;
+
+  const bestLower =
+    [...candidates]
+      .filter((c) => c.hex !== bestUpper?.hex)
+      .sort((a, b) => b.zone_scores.lower - a.zone_scores.lower)[0] || null;
+
+  const bestFootwear =
+    [...candidates]
+      .filter((c) => ![bestUpper?.hex, bestLower?.hex].includes(c.hex))
+      .sort((a, b) => b.zone_scores.footwear - a.zone_scores.footwear)[0] || null;
+
+  const bestAccessory =
+    [...candidates]
+      .filter((c) => ![bestUpper?.hex, bestLower?.hex, bestFootwear?.hex].includes(c.hex))
+      .sort((a, b) => b.zone_scores.accessory - a.zone_scores.accessory)[0] || null;
+
+  const zones = {
+    upper: buildZoneCandidate(bestUpper, "upper", bestUpper?.zone_scores?.upper || 0),
+    lower: buildZoneCandidate(bestLower, "lower", bestLower?.zone_scores?.lower || 0),
+    footwear: buildZoneCandidate(bestFootwear, "footwear", bestFootwear?.zone_scores?.footwear || 0),
+    accessory: buildZoneCandidate(bestAccessory, "accessory", bestAccessory?.zone_scores?.accessory || 0),
+  };
+
+  const confidence = {
+    upper: zones.upper?.score || 0,
+    lower: zones.lower?.score || 0,
+    footwear: zones.footwear?.score || 0,
+    accessory: zones.accessory?.score || 0,
+  };
+
+  return {
+    version: "zone_scaffold_v1",
+    zones,
+    confidence,
+    notes: {
+      upper: "Estimated main upper-body garment color.",
+      lower: "Estimated lower-body garment color.",
+      footwear: "Estimated footwear/stabilizing color.",
+      accessory: "Estimated accessory or detail color.",
+    },
+    summary: [
+      zones.upper ? `Upper reads as ${zones.upper.name}.` : null,
+      zones.lower ? `Lower reads as ${zones.lower.name}.` : null,
+      zones.footwear ? `Footwear reads as ${zones.footwear.name}.` : null,
+      zones.accessory ? `Accessory/detail reads as ${zones.accessory.name}.` : null,
+    ].filter(Boolean),
+  };
+}
+/* =========================
    CATEGORY / MODE HELPERS
 ========================= */
 function normalizeModeLabel(mode) {
@@ -1651,7 +1812,11 @@ function buildOutfitAnalysis({ dominantHex, topColors }) {
   normalizedColors,
   colorRoles,
 });
-
+const garmentZones = inferGarmentZones(
+  normalizedColors,
+  colorRoles,
+  visualIntelligence
+);
   const scoreBreakdown = computeScoreBreakdown(colorRoles, normalizedColors);
   const modeScores = computeModeScores(scoreBreakdown);
   const best = modeScores[0] || { mode: "Balance", score: 0 };
@@ -1682,6 +1847,7 @@ function buildOutfitAnalysis({ dominantHex, topColors }) {
     suggested_adjustment: buildSuggestedAdjustment(scoreBreakdown, colorRoles, best.mode),
     visual_importance: visualImportance,
     visual_intelligence: visualIntelligence,
+    garment_zones: garmentZones,
     structural_analysis: normalizedColors.map((c) => ({
       hex: c.hex,
       name: c.name,
