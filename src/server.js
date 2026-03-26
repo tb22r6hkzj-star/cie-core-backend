@@ -633,7 +633,14 @@ function classifySurfaceRole(color, dominantHex = null) {
   ) {
     return "graphic_detail";
   }
+// 🔥 NEW: differentiate large light vs dark surfaces
+if (pct >= 0.22 && visualWeight >= 40 && labL > 60) {
+  return "light_field";
+}
 
+if (pct >= 0.22 && visualWeight >= 40 && labL < 40) {
+  return "dark_field";
+}
   if (pct >= 0.22 && visualWeight >= 40 && structuralRole === "body") {
     return "body_fabric";
   }
@@ -1104,85 +1111,94 @@ function assignColorRoles(normalizedColors) {
   const colors = [...(normalizedColors || [])];
   if (!colors.length) return [];
 
-  const anchorCandidates = colors
+  const dominantHex = colors[0]?.hex || null;
+
+  const enriched = colors.map((c) => {
+    const surfaceRole = classifySurfaceRole(c, dominantHex);
+    return {
+      ...c,
+      surface_role: surfaceRole,
+      chroma_magnitude: Number(c?.perceptual?.chroma_magnitude || 0),
+      visual_weight: Number(c?.importance?.visual_weight || 0),
+      contrast_potential: Number(c?.importance?.contrast_potential || 0),
+      highlight_strength: Number(c?.importance?.highlight_strength || 0),
+      shadow_strength: Number(c?.importance?.shadow_strength || 0),
+      accent_strength: Number(c?.importance?.accent_strength || 0),
+      labL: Number(c?.lab?.l || 0),
+      pctNum: Number(c?.pct || 0),
+    };
+  });
+
+  // ANCHOR = dominant body fabric, not trim/detail/highlight
+  const anchorCandidates = enriched
     .map((c) => {
       let score = 0;
 
-      const labL = Number(c?.lab?.l || 0);
-      const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
-      const importance = Number(c?.importance?.visual_weight || 0);
-const surfaceRole = classifySurfaceRole(c, colors[0]?.hex);
-      score += Number(c?.pct || 0) * 40;
-      score += importance * 0.4;
-      score += 100 - Math.abs(labL - 50) * 1.2;
+      score += c.pctNum * 42;
+      score += c.visual_weight * 0.34;
+      score += 100 - Math.abs(c.labL - 48) * 1.05;
+      score += Math.max(0, 22 - Math.abs(c.chroma_magnitude - 24) * 0.35);
 
-      // Structural
-if (c.structural_role === "body") score += 20;
-if (c.structural_role === "trim") score += 6;
-if (c.structural_role === "highlight") score -= 12;
-if (c.structural_role === "shadow") score -= 8;
+      if (c.structural_role === "body") score += 22;
+      if (c.structural_role === "trim") score += 4;
+      if (c.structural_role === "highlight") score -= 16;
+      if (c.structural_role === "shadow") score -= 10;
+      if (c.structural_role === "graphic") score -= 22;
 
-// Visual Intelligence
-if (surfaceRole === "body_fabric") score += 30;
-if (surfaceRole === "light_field") score += 15;
-if (surfaceRole === "dark_field") score += 15;
+      if (c.surface_role === "body_fabric") score += 34;
+      if (c.surface_role === "shadow_structure") score += 18;
+      if (c.surface_role === "trim") score -= 16;
+      if (c.surface_role === "highlight_trim") score -= 20;
+      if (c.surface_role === "graphic_detail") score -= 30;
+      if (c.surface_role === "micro_accent") score -= 34;
 
-if (surfaceRole === "trim") score -= 10;
-if (surfaceRole === "highlight_trim") score -= 15;
-if (surfaceRole === "graphic_detail") score -= 25;
-if (surfaceRole === "micro_accent") score -= 30;
-
-      score += Math.max(0, 22 - Math.abs(chromaMagnitude - 26) * 0.35);
+      // prevent tiny accent colors from becoming anchor
+      if (c.pctNum <= 0.16) score -= 24;
+      if (c.chroma_magnitude > 48 && c.pctNum <= 0.18) score -= 18;
 
       return { ...c, _anchorScore: clamp100(score) };
     })
     .sort((a, b) => b._anchorScore - a._anchorScore);
 
-  const anchor = anchorCandidates[0] || colors[0];
+  const anchor = anchorCandidates[0] || enriched[0];
 
-  const supportCandidates = colors
+  // SUPPORT = color that extends anchor, not another fake warm neutral
+  const supportCandidates = enriched
     .filter((c) => c.hex !== anchor.hex)
     .map((c) => {
+      let score = 0;
+
       const dist = colorDistanceLab(anchor.hex, c.hex);
-      const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
-      // 🔥 smarter pct weighting
-const pct = Number(c?.pct || 0);
+      const hueGap = hueDistance(anchor.hex, c.hex);
 
-let pctBoost = pct * 16;
+      score += 86 - Math.abs(dist - 24) * 0.95;
+      score += c.visual_weight * 0.16;
+      score += c.pctNum * 10;
 
-// reduce dominance if muted warm
-if (c.family === "earth" && chromaMagnitude < 40) {
-  pctBoost *= 0.3;
-}
-
-// boost high-attention colors
-if (chromaMagnitude > 40) {
-  pctBoost *= 1.3;
-}
-      const importance = Number(c?.importance?.visual_weight || 0);
-
-      let score = 82 - Math.abs(dist - 26) * 1.02 + pctBoost + importance * 0.18;
-// 🔥 HARD BLOCK fake warm support
-if (c.family === "earth" && chromaMagnitude < 35) {
-  score -= 60;
-}
-
-// 🔥 Additional penalty
-if (c.family === "earth" && importance < 60) {
-  score -= 40;
-
-  if (importance < 45) {
-    score -= 50;
-  }
-}
-
-// 🔥 Boost non-earth support (blue / gray / denim / vivid tones)
-if (c.family !== "earth") {
-  score += 35;
-}
-      if (c.structural_role === "trim") score += 14;
       if (c.structural_role === "body") score += 10;
-      if (c.structural_role === "graphic") score -= 4;
+      if (c.structural_role === "trim") score += 8;
+      if (c.structural_role === "graphic") score -= 18;
+      if (c.structural_role === "highlight") score -= 8;
+
+      if (c.surface_role === "body_fabric") score += 18;
+      if (c.surface_role === "shadow_structure") score += 10;
+      if (c.surface_role === "trim") score += 6;
+      if (c.surface_role === "graphic_detail") score -= 25;
+      if (c.surface_role === "micro_accent") score -= 28;
+      if (c.surface_role === "highlight_trim") score -= 12;
+
+      // stop muddy earth tones from stealing support unless truly dominant
+      if (c.family === "earth" && c.chroma_magnitude < 36 && c.pctNum < 0.22) {
+        score -= 48;
+      }
+
+      // favor blue / denim / cool / charcoal extension when it reads real
+      if (["blue", "cyan", "purple"].includes(c.lane)) score += 16;
+      if (c.family === "neutral" && c.chroma_magnitude >= 14) score += 8;
+
+      // support should not be too close to anchor or too wild
+      if (dist < 8) score -= 18;
+      if (hueGap > 115 && c.chroma_magnitude > 45) score -= 16;
 
       return { ...c, _roleScore: clamp100(score) };
     })
@@ -1190,75 +1206,83 @@ if (c.family !== "earth") {
 
   const support = supportCandidates[0] || anchor;
 
-  const accentCandidates = colors
+  // ACCENT = high-attention detail, not another neutral body tone
+  const accentCandidates = enriched
     .filter((c) => c.hex !== anchor.hex && c.hex !== support.hex)
     .map((c) => {
       let score = 0;
 
       const dist = colorDistanceLab(anchor.hex, c.hex);
-      const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
-      const importance = Number(c?.importance?.visual_weight || 0);
-      const highlightBoost = Number(c?.importance?.highlight_strength || 0) * 0.22;
-      const shadowBoost = Number(c?.importance?.shadow_strength || 0) * 0.18;
-      const contrastBoost = Number(c?.importance?.contrast_potential || 0) * 0.28;
-const surfaceRole = classifySurfaceRole(c, anchor.hex);
-      score += 18 + Math.min(54, dist * 0.88);
-      score += Math.min(24, chromaMagnitude * 0.3);
-      score += importance * 0.18;
+      const hueGap = hueDistance(anchor.hex, c.hex);
 
-// 🔥 Prevent neutral dominance as accent
-if (c.family === "neutral" && chromaMagnitude < 25) {
-  score -= 35;
-}
+      score += Math.min(56, dist * 0.9);
+      score += Math.min(26, c.chroma_magnitude * 0.34);
+      score += c.contrast_potential * 0.24;
+      score += c.accent_strength * 0.26;
+      score += c.highlight_strength * 0.12;
+      score += c.visual_weight * 0.12;
 
-// 🔥 Encourage colored accents
-if (c.family !== "neutral") {
-  score += 15;
-}
+      if (c.vivid) score += 10;
+      if (c.structural_role === "accent") score += 16;
+      if (c.structural_role === "graphic") score += 28;
+      if (c.structural_role === "highlight") score += 18;
+      if (c.structural_role === "body") score -= 14;
 
-score += c.vivid ? 8 : 0;
-      score += highlightBoost + shadowBoost + contrastBoost;
+      if (c.surface_role === "graphic_detail") score += 36;
+      if (c.surface_role === "micro_accent") score += 34;
+      if (c.surface_role === "highlight_trim") score += 18;
+      if (c.surface_role === "trim") score += 8;
+      if (c.surface_role === "body_fabric") score -= 26;
+      if (c.surface_role === "shadow_structure") score -= 12;
 
-      // Structural
-if (c.structural_role === "highlight") score += 25;
-if (c.structural_role === "graphic") score += 25;
-if (c.structural_role === "accent") score += 14;
-if (c.structural_role === "body") score -= 10;
+      // neutrals should almost never win accent unless clearly contrast-driving
+      if (c.family === "neutral" && c.chroma_magnitude < 22 && c.contrast_potential < 72) {
+        score -= 42;
+      }
 
-// Visual Intelligence
-if (surfaceRole === "graphic_detail") score += 35;
-if (surfaceRole === "micro_accent") score += 28;
-if (surfaceRole === "highlight_trim") score += 18;
+      // colorful lanes get rewarded
+      if (!["neutral", "pastel"].includes(c.family)) score += 12;
+      if (["red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink"].includes(c.lane)) {
+        score += 8;
+      }
 
-if (surfaceRole === "body_fabric") score -= 18;
-if (surfaceRole === "dark_field") score -= 12;
+      if (hueGap < 10 && c.chroma_magnitude < 30) score -= 20;
 
       return { ...c, _roleScore: clamp100(score) };
     })
     .sort((a, b) => b._roleScore - a._roleScore);
 
-  const accent = accentCandidates[0] || support;
+  const accent =
+    accentCandidates[0] ||
+    enriched.find((c) => c.hex !== anchor.hex && c.hex !== support.hex) ||
+    support;
 
-  const stabilizerCandidates = colors
+  // STABILIZER = grounding neutral / shadow / quiet structure
+  const stabilizerCandidates = enriched
     .filter((c) => ![anchor.hex, support.hex, accent.hex].includes(c.hex))
     .map((c) => {
       let score = 0;
 
-      const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
-      const labL = Number(c?.lab?.l || 0);
-      const importance = Number(c?.importance?.visual_weight || 0);
-      const shadowBoost = Number(c?.importance?.shadow_strength || 0) * 0.22;
+      score += 54;
+      score += c.shadow_strength * 0.2;
+      score += c.visual_weight * 0.12;
 
-      score += 52;
-      if (c.family === "neutral") score += 18;
-      if (chromaMagnitude < 22) score += 16;
-      if (labL < 42) score += 10;
-      score += importance * 0.12;
-      score += shadowBoost;
+      if (c.family === "neutral") score += 24;
+      if (c.family === "earth" && c.chroma_magnitude < 26) score += 8;
+      if (c.chroma_magnitude < 24) score += 16;
+      if (c.labL < 46) score += 12;
 
-      if (c.structural_role === "shadow") score += 30;
+      if (c.structural_role === "shadow") score += 28;
       if (c.structural_role === "trim") score += 8;
-      if (c.structural_role === "highlight") score -= 10;
+      if (c.structural_role === "highlight") score -= 12;
+      if (c.structural_role === "graphic") score -= 20;
+
+      if (c.surface_role === "shadow_structure") score += 24;
+      if (c.surface_role === "trim") score += 8;
+      if (c.surface_role === "body_fabric") score += 6;
+      if (c.surface_role === "graphic_detail") score -= 24;
+      if (c.surface_role === "micro_accent") score -= 28;
+      if (c.surface_role === "highlight_trim") score -= 16;
 
       return { ...c, _roleScore: clamp100(score) };
     })
@@ -1266,13 +1290,9 @@ if (surfaceRole === "dark_field") score -= 12;
 
   const stabilizer =
     stabilizerCandidates[0] ||
-    colors
+    enriched
       .filter((c) => c.hex !== anchor.hex && c.hex !== support.hex)
-      .sort(
-        (a, b) =>
-          Number(a?.perceptual?.chroma_magnitude || 999) -
-          Number(b?.perceptual?.chroma_magnitude || 999)
-      )[0] ||
+      .sort((a, b) => a.chroma_magnitude - b.chroma_magnitude)[0] ||
     anchor;
 
   return [
