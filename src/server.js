@@ -883,7 +883,19 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       continue;
     }
 
-    zones[zoneKey] = zoneData;
+    const read = inferZoneColorRead(zoneKey, zoneData, colors);
+
+zones[zoneKey] = {
+  ...zoneData,
+  name: read.display_label || zoneData.name,
+  display_label: read.display_label || zoneData.name,
+  dominant_color: read.dominant_color,
+  support_colors: read.support_colors,
+  accent_colors: read.accent_colors,
+  read_mode: read.mode,
+  cluster_count: read.cluster_count,
+  interpretation: read.interpretation,
+};
     }
   const confidence = {
     upper: zones.upper?.score || 0,
@@ -913,7 +925,80 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
 /* =========================
    GARMENT + MATERIAL + COLOR ACCURACY
 ========================= */
+function inferZoneColorRead(zoneKey, zoneData, normalizedColors = []) {
+  if (!zoneData?.hex) {
+    return {
+      mode: "single",
+      cluster_count: 0,
+      interpretation: "unknown",
+      display_label: zoneData?.name || "Unknown",
+      dominant_color: null,
+      support_colors: [],
+      accent_colors: [],
+    };
+  }
 
+  const zoneColors = normalizedColors.slice(0, 6);
+
+  const clusters = buildColorClusters(zoneColors);
+
+  // ✅ SAFETY FIX (prevents crash)
+  const dominant = clusters[0] || { base: zoneData.hex, pct: 1 };
+
+  let displayLabel = getColorName(dominant.base);
+  let mode = "single";
+  let interpretation = "single_color";
+
+  // 🔥 DENIM DETECTION
+  if (
+    zoneKey === "lower" &&
+    clusters.some(c => {
+      const h = getHue(c.base);
+      return h >= 200 && h <= 245;
+    }) &&
+    clusters.every(c => getPerceptualTraits(c.base).chroma_magnitude < 40)
+  ) {
+    displayLabel = "Light Wash Denim";
+    mode = "washed_fabric";
+    interpretation = "denim";
+  }
+
+  // 🔥 MULTICOLOR FOOTWEAR
+  else if (zoneKey === "footwear" && clusters.length >= 3) {
+    displayLabel = "Multicolor Sneaker";
+    mode = "multicolor";
+    interpretation = "multi_material";
+  }
+
+  // 🔥 MULTICOLOR ACCESSORY
+  else if (zoneKey === "accessory" && clusters.length >= 3) {
+    displayLabel = "Multicolor Accessory";
+    mode = "multicolor";
+    interpretation = "patterned";
+  }
+
+  return {
+    mode,
+    cluster_count: clusters.length,
+    interpretation,
+    display_label: displayLabel,
+    dominant_color: {
+      hex: dominant.base,
+      name: getColorName(dominant.base),
+      pct: round2(dominant.pct),
+    },
+    support_colors: clusters.slice(1, 3).map((c) => ({
+      hex: c.base,
+      name: getColorName(c.base),
+      pct: round2(c.pct),
+    })),
+    accent_colors: clusters.slice(3, 5).map((c) => ({
+      hex: c.base,
+      name: getColorName(c.base),
+      pct: round2(c.pct),
+    })),
+  };
+}
 function buildColorClusters(colors = []) {
   const clusters = [];
 
