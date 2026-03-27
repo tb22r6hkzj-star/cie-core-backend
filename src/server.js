@@ -884,7 +884,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     }
 
     zones[zoneKey] = zoneData;
-
+    }
   const confidence = {
     upper: zones.upper?.score || 0,
     lower: zones.lower?.score || 0,
