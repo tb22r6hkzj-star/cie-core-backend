@@ -989,78 +989,81 @@ function isDenimLike(clusters = []) {
   return blueClusters.length >= 1 && lowChroma && midLight;
 }
 
-function inferZoneColorRead(zoneKey, zoneData, normalizedColors = []) {
-  if (!zoneData?.hex) {
+function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
+  const z = zones || {};
+  const items = [];
+
+  function getZoneColors(zoneHex) {
+    if (!zoneHex) return [];
+    return (normalizedColors || []).filter((c) => colorDistanceLab(c.hex, zoneHex) < 22);
+  }
+
+  function buildItem(type, zoneData) {
+    if (!zoneData?.hex) return null;
+
+    const zoneColors = getZoneColors(zoneData.hex);
+    const clusters = buildColorClusters(zoneColors.length ? zoneColors : [zoneData]);
+    const dominant = clusters[0] || { base: zoneData.hex, pct: 1 };
+
+    const dominantTraits = getPerceptualTraits(dominant.base);
+
+    let material = "unknown";
+    let materialConfidence = 50;
+    let displayLabel = zoneData.display_label || zoneData.name || getColorName(dominant.base);
+
+    if (isDenimLike(clusters) && type === "lower_garment") {
+      material = "denim";
+      materialConfidence = 84;
+      displayLabel = "Light Wash Denim";
+    } else if (isMultiColor(clusters) && type === "footwear") {
+      material = "mixed_material";
+      materialConfidence = 76;
+      displayLabel = "Multicolor Sneaker";
+    } else if (isMultiColor(clusters) && type === "accessory") {
+      material = "patterned_textile";
+      materialConfidence = 74;
+      displayLabel = "Multicolor Accessory";
+    } else if (dominantTraits.temperature === "cool" && dominantTraits.chroma_magnitude < 30) {
+      material = "washed_fabric";
+      materialConfidence = 64;
+    } else if (dominantTraits.chroma_magnitude > 48) {
+      material = "vivid_surface";
+      materialConfidence = 60;
+    }
+
+    if (type === "footwear" && getLight(dominant.base) < 0.35) {
+      material = material === "mixed_material" ? material : "rubber_or_leather";
+      materialConfidence = Math.max(materialConfidence, 66);
+    }
+
     return {
-      mode: "single",
-      cluster_count: 0,
-      interpretation: "unknown",
-      display_label: zoneData?.name || "Unknown",
-      dominant_color: null,
-      support_colors: [],
-      accent_colors: [],
+      type,
+      confidence: zoneData.score || 60,
+      material,
+      material_confidence: materialConfidence,
+      cluster_count: clusters.length,
+      display_label: displayLabel,
+      dominant_color: {
+        hex: dominant.base,
+        name: getColorName(dominant.base),
+        pct: round2(dominant.pct),
+      },
+      support_colors: clusters.slice(1, 3).map((c) => ({
+        hex: c.base,
+        name: getColorName(c.base),
+        pct: round2(c.pct),
+      })),
     };
   }
 
-  // 🔥 CRITICAL CHANGE — use broader pool, not strict distance
-  const zoneColors = normalizedColors.slice(0, 6); // use top colors instead of proximity
-
-  const clusters = buildColorClusters(zoneColors);
-
-  const dominant = clusters[0];
-
-  let displayLabel = getColorName(dominant.base);
-  let mode = "single";
-  let interpretation = "single_color";
-
-  // 🔥 STRONG DENIM DETECTION
-  if (
-    zoneKey === "lower" &&
-    clusters.some(c => {
-      const h = getHue(c.base);
-      return h >= 200 && h <= 245;
-    }) &&
-    clusters.every(c => getPerceptualTraits(c.base).chroma_magnitude < 40)
-  ) {
-    displayLabel = "Light Wash Denim";
-    mode = "washed_fabric";
-    interpretation = "denim";
-  }
-
-  // 🔥 MULTICOLOR FOOTWEAR
-  else if (zoneKey === "footwear" && clusters.length >= 3) {
-    displayLabel = "Multicolor Sneaker";
-    mode = "multicolor";
-    interpretation = "multi_material";
-  }
-
-  // 🔥 MULTICOLOR ACCESSORY
-  else if (zoneKey === "accessory" && clusters.length >= 3) {
-    displayLabel = "Multicolor Accessory";
-    mode = "multicolor";
-    interpretation = "patterned";
-  }
+  items.push(buildItem("upper_garment", z.upper));
+  items.push(buildItem("lower_garment", z.lower));
+  items.push(buildItem("footwear", z.footwear));
+  items.push(buildItem("accessory", z.accessory));
 
   return {
-    mode,
-    cluster_count: clusters.length,
-    interpretation,
-    display_label: displayLabel,
-    dominant_color: {
-      hex: dominant.base,
-      name: getColorName(dominant.base),
-      pct: round2(dominant.pct),
-    },
-    support_colors: clusters.slice(1, 3).map((c) => ({
-      hex: c.base,
-      name: getColorName(c.base),
-      pct: round2(c.pct),
-    })),
-    accent_colors: clusters.slice(3, 5).map((c) => ({
-      hex: c.base,
-      name: getColorName(c.base),
-      pct: round2(c.pct),
-    })),
+    version: "garment_scaffold_v2",
+    detected_items: items.filter(Boolean),
   };
 }
 /* =========================
