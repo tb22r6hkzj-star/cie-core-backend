@@ -883,20 +883,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       continue;
     }
 
-    const read = inferZoneColorRead(zoneKey, zoneData, colors);
-
-    zones[zoneKey] = {
-      ...zoneData,
-      name: read.display_label || zoneData.name,
-      display_label: read.display_label || zoneData.name,
-      dominant_color: read.dominant_color,
-      support_colors: read.support_colors,
-      accent_colors: read.accent_colors,
-      read_mode: read.mode,
-      cluster_count: read.cluster_count,
-      interpretation: read.interpretation,
-    };
-  }
+    zones[zoneKey] = zoneData;
 
   const confidence = {
     upper: zones.upper?.score || 0,
