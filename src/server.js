@@ -806,8 +806,8 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     // LOWER
     lowerScore += pct * 95;
     lowerScore += visualWeight * 0.35;
-    if (family === "neutral") lowerScore += 22;
-    if (family === "earth") lowerScore += 10;
+    if (family === "neutral") lowerScore += 12; // reduced
+if (family === "earth" && chromaMagnitude < 30 && pct < 0.25) lowerScore -= 10; // 🔥 penalize camel-like fillers
     if (light < 0.42) lowerScore += 18;
     if (shadowStrength > 42) lowerScore += 16;
     if (c.hex === stabilizer?.hex) lowerScore += 26;
@@ -819,7 +819,10 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     if (["blue", "cyan"].includes(lane) && chromaMagnitude < 36 && light >= 0.38 && light <= 0.82) {
       lowerScore += 16;
     }
-
+// 🔥 HARD PRIORITY: denim / blue lower dominance
+if (["blue", "cyan"].includes(lane) && pct >= 0.2) {
+  lowerScore += 35;
+}
     // FOOTWEAR
     footwearScore += visualWeight * 0.28;
     if (family === "neutral") footwearScore += 20;
