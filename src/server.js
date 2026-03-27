@@ -775,12 +775,6 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     colors[0]?.hex ||
     null;
 
-  const dominantBodyColor =
-    colors.find((c) => c.hex === dominantBodyHex) ||
-    (anchor ? colors.find((c) => c.hex === anchor.hex) : null) ||
-    colors[0] ||
-    null;
-
   const candidates = colors.map((c) => {
     const family = c.family || classifyColorV2(c.hex).family;
     const surfaceRole = classifySurfaceRole(c, dominantBodyHex);
@@ -791,13 +785,14 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     const highlightStrength = Number(c?.importance?.highlight_strength || 0);
     const shadowStrength = Number(c?.importance?.shadow_strength || 0);
     const accentStrength = Number(c?.importance?.accent_strength || 0);
+    const lane = c.lane || classifyColorV2(c.hex).lane;
 
     let upperScore = 0;
     let lowerScore = 0;
     let footwearScore = 0;
     let accessoryScore = 0;
 
-    // UPPER: usually dominant body / support / readable fabric
+    // UPPER
     upperScore += pct * 120;
     upperScore += visualWeight * 0.55;
     if (surfaceRole === "body_fabric") upperScore += 28;
@@ -808,7 +803,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     if (surfaceRole === "graphic_detail") upperScore -= 20;
     if (surfaceRole === "micro_accent") upperScore -= 22;
 
-    // LOWER: usually stabilizing / darker / quieter / denim-like / neutral
+    // LOWER
     lowerScore += pct * 95;
     lowerScore += visualWeight * 0.35;
     if (family === "neutral") lowerScore += 22;
@@ -820,7 +815,12 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     if (surfaceRole === "graphic_detail") lowerScore -= 18;
     if (accentStrength > 60) lowerScore -= 10;
 
-    // FOOTWEAR: usually dark / compact / neutral or bold accent shoe
+    // lower-zone denim bias
+    if (["blue", "cyan"].includes(lane) && chromaMagnitude < 36 && light >= 0.38 && light <= 0.82) {
+      lowerScore += 16;
+    }
+
+    // FOOTWEAR
     footwearScore += visualWeight * 0.28;
     if (family === "neutral") footwearScore += 20;
     if (light < 0.35) footwearScore += 24;
@@ -830,7 +830,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     if (surfaceRole === "trim") footwearScore += 8;
     if (surfaceRole === "highlight_trim") footwearScore += 6;
 
-    // ACCESSORY: usually accent / highlight / detail / pop / hat/bag/watch
+    // ACCESSORY
     accessoryScore += accentStrength * 0.55;
     accessoryScore += highlightStrength * 0.3;
     if (surfaceRole === "graphic_detail") accessoryScore += 36;
@@ -869,12 +869,34 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       .filter((c) => ![bestUpper?.hex, bestLower?.hex, bestFootwear?.hex].includes(c.hex))
       .sort((a, b) => b.zone_scores.accessory - a.zone_scores.accessory)[0] || null;
 
-  const zones = {
+  const rawZones = {
     upper: buildZoneCandidate(bestUpper, "upper", bestUpper?.zone_scores?.upper || 0),
     lower: buildZoneCandidate(bestLower, "lower", bestLower?.zone_scores?.lower || 0),
     footwear: buildZoneCandidate(bestFootwear, "footwear", bestFootwear?.zone_scores?.footwear || 0),
     accessory: buildZoneCandidate(bestAccessory, "accessory", bestAccessory?.zone_scores?.accessory || 0),
   };
+
+  const zones = {};
+  for (const [zoneKey, zoneData] of Object.entries(rawZones)) {
+    if (!zoneData) {
+      zones[zoneKey] = null;
+      continue;
+    }
+
+    const read = inferZoneColorRead(zoneKey, zoneData, colors);
+
+    zones[zoneKey] = {
+      ...zoneData,
+      name: read.display_label || zoneData.name,
+      display_label: read.display_label || zoneData.name,
+      dominant_color: read.dominant_color,
+      support_colors: read.support_colors,
+      accent_colors: read.accent_colors,
+      read_mode: read.mode,
+      cluster_count: read.cluster_count,
+      interpretation: read.interpretation,
+    };
+  }
 
   const confidence = {
     upper: zones.upper?.score || 0,
@@ -884,7 +906,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
   };
 
   return {
-    version: "zone_scaffold_v1",
+    version: "zone_scaffold_v2",
     zones,
     confidence,
     notes: {
@@ -894,11 +916,230 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       accessory: "Estimated accessory or detail color.",
     },
     summary: [
-      zones.upper ? `Upper reads as ${zones.upper.name}.` : null,
-      zones.lower ? `Lower reads as ${zones.lower.name}.` : null,
-      zones.footwear ? `Footwear reads as ${zones.footwear.name}.` : null,
-      zones.accessory ? `Accessory/detail reads as ${zones.accessory.name}.` : null,
+      zones.upper ? `Upper reads as ${zones.upper.display_label || zones.upper.name}.` : null,
+      zones.lower ? `Lower reads as ${zones.lower.display_label || zones.lower.name}.` : null,
+      zones.footwear ? `Footwear reads as ${zones.footwear.display_label || zones.footwear.name}.` : null,
+      zones.accessory ? `Accessory/detail reads as ${zones.accessory.display_label || zones.accessory.name}.` : null,
     ].filter(Boolean),
+  };
+}
+/* =========================
+   GARMENT + MATERIAL + COLOR ACCURACY
+========================= */
+
+function buildColorClusters(colors = []) {
+  const clusters = [];
+
+  for (const c of colors || []) {
+    const hex = safeHex(c?.hex);
+    if (!hex) continue;
+
+    let placed = false;
+
+    for (const cluster of clusters) {
+      const dist = colorDistanceLab(hex, cluster.base);
+      if (dist < 20) {
+        cluster.colors.push(c);
+        cluster.weight += Number(c?.pct || 1);
+        placed = true;
+        break;
+      }
+    }
+
+    if (!placed) {
+      clusters.push({
+        base: hex,
+        colors: [c],
+        weight: Number(c?.pct || 1),
+      });
+    }
+  }
+
+  const total = clusters.reduce((sum, c) => sum + Number(c.weight || 0), 0) || 1;
+
+  return clusters
+    .map((c) => ({
+      ...c,
+      pct: c.weight / total,
+    }))
+    .sort((a, b) => b.pct - a.pct);
+}
+
+function isMultiColor(clusters = []) {
+  if (clusters.length < 3) return false;
+  const topPct = Number(clusters?.[0]?.pct || 0);
+  return topPct < 0.55;
+}
+
+function isDenimLike(clusters = []) {
+  const blueClusters = clusters.filter((c) => {
+    const h = getHue(c.base);
+    return h >= 200 && h <= 245;
+  });
+
+  const lowChroma = clusters.every(
+    (c) => Number(getPerceptualTraits(c.base)?.chroma_magnitude || 0) < 38
+  );
+
+  const midLight = clusters.some((c) => {
+    const l = getLight(c.base);
+    return l >= 0.38 && l <= 0.82;
+  });
+
+  return blueClusters.length >= 1 && lowChroma && midLight;
+}
+
+function inferZoneColorRead(zoneKey, zoneData, normalizedColors = []) {
+  if (!zoneData?.hex) {
+    return {
+      mode: "single",
+      cluster_count: 0,
+      interpretation: "unknown",
+      display_label: zoneData?.name || "Unknown",
+      dominant_color: null,
+      support_colors: [],
+      accent_colors: [],
+    };
+  }
+
+  const nearbyColors = (normalizedColors || []).filter((c) => {
+    const hex = safeHex(c?.hex);
+    if (!hex) return false;
+    return colorDistanceLab(hex, zoneData.hex) < 22;
+  });
+
+  const zoneColors = nearbyColors.length ? nearbyColors : [zoneData];
+  const clusters = buildColorClusters(zoneColors);
+
+  const dominant = clusters[0] || { base: zoneData.hex, pct: 1 };
+  const support = clusters.slice(1, 3).map((c) => ({
+    hex: c.base,
+    name: getColorName(c.base),
+    pct: round2(c.pct),
+  }));
+  const accents = clusters.slice(3, 5).map((c) => ({
+    hex: c.base,
+    name: getColorName(c.base),
+    pct: round2(c.pct),
+  }));
+
+  let mode = "single";
+  let interpretation = "single_color";
+  let displayLabel = getColorName(dominant.base);
+
+  if (isDenimLike(clusters) && zoneKey === "lower") {
+    mode = "washed_fabric";
+    interpretation = "denim_family";
+    displayLabel = "Light Wash Denim";
+  } else if (isMultiColor(clusters) && zoneKey === "footwear") {
+    mode = "multicolor";
+    interpretation = "multicolor_footwear";
+    displayLabel = "Multicolor Sneaker";
+  } else if (isMultiColor(clusters) && zoneKey === "accessory") {
+    mode = "multicolor";
+    interpretation = "multicolor_accessory";
+    displayLabel = "Multicolor Accessory";
+  } else if (isMultiColor(clusters)) {
+    mode = "multicolor";
+    interpretation = "multicolor_surface";
+    displayLabel = "Multicolor";
+  } else {
+    const traits = getPerceptualTraits(dominant.base);
+    if (traits.temperature === "cool" && traits.chroma_magnitude < 30 && zoneKey === "lower") {
+      mode = "washed_fabric";
+      interpretation = "washed_cool_fabric";
+    }
+  }
+
+  return {
+    mode,
+    cluster_count: clusters.length,
+    interpretation,
+    display_label: displayLabel,
+    dominant_color: {
+      hex: dominant.base,
+      name: getColorName(dominant.base),
+      pct: round2(dominant.pct),
+    },
+    support_colors: support,
+    accent_colors: accents,
+  };
+}
+
+function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
+  const z = zones || {};
+  const items = [];
+
+  function getZoneColors(zoneHex) {
+    if (!zoneHex) return [];
+    return (normalizedColors || []).filter((c) => colorDistanceLab(c.hex, zoneHex) < 22);
+  }
+
+  function buildItem(type, zoneData) {
+    if (!zoneData?.hex) return null;
+
+    const zoneColors = getZoneColors(zoneData.hex);
+    const clusters = buildColorClusters(zoneColors.length ? zoneColors : [zoneData]);
+    const dominant = clusters[0] || { base: zoneData.hex, pct: 1 };
+    const dominantTraits = getPerceptualTraits(dominant.base);
+
+    let material = "unknown";
+    let materialConfidence = 50;
+    let displayLabel = zoneData.display_label || zoneData.name || getColorName(dominant.base);
+
+    if (isDenimLike(clusters) && type === "lower_garment") {
+      material = "denim";
+      materialConfidence = 84;
+      displayLabel = "Light Wash Denim";
+    } else if (isMultiColor(clusters) && type === "footwear") {
+      material = "mixed_material";
+      materialConfidence = 76;
+      displayLabel = "Multicolor Sneaker";
+    } else if (isMultiColor(clusters) && type === "accessory") {
+      material = "patterned_textile";
+      materialConfidence = 74;
+      displayLabel = "Multicolor Accessory";
+    } else if (dominantTraits.temperature === "cool" && dominantTraits.chroma_magnitude < 30) {
+      material = "washed_fabric";
+      materialConfidence = 64;
+    } else if (dominantTraits.chroma_magnitude > 48) {
+      material = "vivid_surface";
+      materialConfidence = 60;
+    }
+
+    if (type === "footwear" && getLight(dominant.base) < 0.35) {
+      material = material === "mixed_material" ? material : "rubber_or_leather";
+      materialConfidence = Math.max(materialConfidence, 66);
+    }
+
+    return {
+      type,
+      confidence: zoneData.score || 60,
+      material,
+      material_confidence: materialConfidence,
+      cluster_count: clusters.length,
+      display_label: displayLabel,
+      dominant_color: {
+        hex: dominant.base,
+        name: getColorName(dominant.base),
+        pct: round2(dominant.pct),
+      },
+      support_colors: clusters.slice(1, 3).map((c) => ({
+        hex: c.base,
+        name: getColorName(c.base),
+        pct: round2(c.pct),
+      })),
+    };
+  }
+
+  items.push(buildItem("upper_garment", z.upper));
+  items.push(buildItem("lower_garment", z.lower));
+  items.push(buildItem("footwear", z.footwear));
+  items.push(buildItem("accessory", z.accessory));
+
+  return {
+    version: "garment_scaffold_v2",
+    detected_items: items.filter(Boolean),
   };
 }
 /* =========================
@@ -1807,16 +2048,24 @@ function buildOutfitAnalysis({ dominantHex, topColors }) {
   const normalizedColors = normalizeDetectedColors(topColors, dominantHex);
   const baseRoles = assignColorRoles(normalizedColors);
   const colorRoles = enforceStructuralPreservation(baseRoles, normalizedColors);
+
   const visualIntelligence = buildVisualIntelligence({
-  dominantHex,
-  normalizedColors,
-  colorRoles,
-});
-const garmentZones = inferGarmentZones(
-  normalizedColors,
-  colorRoles,
-  visualIntelligence
-);
+    dominantHex,
+    normalizedColors,
+    colorRoles,
+  });
+
+  const garmentZones = inferGarmentZones(
+    normalizedColors,
+    colorRoles,
+    visualIntelligence
+  );
+
+  const garmentAnalysis = inferGarmentAndMaterial({
+    zones: garmentZones?.zones,
+    normalizedColors,
+  });
+
   const scoreBreakdown = computeScoreBreakdown(colorRoles, normalizedColors);
   const modeScores = computeModeScores(scoreBreakdown);
   const best = modeScores[0] || { mode: "Balance", score: 0 };
@@ -1848,6 +2097,7 @@ const garmentZones = inferGarmentZones(
     visual_importance: visualImportance,
     visual_intelligence: visualIntelligence,
     garment_zones: garmentZones,
+    garment_analysis: garmentAnalysis,
     structural_analysis: normalizedColors.map((c) => ({
       hex: c.hex,
       name: c.name,
