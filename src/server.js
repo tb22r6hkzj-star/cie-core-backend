@@ -938,9 +938,12 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = []) {
     };
   }
 
-  const zoneColors = normalizedColors.slice(0, 6);
+  const zoneColors = normalizedColors.filter((c) => {
+  if (!c?.hex || !zoneData?.hex) return false;
+  return colorDistanceLab(c.hex, zoneData.hex) < 22;
+});
 
-  const clusters = buildColorClusters(zoneColors);
+  const clusters = buildColorClusters(zoneColors.length ? zoneColors : [zoneData]);
 
   // ✅ SAFETY FIX (prevents crash)
   const dominant = clusters[0] || { base: zoneData.hex, pct: 1 };
