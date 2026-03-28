@@ -1393,142 +1393,166 @@ function classifyColorV2(dominantHex) {
 function generatePalettesV2(dominantHex) {
   let base = safeHex(dominantHex);
 
-  // 🔥 HARD FAILSAFE — GUARANTEED valid color
+  // HARD FAILSAFE — GUARANTEED valid color
   if (!base || typeof base !== "string") {
     console.warn("⚠️ Invalid dominantHex — forcing fallback");
     base = "#7A7A7A";
   }
 
   try {
+    const meta = classifyColorV2(base);
 
-  const meta = classifyColorV2(base);
+    const balanceHexes = uniqHexes(["#111111", "#2B2B2B", "#7A7A7A", "#CFCFCF", "#F5F1E8"]);
 
-  const balanceHexes = uniqHexes(["#111111", "#2B2B2B", "#7A7A7A", "#CFCFCF", "#F5F1E8"]);
+    const comp = rotateHue(base, 180);
+    const split1 = rotateHue(base, 150);
+    const split2 = rotateHue(base, 210);
 
-  const comp = rotateHue(base, 180);
-  const split1 = rotateHue(base, 150);
-  const split2 = rotateHue(base, 210);
-
-  const contrastHexes = uniqHexes([
-    setTone(comp, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
-    setTone(split1, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
-    setTone(split2, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
-  ]);
-
-  const cohesionHexes = uniqHexes([
-    setTone(base, { sMul: 0.85, lAdd: 0.18 }),
-    setTone(base, { sMul: 0.75, lAdd: 0.08 }),
-    setTone(base, { sMul: 1.0, lAdd: 0.0 }),
-    setTone(base, { sMul: 0.9, lAdd: -0.1 }),
-    setTone(base, { sMul: 0.8, lAdd: -0.18 }),
-  ]);
-
-  let emphasisHexes;
-  if (meta.vivid) {
-    emphasisHexes = uniqHexes([
-      setTone(rotateHue(base, 200), { sMul: 0.85, lAdd: meta.dark ? 0.22 : 0.06 }),
-      setTone(rotateHue(base, -200), { sMul: 0.85, lAdd: meta.dark ? 0.22 : 0.06 }),
-      setTone(rotateHue(base, 120), { sMul: 0.8, lAdd: meta.dark ? 0.18 : 0.04 }),
+    const contrastHexes = uniqHexes([
+      setTone(comp, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
+      setTone(split1, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
+      setTone(split2, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
     ]);
-  } else {
-    emphasisHexes = uniqHexes([
-      setTone(base, { sMul: 1.25, lAdd: 0.02 }),
-      setTone(rotateHue(base, 150), { sMul: 1.1, lAdd: 0.06 }),
-      setTone(rotateHue(base, 210), { sMul: 1.1, lAdd: 0.06 }),
+
+    const cohesionHexes = uniqHexes([
+      setTone(base, { sMul: 0.85, lAdd: 0.18 }),
+      setTone(base, { sMul: 0.75, lAdd: 0.08 }),
+      setTone(base, { sMul: 1.0, lAdd: 0.0 }),
+      setTone(base, { sMul: 0.9, lAdd: -0.1 }),
+      setTone(base, { sMul: 0.8, lAdd: -0.18 }),
     ]);
+
+    let emphasisHexes;
+    if (meta.vivid) {
+      emphasisHexes = uniqHexes([
+        setTone(rotateHue(base, 200), { sMul: 0.85, lAdd: meta.dark ? 0.22 : 0.06 }),
+        setTone(rotateHue(base, -200), { sMul: 0.85, lAdd: meta.dark ? 0.22 : 0.06 }),
+        setTone(rotateHue(base, 120), { sMul: 0.8, lAdd: meta.dark ? 0.18 : 0.04 }),
+      ]);
+    } else {
+      emphasisHexes = uniqHexes([
+        setTone(base, { sMul: 1.25, lAdd: 0.02 }),
+        setTone(rotateHue(base, 150), { sMul: 1.1, lAdd: 0.06 }),
+        setTone(rotateHue(base, 210), { sMul: 1.1, lAdd: 0.06 }),
+      ]);
+    }
+
+    const naturalHexes = uniqHexes(
+      [
+        chroma.mix(base, "#556B2F", 0.55, "lab").hex().toUpperCase(),
+        chroma.mix(base, "#8B4513", 0.5, "lab").hex().toUpperCase(),
+        chroma.mix(base, "#B87333", 0.45, "lab").hex().toUpperCase(),
+        chroma.mix(base, "#D2B48C", 0.55, "lab").hex().toUpperCase(),
+        chroma.mix(base, "#2F5D50", 0.55, "lab").hex().toUpperCase(),
+      ].map((h) => setTone(h, { sMul: 0.75, lAdd: meta.dark ? 0.18 : 0.0 }))
+    );
+
+    const tri1 = rotateHue(base, 120);
+    const tri2 = rotateHue(base, 240);
+    const tet1 = rotateHue(base, 90);
+    const tet2 = rotateHue(base, 270);
+
+    const exploreHexes = uniqHexes([
+      setTone(tri1, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
+      setTone(tri2, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
+      setTone(tet1, { sMul: 0.9, lAdd: meta.dark ? 0.22 : 0.05 }),
+      setTone(tet2, { sMul: 0.9, lAdd: meta.dark ? 0.22 : 0.05 }),
+    ]);
+
+    return {
+      dominantHex: base,
+      dominantName: getColorName(base),
+      classification: {
+        family: meta.family,
+        lane: meta.lane,
+        vivid: meta.vivid,
+        h: Math.round(meta.h),
+        s: Number(meta.s.toFixed(3)),
+        l: Number(meta.l.toFixed(3)),
+      },
+      palettes: {
+        balance: {
+          hexes: balanceHexes,
+          named_hexes: buildNamedHexes(balanceHexes),
+          reason: "Neutral anchors for stability and broad compatibility.",
+        },
+        contrast: {
+          hexes: contrastHexes,
+          named_hexes: buildNamedHexes(contrastHexes),
+          reason: "Complementary and split-complementary accents with tonal normalization.",
+        },
+        cohesion: {
+          hexes: cohesionHexes,
+          named_hexes: buildNamedHexes(cohesionHexes),
+          reason: "Same-hue tonal ladder from light to deep for cohesive systems.",
+        },
+        emphasis: {
+          hexes: emphasisHexes,
+          named_hexes: buildNamedHexes(emphasisHexes),
+          reason: meta.vivid
+            ? "Vivid base with controlled accents."
+            : "Muted base with boosted saturation and energetic shift.",
+        },
+        natural: {
+          hexes: naturalHexes,
+          named_hexes: buildNamedHexes(naturalHexes),
+          reason: "Earth blends via LAB mixing with muted toning.",
+        },
+        explore: {
+          hexes: exploreHexes,
+          named_hexes: buildNamedHexes(exploreHexes),
+          reason: "Triad and tetrad harmonies with tonal normalization.",
+        },
+      },
+    };
+  } catch (err) {
+    console.error("❌ Palette engine crash:", err);
+
+    return {
+      dominantHex: "#7A7A7A",
+      dominantName: "Neutral Gray",
+      classification: {
+        family: "neutral",
+        lane: "neutral",
+        vivid: false,
+        h: 0,
+        s: 0,
+        l: 0.5,
+      },
+      palettes: {
+        balance: {
+          hexes: ["#111111", "#7A7A7A", "#FFFFFF"],
+          named_hexes: [],
+          reason: "Fallback",
+        },
+        contrast: {
+          hexes: ["#111111", "#FFFFFF"],
+          named_hexes: [],
+          reason: "Fallback",
+        },
+        cohesion: {
+          hexes: ["#7A7A7A"],
+          named_hexes: [],
+          reason: "Fallback",
+        },
+        emphasis: {
+          hexes: ["#7A7A7A"],
+          named_hexes: [],
+          reason: "Fallback",
+        },
+        natural: {
+          hexes: ["#7A7A7A"],
+          named_hexes: [],
+          reason: "Fallback",
+        },
+        explore: {
+          hexes: ["#7A7A7A"],
+          named_hexes: [],
+          reason: "Fallback",
+        },
+      },
+    };
   }
-
-  const naturalHexes = uniqHexes(
-    [
-      chroma.mix(base, "#556B2F", 0.55, "lab").hex().toUpperCase(),
-      chroma.mix(base, "#8B4513", 0.5, "lab").hex().toUpperCase(),
-      chroma.mix(base, "#B87333", 0.45, "lab").hex().toUpperCase(),
-      chroma.mix(base, "#D2B48C", 0.55, "lab").hex().toUpperCase(),
-      chroma.mix(base, "#2F5D50", 0.55, "lab").hex().toUpperCase(),
-    ].map((h) => setTone(h, { sMul: 0.75, lAdd: meta.dark ? 0.18 : 0.0 }))
-  );
-
-  const tri1 = rotateHue(base, 120);
-  const tri2 = rotateHue(base, 240);
-  const tet1 = rotateHue(base, 90);
-  const tet2 = rotateHue(base, 270);
-
-  const exploreHexes = uniqHexes([
-    setTone(tri1, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
-    setTone(tri2, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
-    setTone(tet1, { sMul: 0.9, lAdd: meta.dark ? 0.22 : 0.05 }),
-    setTone(tet2, { sMul: 0.9, lAdd: meta.dark ? 0.22 : 0.05 }),
-  ]);
-
-  return {
-    dominantHex: base,
-    dominantName: getColorName(base),
-    classification: {
-      family: meta.family,
-      lane: meta.lane,
-      vivid: meta.vivid,
-      h: Math.round(meta.h),
-      s: Number(meta.s.toFixed(3)),
-      l: Number(meta.l.toFixed(3)),
-    },
-    palettes: {
-      balance: {
-        hexes: balanceHexes,
-        named_hexes: buildNamedHexes(balanceHexes),
-        reason: "Neutral anchors for stability and broad compatibility.",
-      },
-      contrast: {
-        hexes: contrastHexes,
-        named_hexes: buildNamedHexes(contrastHexes),
-        reason: "Complementary and split-complementary accents with tonal normalization.",
-      },
-      cohesion: {
-        hexes: cohesionHexes,
-        named_hexes: buildNamedHexes(cohesionHexes),
-        reason: "Same-hue tonal ladder from light to deep for cohesive systems.",
-      },
-      emphasis: {
-        hexes: emphasisHexes,
-        named_hexes: buildNamedHexes(emphasisHexes),
-        reason: meta.vivid ? "Vivid base with controlled accents." : "Muted base with boosted saturation and energetic shift.",
-      },
-      natural: {
-        hexes: naturalHexes,
-        named_hexes: buildNamedHexes(naturalHexes),
-        reason: "Earth blends via LAB mixing with muted toning.",
-      },
-      explore: {
-        hexes: exploreHexes,
-        named_hexes: buildNamedHexes(exploreHexes),
-        reason: "Triad and tetrad harmonies with tonal normalization.",
-      },
-    },
-  };
-}
-  };
-} catch (err) {
-  console.error("❌ Palette engine crash:", err);
-
-  return {
-    dominantHex: "#7A7A7A",
-    dominantName: "Neutral Gray",
-    classification: {
-      family: "neutral",
-      lane: "neutral",
-      vivid: false,
-      h: 0,
-      s: 0,
-      l: 0.5,
-    },
-    palettes: {
-      balance: { hexes: ["#111111", "#7A7A7A", "#FFFFFF"], named_hexes: [], reason: "Fallback" },
-      contrast: { hexes: ["#111111", "#FFFFFF"], named_hexes: [], reason: "Fallback" },
-      cohesion: { hexes: ["#7A7A7A"], named_hexes: [], reason: "Fallback" },
-      emphasis: { hexes: ["#7A7A7A"], named_hexes: [], reason: "Fallback" },
-      natural: { hexes: ["#7A7A7A"], named_hexes: [], reason: "Fallback" },
-      explore: { hexes: ["#7A7A7A"], named_hexes: [], reason: "Fallback" },
-    },
-  };
 }
 /* =========================
    OUTFIT SCORING ENGINE
