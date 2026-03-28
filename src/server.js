@@ -943,7 +943,16 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = []) {
 
   const zoneColors = normalizedColors.filter((c) => {
   if (!c?.hex || !zoneData?.hex) return false;
-  return colorDistanceLab(c.hex, zoneData.hex) < 22;
+
+  const dist = colorDistanceLab(c.hex, zoneData.hex);
+
+  // 🔒 HARD FILTER — only VERY similar colors allowed
+  if (dist < 14) return true;
+
+  // 🔒 allow slight expansion ONLY if dominant (prevents dilution)
+  if (c.pct >= 0.18 && dist < 20) return true;
+
+  return false;
 });
 
   const clusters = buildColorClusters(zoneColors.length ? zoneColors : [zoneData]);
