@@ -957,12 +957,11 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = []) {
 
   const clusters = buildColorClusters(zoneColors.length ? zoneColors : [zoneData]);
 
-  // ✅ SAFETY FIX (prevents crash)
-  const dominant = clusters[0] || { base: zoneData.hex, pct: 1 };
-
-  let displayLabel = getColorName(dominant.base);
-  let mode = "single";
-  let interpretation = "single_color";
+// 🔥 FIX: force TRUE garment color (no cluster override)
+const dominant = {
+  base: zoneData.hex,
+  pct: 1,
+};
 
   // 🔥 DENIM DETECTION
   if (
