@@ -1393,11 +1393,13 @@ function classifyColorV2(dominantHex) {
 function generatePalettesV2(dominantHex) {
   let base = safeHex(dominantHex);
 
-  // 🔥 HARD FAILSAFE — prevents palette_engine crash
-  if (!base) {
-    console.warn("⚠️ Invalid dominantHex — fallback applied");
-    base = "#7A7A7A"; // neutral fallback (safe gray)
+  // 🔥 HARD FAILSAFE — GUARANTEED valid color
+  if (!base || typeof base !== "string") {
+    console.warn("⚠️ Invalid dominantHex — forcing fallback");
+    base = "#7A7A7A";
   }
+
+  try {
 
   const meta = classifyColorV2(base);
 
@@ -1503,7 +1505,31 @@ function generatePalettesV2(dominantHex) {
     },
   };
 }
+  };
+} catch (err) {
+  console.error("❌ Palette engine crash:", err);
 
+  return {
+    dominantHex: "#7A7A7A",
+    dominantName: "Neutral Gray",
+    classification: {
+      family: "neutral",
+      lane: "neutral",
+      vivid: false,
+      h: 0,
+      s: 0,
+      l: 0.5,
+    },
+    palettes: {
+      balance: { hexes: ["#111111", "#7A7A7A", "#FFFFFF"], named_hexes: [], reason: "Fallback" },
+      contrast: { hexes: ["#111111", "#FFFFFF"], named_hexes: [], reason: "Fallback" },
+      cohesion: { hexes: ["#7A7A7A"], named_hexes: [], reason: "Fallback" },
+      emphasis: { hexes: ["#7A7A7A"], named_hexes: [], reason: "Fallback" },
+      natural: { hexes: ["#7A7A7A"], named_hexes: [], reason: "Fallback" },
+      explore: { hexes: ["#7A7A7A"], named_hexes: [], reason: "Fallback" },
+    },
+  };
+}
 /* =========================
    OUTFIT SCORING ENGINE
 ========================= */
