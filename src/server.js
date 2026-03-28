@@ -1391,8 +1391,13 @@ function classifyColorV2(dominantHex) {
    V2 PALETTE ENGINE
 ========================= */
 function generatePalettesV2(dominantHex) {
-  const base = safeHex(dominantHex);
-  if (!base) throw new Error("Invalid dominantHex");
+  let base = safeHex(dominantHex);
+
+  // 🔥 HARD FAILSAFE — prevents palette_engine crash
+  if (!base) {
+    console.warn("⚠️ Invalid dominantHex — fallback applied");
+    base = "#7A7A7A"; // neutral fallback (safe gray)
+  }
 
   const meta = classifyColorV2(base);
 
