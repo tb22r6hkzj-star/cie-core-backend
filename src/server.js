@@ -1389,11 +1389,10 @@ function classifyColorV2(dominantHex) {
 
 /* =========================
    V2 PALETTE ENGINE
-========================= */
+=========================  
 function generatePalettesV2(dominantHex) {
   let base = safeHex(dominantHex);
 
-  // HARD FAILSAFE — GUARANTEED valid color
   if (!base || typeof base !== "string") {
     console.warn("⚠️ Invalid dominantHex — forcing fallback");
     base = "#7A7A7A";
@@ -1402,7 +1401,13 @@ function generatePalettesV2(dominantHex) {
   try {
     const meta = classifyColorV2(base);
 
-    const balanceHexes = uniqHexes(["#111111", "#2B2B2B", "#7A7A7A", "#CFCFCF", "#F5F1E8"]);
+    const balanceHexes = uniqHexes([
+      "#111111",
+      "#2B2B2B",
+      "#7A7A7A",
+      "#CFCFCF",
+      "#F5F1E8",
+    ]);
 
     const comp = rotateHue(base, 180);
     const split1 = rotateHue(base, 150);
