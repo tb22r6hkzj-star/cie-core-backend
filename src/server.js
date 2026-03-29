@@ -1507,9 +1507,9 @@ function generatePalettesV2(dominantHex) {
           hexes: exploreHexes,
           named_hexes: buildNamedHexes(exploreHexes),
           reason: "Triad and tetrad harmonies with tonal normalization.",
-        },
-      },
-        };
+            },
+  };
+
 } catch (err) {
     console.error("❌ Palette engine crash:", err);
 
