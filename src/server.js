@@ -760,169 +760,86 @@ function buildZoneCandidate(color, zone, score) {
   };
 }
 
-function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelligence = null) {
-  const colors = Array.isArray(normalizedColors) ? normalizedColors : [];
-  const roles = Array.isArray(colorRoles) ? colorRoles : [];
-
-  const anchor = roles.find((r) => r.role === "anchor");
-  const support = roles.find((r) => r.role === "support");
-  const accent = roles.find((r) => r.role === "accent");
-  const stabilizer = roles.find((r) => r.role === "stabilizer");
-
-  const dominantBodyHex =
-    visualIntelligence?.dominant_body_color?.hex ||
-    anchor?.hex ||
-    colors[0]?.hex ||
-    null;
-
-  const candidates = colors.map((c) => {
-    const family = c.family || classifyColorV2(c.hex).family;
-    const surfaceRole = classifySurfaceRole(c, dominantBodyHex);
-    const pct = Number(c?.pct || 0);
-    const chromaMagnitude = Number(c?.perceptual?.chroma_magnitude || 0);
-    const light = Number(c?.light || getLight(c.hex));
-    const visualWeight = Number(c?.importance?.visual_weight || 0);
-    const highlightStrength = Number(c?.importance?.highlight_strength || 0);
-    const shadowStrength = Number(c?.importance?.shadow_strength || 0);
-    const accentStrength = Number(c?.importance?.accent_strength || 0);
-    const lane = c.lane || classifyColorV2(c.hex).lane;
-
-    let upperScore = 0;
-    let lowerScore = 0;
-    let footwearScore = 0;
-    let accessoryScore = 0;
-
-    // UPPER
-    upperScore += pct * 120;
-    upperScore += visualWeight * 0.55;
-    if (surfaceRole === "body_fabric") upperScore += 28;
-    if (surfaceRole === "body") upperScore += 16;
-    if (c.hex === anchor?.hex) upperScore += 22;
-    if (c.hex === support?.hex) upperScore += 12;
-    if (highlightStrength > 55) upperScore -= 12;
-    if (surfaceRole === "graphic_detail") upperScore -= 20;
-    if (surfaceRole === "micro_accent") upperScore -= 22;
-
-    // LOWER
-    lowerScore += pct * 95;
-    lowerScore += visualWeight * 0.35;
-    if (family === "neutral") lowerScore += 12; // reduced
-if (family === "earth" && chromaMagnitude < 30 && pct < 0.25) lowerScore -= 10; // 🔥 penalize camel-like fillers
-    if (light < 0.42) lowerScore += 18;
-    if (shadowStrength > 42) lowerScore += 16;
-    if (c.hex === stabilizer?.hex) lowerScore += 26;
-    if (surfaceRole === "body_fabric") lowerScore += 10;
-    if (surfaceRole === "graphic_detail") lowerScore -= 18;
-    if (accentStrength > 60) lowerScore -= 10;
-
-    // lower-zone denim bias
-    if (["blue", "cyan"].includes(lane) && chromaMagnitude < 36 && light >= 0.38 && light <= 0.82) {
-      lowerScore += 16;
-    }
-// 🔥 HARD PRIORITY: denim / blue lower dominance
-if (["blue", "cyan"].includes(lane) && pct >= 0.2) {
-  lowerScore += 35;
-}
-    // FOOTWEAR
-    footwearScore += visualWeight * 0.28;
-    if (family === "neutral") footwearScore += 20;
-    if (light < 0.35) footwearScore += 24;
-    if (shadowStrength > 48) footwearScore += 22;
-    if (c.hex === stabilizer?.hex) footwearScore += 14;
-    if (c.hex === accent?.hex && accentStrength > 55) footwearScore += 12;
-    if (surfaceRole === "trim") footwearScore += 8;
-    if (surfaceRole === "highlight_trim") footwearScore += 6;
-
-    // ACCESSORY
-    accessoryScore += accentStrength * 0.55;
-    accessoryScore += highlightStrength * 0.3;
-    if (surfaceRole === "graphic_detail") accessoryScore += 36;
-    if (surfaceRole === "micro_accent") accessoryScore += 34;
-    if (surfaceRole === "highlight_trim") accessoryScore += 20;
-    if (c.hex === accent?.hex) accessoryScore += 22;
-    if (pct < 0.18) accessoryScore += 10;
-    if (pct > 0.35) accessoryScore -= 16;
-
+function inferZoneColorRead(zoneKey, zoneData, normalizedColors = []) {
+  if (!zoneData?.hex) {
     return {
-      ...c,
-      zone_scores: {
-        upper: Math.round(clamp100(upperScore)),
-        lower: Math.round(clamp100(lowerScore)),
-        footwear: Math.round(clamp100(footwearScore)),
-        accessory: Math.round(clamp100(accessoryScore)),
-      },
+      mode: "single",
+      cluster_count: 0,
+      interpretation: "unknown",
+      display_label: zoneData?.name || "Unknown",
+      dominant_color: null,
+      support_colors: [],
+      accent_colors: [],
     };
+  }
+
+  const zoneColors = normalizedColors.filter((c) => {
+    if (!c?.hex || !zoneData?.hex) return false;
+
+    const dist = colorDistanceLab(c.hex, zoneData.hex);
+
+    // only keep very close colors
+    if (dist < 14) return true;
+
+    // slight expansion only for stronger colors
+    if (Number(c?.pct || 0) >= 0.18 && dist < 20) return true;
+
+    return false;
   });
 
-  const bestUpper =
-    [...candidates].sort((a, b) => b.zone_scores.upper - a.zone_scores.upper)[0] || null;
+  const clusters = buildColorClusters(zoneColors.length ? zoneColors : [zoneData]);
 
-  const bestLower =
-    [...candidates]
-      .filter((c) => c.hex !== bestUpper?.hex)
-      .sort((a, b) => b.zone_scores.lower - a.zone_scores.lower)[0] || null;
-
-  const bestFootwear =
-    [...candidates]
-      .filter((c) => ![bestUpper?.hex, bestLower?.hex].includes(c.hex))
-      .sort((a, b) => b.zone_scores.footwear - a.zone_scores.footwear)[0] || null;
-
-  const bestAccessory =
-    [...candidates]
-      .filter((c) => ![bestUpper?.hex, bestLower?.hex, bestFootwear?.hex].includes(c.hex))
-      .sort((a, b) => b.zone_scores.accessory - a.zone_scores.accessory)[0] || null;
-
-  const rawZones = {
-    upper: buildZoneCandidate(bestUpper, "upper", bestUpper?.zone_scores?.upper || 0),
-    lower: buildZoneCandidate(bestLower, "lower", bestLower?.zone_scores?.lower || 0),
-    footwear: buildZoneCandidate(bestFootwear, "footwear", bestFootwear?.zone_scores?.footwear || 0),
-    accessory: buildZoneCandidate(bestAccessory, "accessory", bestAccessory?.zone_scores?.accessory || 0),
+  // force garment label to stay tied to the chosen zone color
+  const dominant = {
+    base: zoneData.hex,
+    pct: 1,
   };
 
-  const zones = {};
-  for (const [zoneKey, zoneData] of Object.entries(rawZones)) {
-    if (!zoneData) {
-      zones[zoneKey] = null;
-      continue;
-    }
+  let displayLabel = getColorName(dominant.base);
+  let mode = "single";
+  let interpretation = "single_color";
 
-    const read = inferZoneColorRead(zoneKey, zoneData, colors);
-
-zones[zoneKey] = {
-  ...zoneData,
-  name: read.display_label || zoneData.name,
-  display_label: read.display_label || zoneData.name,
-  dominant_color: read.dominant_color,
-  support_colors: read.support_colors,
-  accent_colors: read.accent_colors,
-  read_mode: read.mode,
-  cluster_count: read.cluster_count,
-  interpretation: read.interpretation,
-};
-    }
-  const confidence = {
-    upper: zones.upper?.score || 0,
-    lower: zones.lower?.score || 0,
-    footwear: zones.footwear?.score || 0,
-    accessory: zones.accessory?.score || 0,
-  };
+  if (
+    zoneKey === "lower" &&
+    clusters.some((c) => {
+      const h = getHue(c.base);
+      return h >= 200 && h <= 245;
+    }) &&
+    clusters.every((c) => getPerceptualTraits(c.base).chroma_magnitude < 40)
+  ) {
+    displayLabel = "Light Wash Denim";
+    mode = "washed_fabric";
+    interpretation = "denim";
+  } else if (zoneKey === "footwear" && clusters.length >= 3) {
+    displayLabel = "Multicolor Sneaker";
+    mode = "multicolor";
+    interpretation = "multi_material";
+  } else if (zoneKey === "accessory" && clusters.length >= 3) {
+    displayLabel = "Multicolor Accessory";
+    mode = "multicolor";
+    interpretation = "patterned";
+  }
 
   return {
-    version: "zone_scaffold_v2",
-    zones,
-    confidence,
-    notes: {
-      upper: "Estimated main upper-body garment color.",
-      lower: "Estimated lower-body garment color.",
-      footwear: "Estimated footwear/stabilizing color.",
-      accessory: "Estimated accessory or detail color.",
+    mode,
+    cluster_count: clusters.length,
+    interpretation,
+    display_label: displayLabel,
+    dominant_color: {
+      hex: dominant.base,
+      name: getColorName(dominant.base),
+      pct: round2(dominant.pct),
     },
-    summary: [
-      zones.upper ? `Upper reads as ${zones.upper.display_label || zones.upper.name}.` : null,
-      zones.lower ? `Lower reads as ${zones.lower.display_label || zones.lower.name}.` : null,
-      zones.footwear ? `Footwear reads as ${zones.footwear.display_label || zones.footwear.name}.` : null,
-      zones.accessory ? `Accessory/detail reads as ${zones.accessory.display_label || zones.accessory.name}.` : null,
-    ].filter(Boolean),
+    support_colors: clusters.slice(1, 3).map((c) => ({
+      hex: c.base,
+      name: getColorName(c.base),
+      pct: round2(c.pct),
+    })),
+    accent_colors: clusters.slice(3, 5).map((c) => ({
+      hex: c.base,
+      name: getColorName(c.base),
+      pct: round2(c.pct),
+    })),
   };
 }
 /* =========================
@@ -1389,7 +1306,7 @@ function classifyColorV2(dominantHex) {
 
 /* =========================
    V2 PALETTE ENGINE
-=========================  
+========================= */
 function generatePalettesV2(dominantHex) {
   let base = safeHex(dominantHex);
 
@@ -1507,10 +1424,10 @@ function generatePalettesV2(dominantHex) {
           hexes: exploreHexes,
           named_hexes: buildNamedHexes(exploreHexes),
           reason: "Triad and tetrad harmonies with tonal normalization.",
-            },
-  };
-
-} catch (err) {
+        },
+      },
+    };
+  } catch (err) {
     console.error("❌ Palette engine crash:", err);
 
     return {
