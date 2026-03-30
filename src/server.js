@@ -2834,6 +2834,9 @@ function buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts = [
 
 const REPLICATE_SAM_TIMEOUT_MS = 25000;
 const REPLICATE_SAM_POLL_MS = 1200;
+const DEFAULT_REPLICATE_SAM_VERSION =
+  process.env.REPLICATE_SAM_VERSION ||
+  "b88dc2ea8f814e5f4af2bac79f2414079800b5035b065d4eab99c857ab67e125";
 const DEFAULT_REPLICATE_SAM_MODEL = process.env.REPLICATE_SAM_MODEL || "meta/sam-2";
 
 function getSamPredictionsUrl(modelId = DEFAULT_REPLICATE_SAM_MODEL) {
