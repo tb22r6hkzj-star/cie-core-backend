@@ -831,22 +831,35 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
 
   const fallbackSet = useRegionOnly && !regionColors.length ? [zoneData] : zoneColors.length ? zoneColors : [zoneData];
   const clusters = buildColorClusters(fallbackSet);
+  const clustersTotalWeight = clusters.reduce((sum, c) => sum + Number(c?.weight || 0), 0) || 1;
+  const dominantCluster = clusters[0] || null;
   const dominant = {
-    base: baseHex,
-    pct: 1,
+    base: dominantCluster?.base || baseHex,
+    pct: round2((Number(dominantCluster?.weight || 0) || 1) / clustersTotalWeight),
   };
 
   let displayLabel = getColorName(dominant.base);
   let mode = "single";
   let interpretation = "single_color";
+  const evidenceCoverage = clusters.reduce((sum, c) => sum + Number(c?.pct || 0), 0);
 
   if (
     zoneKey === "lower_garment" &&
+    clusters.length >= 2 &&
+    evidenceCoverage >= 0.55 &&
     clusters.some((c) => {
       const h = getHue(c.base);
       return h >= 200 && h <= 245;
     }) &&
-    clusters.every((c) => getPerceptualTraits(c.base).chroma_magnitude < 40)
+    clusters.filter((c) => {
+      const h = getHue(c.base);
+      return h >= 190 && h <= 255;
+    }).length >= 2 &&
+    clusters.every((c) => {
+      const traits = getPerceptualTraits(c.base);
+      const l = getLight(c.base);
+      return traits.chroma_magnitude < 42 && l > 0.2;
+    })
   ) {
     displayLabel = "Light Wash Denim";
     mode = "washed_fabric";
@@ -908,6 +921,116 @@ function getZoneFromLabel(label = "") {
   return "unknown";
 }
 
+function getZoneRegionEvidence(zoneRegions = []) {
+  const coverage = (zoneRegions || []).reduce((sum, r) => sum + Number(r?.coverage || r?.confidence || 0), 0);
+  const weightedConfidence = avg((zoneRegions || []).map((r) => Number(r?.confidence || 0)));
+  const colorCount = (zoneRegions || []).reduce((sum, r) => {
+    const local = Array.isArray(r?.region_colors) ? r.region_colors.length : 0;
+    return sum + local;
+  }, 0);
+
+  return {
+    region_count: zoneRegions.length,
+    coverage: round2(coverage),
+    weighted_confidence: round2(weightedConfidence),
+    color_count: colorCount,
+  };
+}
+
+function shouldPromoteFallbackZone(zoneKey, evidence, zoneScore = 0) {
+  if (!["lower_garment", "outerwear", "footwear"].includes(zoneKey)) return true;
+  const hasStrongRegionEvidence =
+    Number(evidence?.region_count || 0) >= 1 &&
+    Number(evidence?.coverage || 0) >= 0.24 &&
+    Number(evidence?.weighted_confidence || 0) >= 42;
+  const hasStrongColorEvidence = Number(evidence?.color_count || 0) >= 2;
+  const passesConfidence = Number(zoneScore || 0) >= 58;
+  return (hasStrongRegionEvidence && hasStrongColorEvidence) || passesConfidence;
+}
+
+function areLikelyOnePiece(zones = {}, segmentedByZone = {}) {
+  const upper = getZoneRegionEvidence(segmentedByZone.upper_garment || []);
+  const lower = getZoneRegionEvidence(segmentedByZone.lower_garment || []);
+  const bodyEvidence = upper.region_count + lower.region_count;
+  if (bodyEvidence < 1) return { decision: false, confidence: 0, reason: "insufficient_region_evidence" };
+
+  const upperHex = zones?.upper_garment?.hex;
+  const lowerHex = zones?.lower_garment?.hex;
+  const hasColors = !!upperHex && !!lowerHex;
+  const labDistance = hasColors ? colorDistanceLab(upperHex, lowerHex) : 99;
+  const upperScore = Number(zones?.upper_garment?.confidence || zones?.upper_garment?.score || 0);
+  const lowerScore = Number(zones?.lower_garment?.confidence || zones?.lower_garment?.score || 0);
+  const noStrongSplitEvidence = lower.coverage < 0.28 || lowerScore < 55;
+  const visuallyContinuous = hasColors && labDistance < 11;
+  const decision = visuallyContinuous && noStrongSplitEvidence;
+  const confidence = decision ? Math.round(clamp100(62 + (11 - Math.max(0, labDistance)) * 2.2)) : 0;
+  return {
+    decision,
+    confidence,
+    reason: decision ? "continuous_body_region_and_weak_split" : "split_evidence_present",
+    lab_distance: round2(labDistance),
+    upper_score: upperScore,
+    lower_score: lowerScore,
+  };
+}
+
+function dedupeDarkNeutralZoneReuse(zones = {}) {
+  const slots = ["upper_garment", "lower_garment", "outerwear"];
+  const candidates = slots
+    .map((slot) => ({ slot, data: zones[slot] }))
+    .filter((x) => !!x?.data?.hex)
+    .map((x) => ({
+      ...x,
+      confidence: Number(x.data?.confidence || x.data?.score || 0),
+      traits: getPerceptualTraits(x.data.hex),
+    }));
+
+  const removals = [];
+  for (let i = 0; i < candidates.length; i += 1) {
+    for (let j = i + 1; j < candidates.length; j += 1) {
+      const a = candidates[i];
+      const b = candidates[j];
+      const dist = colorDistanceLab(a.data.hex, b.data.hex);
+      const nearDuplicate = dist < 9;
+      const darkNeutralPair =
+        a.traits?.chroma_magnitude < 20 &&
+        b.traits?.chroma_magnitude < 20 &&
+        getLight(a.data.hex) < 0.45 &&
+        getLight(b.data.hex) < 0.45;
+
+      if (nearDuplicate || darkNeutralPair) {
+        const weaker = a.confidence <= b.confidence ? a : b;
+        if (weaker.slot === "upper_garment") continue;
+        removals.push({
+          slot: weaker.slot,
+          reason: "near_duplicate_dark_neutral",
+          matched_with: weaker.slot === a.slot ? b.slot : a.slot,
+          distance: round2(dist),
+        });
+      }
+    }
+  }
+
+  const deduped = { ...zones };
+  for (const r of removals) {
+    const current = deduped[r.slot];
+    if (!current?.hex) continue;
+    deduped[r.slot] = {
+      ...current,
+      hex: null,
+      interpretation: "unknown",
+      display_label: titleCase(String(r.slot).replace(/_/g, " ")),
+      confidence: Math.min(Number(current?.confidence || 0), 42),
+      dominant_color: null,
+      support_colors: [],
+      accent_colors: [],
+      dedupe_reason: r.reason,
+    };
+  }
+
+  return { zones: deduped, removals };
+}
+
 function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelligence = {}, segmentedRegions = []) {
   const roleByName = Object.fromEntries((colorRoles || []).map((r) => [r.role, r]));
   const dominant = visualIntelligence?.dominant_body_color || roleByName.anchor || normalizedColors[0] || null;
@@ -938,6 +1061,8 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
 
   const zones = {};
   const regionColorAnalysis = [];
+  const regionSummary = [];
+  const zoneCandidateSummary = [];
 
   for (const [zoneKey, fallbackColor] of Object.entries(zoneMap)) {
     const zoneRegions = segmentedByZone[zoneKey] || [];
@@ -950,14 +1075,31 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         return [{ hex: fallbackHex, pct: Number(r?.coverage || r?.confidence || 0.2) }];
       })
       .filter((c) => !!c.hex);
+    const evidence = getZoneRegionEvidence(zoneRegions);
 
     const hasSamRegion = zoneRegions.length > 0;
     const chosenColor = regionColors[0]?.hex
       ? { ...fallbackColor, hex: regionColors[0].hex, pct: regionColors[0].pct }
       : fallbackColor;
-
-    const zoneData = buildZoneCandidate(chosenColor, zoneKey, Math.max(45, Math.round((chosenColor?.pct || 0.25) * 100)));
+    const computedScore = Math.max(45, Math.round((chosenColor?.pct || 0.25) * 100));
+    const promoteFallback = shouldPromoteFallbackZone(zoneKey, evidence, computedScore);
+    const zoneData = promoteFallback ? buildZoneCandidate(chosenColor, zoneKey, computedScore) : null;
     const zoneRead = inferZoneColorRead(zoneKey, zoneData, normalizedColors, regionColors, hasSamRegion);
+    regionSummary.push({
+      zone: zoneKey,
+      region_count: evidence.region_count,
+      coverage: evidence.coverage,
+      weighted_confidence: evidence.weighted_confidence,
+      color_count: evidence.color_count,
+    });
+    zoneCandidateSummary.push({
+      zone: zoneKey,
+      has_sam_region: hasSamRegion,
+      promote_fallback: promoteFallback,
+      score: computedScore,
+      selected_hex: zoneData?.hex || null,
+      confidence: zoneRead?.confidence || 0,
+    });
 
     zones[zoneKey] = {
       ...zoneData,
@@ -1000,10 +1142,66 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     }
   }
 
+  const onePieceDecision = areLikelyOnePiece(zones, segmentedByZone);
+  if (onePieceDecision.decision) {
+    const baseBody = zones.upper_garment?.hex ? zones.upper_garment : zones.lower_garment;
+    const bodyCandidate = baseBody
+      ? buildZoneCandidate(
+          { hex: baseBody.hex, pct: Math.max(baseBody?.pct || 0.35, 0.35), name: baseBody?.name },
+          "body_garment",
+          Math.max(60, onePieceDecision.confidence)
+        )
+      : null;
+    const bodyRead = inferZoneColorRead("body_garment", bodyCandidate, normalizedColors, [], false);
+    zones.body_garment = {
+      ...bodyCandidate,
+      ...bodyRead,
+      silhouette: "one_piece",
+      one_piece_confidence: onePieceDecision.confidence,
+    };
+    zones.one_piece = {
+      zone: "one_piece",
+      interpretation: "one_piece",
+      confidence: onePieceDecision.confidence,
+      evidence: onePieceDecision.reason,
+      lab_distance: onePieceDecision.lab_distance,
+    };
+
+    if (zones.lower_garment) {
+      zones.lower_garment = {
+        ...zones.lower_garment,
+        hex: null,
+        interpretation: "unknown",
+        confidence: Math.min(Number(zones.lower_garment?.confidence || 0), 45),
+        dominant_color: null,
+        support_colors: [],
+        accent_colors: [],
+        one_piece_suppressed: true,
+      };
+    }
+  }
+
+  const dedupeResult = dedupeDarkNeutralZoneReuse(zones);
+  const finalZones = dedupeResult.zones;
+  const denimSummary = {
+    lower_zone_interpretation: finalZones?.lower_garment?.interpretation || "unknown",
+    lower_zone_confidence: Number(finalZones?.lower_garment?.confidence || 0),
+    lower_zone_hex: finalZones?.lower_garment?.hex || null,
+  };
+
+  console.info("[INTERPRET DEBUG] segmented region summary", regionSummary);
+  console.info("[INTERPRET DEBUG] zone candidate summary", zoneCandidateSummary);
+  console.info("[INTERPRET DEBUG] one_piece decision summary", onePieceDecision);
+  console.info("[INTERPRET DEBUG] denim decision summary", denimSummary);
+  console.info(
+    "[INTERPRET DEBUG] final selected zones with confidence",
+    Object.fromEntries(Object.entries(finalZones).map(([k, v]) => [k, Number(v?.confidence || v?.score || 0)]))
+  );
+
   return {
     version: "garment_zone_v3",
     segmented_regions: segmentedRegions,
-    zones,
+    zones: finalZones,
     region_color_analysis: regionColorAnalysis,
   };
 }
@@ -1056,19 +1254,27 @@ function isMultiColor(clusters = []) {
 function isDenimLike(clusters = []) {
   const blueClusters = clusters.filter((c) => {
     const h = getHue(c.base);
-    return h >= 200 && h <= 245;
+    return h >= 200 && h <= 250;
   });
 
-  const lowChroma = clusters.every(
-    (c) => Number(getPerceptualTraits(c.base)?.chroma_magnitude || 0) < 38
-  );
+  const supportiveBlueClusters = clusters.filter((c) => {
+    const h = getHue(c.base);
+    return h >= 190 && h <= 260 && Number(c?.pct || 0) >= 0.12;
+  });
+  const blueCoverage = blueClusters.reduce((sum, c) => sum + Number(c?.pct || 0), 0);
+  const meaningfulCoverage = clusters.reduce((sum, c) => sum + Number(c?.pct || 0), 0) >= 0.55;
+  const lowChroma = clusters.every((c) => {
+    const chromaMag = Number(getPerceptualTraits(c.base)?.chroma_magnitude || 0);
+    const light = getLight(c.base);
+    return chromaMag < 44 && light > 0.2;
+  });
 
   const midLight = clusters.some((c) => {
     const l = getLight(c.base);
     return l >= 0.38 && l <= 0.82;
   });
 
-  return blueClusters.length >= 1 && lowChroma && midLight;
+  return blueClusters.length >= 2 && supportiveBlueClusters.length >= 2 && blueCoverage >= 0.45 && meaningfulCoverage && lowChroma && midLight;
 }
 
 function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
@@ -1082,9 +1288,17 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
 
   function buildItem(type, zoneData) {
     if (!zoneData?.hex) return null;
+    if (["outerwear", "lower_garment", "footwear"].includes(type) && Number(zoneData?.confidence || 0) < 56) {
+      return null;
+    }
 
     const zoneColors = getZoneColors(zoneData.hex);
-    const clusters = buildColorClusters(zoneColors.length ? zoneColors : [zoneData]);
+    const clusterInput = Array.isArray(zoneData?.support_colors) && zoneData.support_colors.length
+      ? [{ hex: zoneData.hex, pct: zoneData.pct || 0.5 }, ...zoneData.support_colors]
+      : zoneColors.length
+        ? zoneColors
+        : [zoneData];
+    const clusters = buildColorClusters(clusterInput);
     const dominant = clusters[0] || { base: zoneData.hex, pct: 1 };
 
     const dominantTraits = getPerceptualTraits(dominant.base);
@@ -1131,6 +1345,27 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
     if (type === "footwear" && getLight(dominant.base) < 0.35) {
       material = material === "mixed_material" ? "rubber" : "leather";
       materialConfidence = Math.max(materialConfidence, 66);
+    }
+
+    if (type === "footwear") {
+      const tanLike = clusters.some((c) => {
+        const h = getHue(c.base);
+        const l = getLight(c.base);
+        const s = getSat(c.base);
+        return h >= 25 && h <= 55 && l >= 0.34 && l <= 0.72 && s >= 0.2;
+      });
+      const tanCoverage = clusters
+        .filter((c) => {
+          const h = getHue(c.base);
+          return h >= 25 && h <= 55;
+        })
+        .reduce((sum, c) => sum + Number(c?.pct || 0), 0);
+      if (/tan|camel|beige|luxury/i.test(displayLabel) && (!tanLike || tanCoverage < 0.42)) {
+        displayLabel = getColorName(dominant.base);
+      }
+      if (Number(zoneData?.confidence || 0) < 58 && clusters.length < 2) {
+        return null;
+      }
     }
 
     return {
