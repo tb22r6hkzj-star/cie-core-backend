@@ -2834,9 +2834,8 @@ function buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts = [
 
 const REPLICATE_SAM_TIMEOUT_MS = 25000;
 const REPLICATE_SAM_POLL_MS = 1200;
-const DEFAULT_REPLICATE_SAM_VERSION =
-  process.env.REPLICATE_SAM_VERSION ||
-  "95e1b2f2f15f96c6b2f6fbeee3f2f6af95f63d652f6f0cead4b9f4b6f8e6a100";
+const REPLICATE_SAM_MODEL = "meta/sam-2";
+const REPLICATE_SAM_MODEL_PREDICTIONS_URL = `https://api.replicate.com/v1/models/${REPLICATE_SAM_MODEL}/predictions`;
 
 async function replicateRequest(url, options = {}, timeoutMs = REPLICATE_SAM_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -3033,6 +3032,7 @@ async function enrichSamRegionsWithMaskedColors(imageUrl, regions = []) {
 async function runSamSegmentation(imageUrl) {
   const token = process.env.REPLICATE_API_TOKEN;
   if (!token) {
+    console.warn("[SAM DEBUG] Skipping SAM segmentation: missing REPLICATE_API_TOKEN");
     return {
       enabled: false,
       ok: false,
@@ -3042,23 +3042,26 @@ async function runSamSegmentation(imageUrl) {
   }
 
   try {
-    const createResp = await replicateRequest("https://api.replicate.com/v1/predictions", {
+    console.info("[SAM DEBUG] Starting SAM segmentation request", {
+      imageUrl,
+      model: REPLICATE_SAM_MODEL,
+    });
+    const createResp = await replicateRequest(REPLICATE_SAM_MODEL_PREDICTIONS_URL, {
       method: "POST",
       headers: {
         Authorization: `Token ${token}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        version: DEFAULT_REPLICATE_SAM_VERSION,
         input: {
           image: imageUrl,
-          output_format: "json",
         },
       }),
     });
 
     const statusUrl = createResp?.urls?.get;
     if (!statusUrl) {
+      console.error("[SAM DEBUG] SAM create response missing poll URL");
       return {
         enabled: true,
         ok: false,
@@ -3077,9 +3080,17 @@ async function runSamSegmentation(imageUrl) {
         method: "GET",
         headers: { Authorization: `Token ${token}` },
       });
+      console.info("[SAM DEBUG] SAM prediction poll", {
+        id: prediction?.id || createResp?.id || null,
+        status: prediction?.status || "unknown",
+      });
     }
 
     if (prediction?.status !== "succeeded") {
+      console.error("[SAM DEBUG] SAM segmentation did not succeed", {
+        status: prediction?.status || "unknown",
+        error: prediction?.error || null,
+      });
       return {
         enabled: true,
         ok: false,
@@ -3090,6 +3101,10 @@ async function runSamSegmentation(imageUrl) {
 
     const parsedRegions = parseSamOutputToRegions(prediction?.output);
     const enrichedRegions = await enrichSamRegionsWithMaskedColors(imageUrl, parsedRegions);
+    console.info("[SAM DEBUG] SAM segmentation succeeded", {
+      regionCount: enrichedRegions.length,
+      predictionId: prediction?.id || null,
+    });
 
     return {
       enabled: true,
@@ -3098,6 +3113,7 @@ async function runSamSegmentation(imageUrl) {
       regions: enrichedRegions,
     };
   } catch (error) {
+    console.error("[SAM DEBUG] SAM request error", error?.message || error);
     return {
       enabled: true,
       ok: false,
@@ -3220,7 +3236,7 @@ async function analyzeGhostColors(ghostUrl) {
       sam_enabled: !!sam?.enabled,
       sam_ok: !!sam?.ok,
       sam_reason: sam?.reason || null,
-      sam_version: process.env.REPLICATE_SAM_VERSION || DEFAULT_REPLICATE_SAM_VERSION,
+      sam_version: REPLICATE_SAM_MODEL,
       fallback_mode: !sam?.ok,
     },
   };
@@ -3261,6 +3277,18 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       analysis = await analyzeGhostColors(ghostUrl);
     } catch (error) {
       return sendStepError(res, 500, "analyze_cloudinary_colors", error);
+    }
+    if (!analysis?.pipeline?.sam_ok) {
+      const samReason = analysis?.pipeline?.sam_reason || "sam_failed";
+      console.error("[SAM DEBUG] Failing /api/images/transform due to SAM failure", {
+        reason: samReason,
+        sam_enabled: !!analysis?.pipeline?.sam_enabled,
+      });
+      return res.status(502).json({
+        success: false,
+        step: "sam_segmentation",
+        error: `SAM segmentation failed: ${samReason}`,
+      });
     }
 
     let v2;
