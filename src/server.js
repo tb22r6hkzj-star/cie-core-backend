@@ -2905,6 +2905,20 @@ async function replicateRequest(url, options = {}, timeoutMs = REPLICATE_SAM_TIM
 function parseSamOutputToRegions(output) {
   if (!output) return [];
 
+  if (Array.isArray(output?.individual_masks)) {
+    return output.individual_masks.map((maskUrl, idx) => ({
+      id: `sam_${idx + 1}`,
+      segment_label: `segment_${idx + 1}`,
+      zone: "unknown",
+      confidence: 70,
+      coverage: 0.2,
+      mask_url: maskUrl,
+      dominant_hex: null,
+      region_colors: [],
+      source_type: "sam_segment",
+    }));
+  }
+
   const rows = Array.isArray(output)
     ? output
     : Array.isArray(output?.segments)
