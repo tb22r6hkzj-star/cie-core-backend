@@ -3143,6 +3143,9 @@ async function runSamSegmentation(imageUrl) {
       };
     }
 
+    console.info("[SAM DEBUG] RAW SAM OUTPUT", {
+      outputPreview: JSON.stringify(prediction?.output)?.slice(0, 1000),
+    });
     const parsedRegions = parseSamOutputToRegions(prediction?.output);
     const enrichedRegions = await enrichSamRegionsWithMaskedColors(imageUrl, parsedRegions);
     console.info("[SAM DEBUG] SAM segmentation succeeded", {
