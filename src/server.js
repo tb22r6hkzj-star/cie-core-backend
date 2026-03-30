@@ -3142,7 +3142,7 @@ async function runSamSegmentation(imageUrl) {
       });
     }
 
-    if (prediction?.status !== "succeeded") {
+    if (prediction?.status === "failed" || prediction?.status === "canceled") {
       console.error("[SAM DEBUG] SAM segmentation did not succeed", {
         predictionId: prediction?.id || createResp?.id || null,
         status: prediction?.status || "unknown",
@@ -3153,6 +3153,15 @@ async function runSamSegmentation(imageUrl) {
         enabled: true,
         ok: false,
         reason: prediction?.error || prediction?.status || "unknown_failure",
+        regions: [],
+      };
+    }
+
+    if (prediction?.status !== "succeeded") {
+      return {
+        enabled: true,
+        ok: false,
+        reason: "sam_timeout",
         regions: [],
       };
     }
