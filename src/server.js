@@ -2845,10 +2845,29 @@ function getSamPredictionsUrl(modelId = DEFAULT_REPLICATE_SAM_MODEL) {
 async function replicateRequest(url, options = {}, timeoutMs = REPLICATE_SAM_TIMEOUT_MS) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const method = String(options?.method || "GET").toUpperCase();
+  let bodyTopLevelKeys = [];
+  if (typeof options?.body === "string" && options.body.trim()) {
+    try {
+      const parsedBody = JSON.parse(options.body);
+      if (parsedBody && typeof parsedBody === "object" && !Array.isArray(parsedBody)) {
+        bodyTopLevelKeys = Object.keys(parsedBody);
+      }
+    } catch {
+      bodyTopLevelKeys = [];
+    }
+  }
+
+  console.info("[SAM DEBUG] Replicate request dispatch", {
+    method,
+    url,
+    bodyTopLevelKeys,
+  });
 
   try {
     const resp = await fetch(url, {
       ...options,
+      method,
       signal: controller.signal,
     });
     const text = await resp.text();
@@ -3062,7 +3081,7 @@ async function runSamSegmentation(imageUrl) {
     const createResp = await replicateRequest(createUrl, {
       method: "POST",
       headers: {
-        Authorization: `Token ${token}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -3097,7 +3116,7 @@ async function runSamSegmentation(imageUrl) {
       await new Promise((resolve) => setTimeout(resolve, REPLICATE_SAM_POLL_MS));
       prediction = await replicateRequest(statusUrl, {
         method: "GET",
-        headers: { Authorization: `Token ${token}` },
+        headers: { Authorization: `Bearer ${token}` },
       });
       console.info("[SAM DEBUG] SAM prediction poll", {
         id: prediction?.id || createResp?.id || null,
