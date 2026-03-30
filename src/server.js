@@ -2832,7 +2832,7 @@ function buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts = [
   };
 }
 
-const REPLICATE_SAM_TIMEOUT_MS = 25000;
+const REPLICATE_SAM_TIMEOUT_MS = 90000;
 const REPLICATE_SAM_POLL_MS = 1200;
 const DEFAULT_REPLICATE_SAM_VERSION =
   process.env.REPLICATE_SAM_VERSION ||
