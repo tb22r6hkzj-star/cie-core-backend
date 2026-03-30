@@ -40,6 +40,8 @@ import multer from "multer";
 import dotenv from "dotenv";
 import { v2 as cloudinary } from "cloudinary";
 import chroma from "chroma-js";
+import jpeg from "jpeg-js";
+import { PNG } from "pngjs";
 
 dotenv.config();
 
@@ -801,7 +803,7 @@ function buildSegmentedColorObject({
   };
 }
 
-function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColors = []) {
+function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColors = [], useRegionOnly = false) {
   const fallbackName = zoneData?.name || titleCase(String(zoneKey || "unknown").replace(/_/g, " "));
 
   if (!zoneData?.hex) {
@@ -818,7 +820,8 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   }
 
   const baseHex = safeHex(zoneData.hex) || zoneData.hex;
-  const zoneColors = (regionColors.length ? regionColors : normalizedColors).filter((c) => {
+  const candidateColors = regionColors.length ? regionColors : useRegionOnly ? [] : normalizedColors;
+  const zoneColors = candidateColors.filter((c) => {
     if (!c?.hex || !baseHex) return false;
     const dist = colorDistanceLab(c.hex, baseHex);
     if (dist < 14) return true;
@@ -826,7 +829,8 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     return false;
   });
 
-  const clusters = buildColorClusters(zoneColors.length ? zoneColors : [zoneData]);
+  const fallbackSet = useRegionOnly && !regionColors.length ? [zoneData] : zoneColors.length ? zoneColors : [zoneData];
+  const clusters = buildColorClusters(fallbackSet);
   const dominant = {
     base: baseHex,
     pct: 1,
@@ -938,18 +942,22 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
   for (const [zoneKey, fallbackColor] of Object.entries(zoneMap)) {
     const zoneRegions = segmentedByZone[zoneKey] || [];
     const regionColors = zoneRegions
-      .map((r) => ({
-        hex: safeHex(r?.dominant_hex || r?.hex),
-        pct: Number(r?.coverage || r?.confidence || 0.2),
-      }))
+      .flatMap((r) => {
+        const local = Array.isArray(r?.region_colors) ? r.region_colors : [];
+        if (local.length) return local;
+        const fallbackHex = safeHex(r?.dominant_hex || r?.hex);
+        if (!fallbackHex) return [];
+        return [{ hex: fallbackHex, pct: Number(r?.coverage || r?.confidence || 0.2) }];
+      })
       .filter((c) => !!c.hex);
 
+    const hasSamRegion = zoneRegions.length > 0;
     const chosenColor = regionColors[0]?.hex
       ? { ...fallbackColor, hex: regionColors[0].hex, pct: regionColors[0].pct }
       : fallbackColor;
 
     const zoneData = buildZoneCandidate(chosenColor, zoneKey, Math.max(45, Math.round((chosenColor?.pct || 0.25) * 100)));
-    const zoneRead = inferZoneColorRead(zoneKey, zoneData, normalizedColors, regionColors);
+    const zoneRead = inferZoneColorRead(zoneKey, zoneData, normalizedColors, regionColors, hasSamRegion);
 
     zones[zoneKey] = {
       ...zoneData,
@@ -960,7 +968,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       color: { hex: zoneRead?.dominant_color?.hex, pct: zoneRead?.dominant_color?.pct },
       zone: zoneKey,
       role: "dominant",
-      sourceType: zoneRegions.length ? "sam_segment" : "global_palette",
+      sourceType: hasSamRegion ? "sam_segment" : "global_palette",
       segmentLabel: zoneRegions[0]?.segment_label || zoneKey,
       confidence: zoneRead?.confidence || zoneData?.score || 0,
     });
@@ -972,7 +980,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         color: support,
         zone: zoneKey,
         role: "support",
-        sourceType: zoneRegions.length ? "sam_segment" : "global_palette",
+        sourceType: hasSamRegion ? "sam_segment" : "global_palette",
         segmentLabel: zoneRegions[0]?.segment_label || zoneKey,
         confidence: Math.max(40, (zoneRead?.confidence || 0) - 12),
       });
@@ -984,7 +992,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         color: accentColor,
         zone: zoneKey,
         role: "accent",
-        sourceType: zoneRegions.length ? "sam_segment" : "global_palette",
+        sourceType: hasSamRegion ? "sam_segment" : "global_palette",
         segmentLabel: zoneRegions[0]?.segment_label || zoneKey,
         confidence: Math.max(35, (zoneRead?.confidence || 0) - 16),
       });
@@ -2889,10 +2897,137 @@ function parseSamOutputToRegions(output) {
         coverage: clamp01(Number(row?.coverage || row?.area || row?.weight || 0.2)),
         mask_url: row?.mask || row?.mask_url || row?.url || null,
         dominant_hex: safeHex(row?.dominant_hex || row?.hex || row?.color || ""),
+        region_colors: [],
         source_type: "sam_segment",
       };
     })
     .filter((r) => r.zone !== "unknown" || r.mask_url || r.dominant_hex);
+}
+
+async function fetchImageBuffer(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`Failed to fetch image (${resp.status})`);
+  const arr = await resp.arrayBuffer();
+  return Buffer.from(arr);
+}
+
+function decodeImageRgba(buffer, urlHint = "") {
+  const hint = String(urlHint || "").toLowerCase();
+
+  if (hint.includes(".png")) {
+    try {
+      const png = PNG.sync.read(buffer);
+      return { width: png.width, height: png.height, data: png.data };
+    } catch {}
+  }
+
+  try {
+    const jpg = jpeg.decode(buffer, { useTArray: true });
+    return { width: jpg.width, height: jpg.height, data: jpg.data };
+  } catch {}
+
+  try {
+    const png = PNG.sync.read(buffer);
+    return { width: png.width, height: png.height, data: png.data };
+  } catch {}
+
+  throw new Error("Unsupported image format");
+}
+
+function getMaskStrength(maskRgba, idx) {
+  const alpha = Number(maskRgba[idx + 3] || 0);
+  if (alpha > 0) return alpha;
+  return (Number(maskRgba[idx] || 0) + Number(maskRgba[idx + 1] || 0) + Number(maskRgba[idx + 2] || 0)) / 3;
+}
+
+function extractMaskedRegionColors(baseImage, maskImage, limit = 6) {
+  const baseW = Number(baseImage?.width || 0);
+  const baseH = Number(baseImage?.height || 0);
+  const maskW = Number(maskImage?.width || 0);
+  const maskH = Number(maskImage?.height || 0);
+  if (!baseW || !baseH || !maskW || !maskH) return [];
+
+  const buckets = new Map();
+  let pixelCount = 0;
+
+  for (let my = 0; my < maskH; my += 1) {
+    for (let mx = 0; mx < maskW; mx += 1) {
+      const mIdx = (my * maskW + mx) * 4;
+      if (getMaskStrength(maskImage.data, mIdx) < 25) continue;
+
+      const bx = Math.max(0, Math.min(baseW - 1, Math.floor((mx / maskW) * baseW)));
+      const by = Math.max(0, Math.min(baseH - 1, Math.floor((my / maskH) * baseH)));
+      const bIdx = (by * baseW + bx) * 4;
+      const alpha = Number(baseImage.data[bIdx + 3] || 0);
+      if (alpha < 20) continue;
+
+      const r = Number(baseImage.data[bIdx] || 0);
+      const g = Number(baseImage.data[bIdx + 1] || 0);
+      const b = Number(baseImage.data[bIdx + 2] || 0);
+      const key = `${Math.round(r / 16)}_${Math.round(g / 16)}_${Math.round(b / 16)}`;
+
+      if (!buckets.has(key)) buckets.set(key, { count: 0, rSum: 0, gSum: 0, bSum: 0 });
+      const row = buckets.get(key);
+      row.count += 1;
+      row.rSum += r;
+      row.gSum += g;
+      row.bSum += b;
+      pixelCount += 1;
+    }
+  }
+
+  if (!pixelCount) return [];
+
+  return Array.from(buckets.values())
+    .map((row) => {
+      const hex = safeHex(
+        chroma(
+          Math.round(row.rSum / row.count),
+          Math.round(row.gSum / row.count),
+          Math.round(row.bSum / row.count)
+        ).hex()
+      );
+      return {
+        hex,
+        pct: row.count / pixelCount,
+      };
+    })
+    .filter((c) => !!c.hex)
+    .sort((a, b) => b.pct - a.pct)
+    .slice(0, limit);
+}
+
+async function enrichSamRegionsWithMaskedColors(imageUrl, regions = []) {
+  if (!imageUrl || !Array.isArray(regions) || !regions.length) return regions || [];
+
+  let baseImage;
+  try {
+    const baseBuffer = await fetchImageBuffer(imageUrl);
+    baseImage = decodeImageRgba(baseBuffer, imageUrl);
+  } catch {
+    return regions;
+  }
+
+  return Promise.all(
+    regions.map(async (region) => {
+      if (!region?.mask_url) return region;
+
+      try {
+        const maskBuffer = await fetchImageBuffer(region.mask_url);
+        const maskImage = decodeImageRgba(maskBuffer, region.mask_url);
+        const regionColors = extractMaskedRegionColors(baseImage, maskImage, 6);
+        const dominantHex = safeHex(regionColors[0]?.hex || region?.dominant_hex || "");
+
+        return {
+          ...region,
+          dominant_hex: dominantHex || region?.dominant_hex || null,
+          region_colors: regionColors,
+        };
+      } catch {
+        return region;
+      }
+    })
+  );
 }
 
 async function runSamSegmentation(imageUrl) {
@@ -2954,12 +3089,13 @@ async function runSamSegmentation(imageUrl) {
     }
 
     const parsedRegions = parseSamOutputToRegions(prediction?.output);
+    const enrichedRegions = await enrichSamRegionsWithMaskedColors(imageUrl, parsedRegions);
 
     return {
       enabled: true,
-      ok: parsedRegions.length > 0,
-      reason: parsedRegions.length ? null : "malformed_output",
-      regions: parsedRegions,
+      ok: enrichedRegions.length > 0,
+      reason: enrichedRegions.length ? null : "malformed_output",
+      regions: enrichedRegions,
     };
   } catch (error) {
     return {
