@@ -332,6 +332,8 @@ function getColorName(hex) {
   if (s < 0.07 && l < 0.18) return "Graphite Black";
   if (s < 0.09 && l < 0.28) return "Charcoal";
   if (s < 0.10 && l < 0.40) return "Slate Gray";
+  if (s < 0.10 && l >= 0.42 && l <= 0.70) return "Graphite";
+  if (s < 0.08 && l >= 0.70 && l <= 0.90) return "Chrome Silver";
   if (s < 0.12 && l < 0.58) return "Stone Gray";
   if (s < 0.12 && l < 0.74) return "Ash Gray";
   if (s < 0.10 && l > 0.93) return "Soft White";
@@ -351,7 +353,8 @@ function getColorName(hex) {
     if (h >= 175 && h < 205) return "Muted Teal";
     if (h >= 255 && h < 290) return "Dusty Violet";
     if (h >= 105 && h < 165) return "Muted Sage";
-    if (h >= 15 && h < 40) return l < 0.52 ? "Muted Tan" : "Soft Sand";
+    if (h >= 15 && h < 28) return l < 0.52 ? "Luxury Tan" : "Soft Camel";
+    if (h >= 28 && h < 40) return l < 0.52 ? "Muted Tan" : "Soft Sand";
     if (h >= 40 && h < 65) return "Warm Sand";
     if (h >= 315 || h < 15) return "Dusty Rose";
   }
@@ -361,7 +364,8 @@ function getColorName(hex) {
   // =========================
   if (h >= 345 || h < 8) return l < 0.48 ? "Deep Crimson" : "Rose";
   if (h >= 8 && h < 18) return l < 0.46 ? "Brick Red" : "Coral";
-  if (h >= 315 && h < 345) return l < 0.54 ? "Berry" : "Dusty Rose";
+  if (h >= 315 && h < 333) return l < 0.54 ? "Berry" : "Dusty Rose";
+  if (h >= 333 && h < 345) return l < 0.52 ? "Muted Lip Rose" : "Soft Blush";
 
   if (h >= 18 && h < 28) return l < 0.42 ? "Rich Brown" : "Desert Tan";
   if (h >= 28 && h < 40) return l < 0.48 ? "Cognac" : "Camel";
@@ -760,38 +764,71 @@ function buildZoneCandidate(color, zone, score) {
   };
 }
 
-function inferZoneColorRead(zoneKey, zoneData, normalizedColors = []) {
+function buildSegmentedColorObject({
+  color,
+  zone,
+  role,
+  sourceType = "global_palette",
+  segmentLabel = null,
+  confidence = 0,
+}) {
+  const safe = safeHex(color?.hex);
+  if (!safe) return null;
+
+  const lab = getLab(safe);
+  const hsl = chroma(safe).hsl();
+
+  return {
+    hex: safe,
+    name: getColorName(safe),
+    LAB: {
+      l: round2(lab.l),
+      a: round2(lab.a),
+      b: round2(lab.b),
+    },
+    perceptual_traits: getPerceptualTraits(safe),
+    HSL: {
+      h: round2(Number.isFinite(hsl?.[0]) ? hsl[0] : 0),
+      s: round2(hsl?.[1] || 0),
+      l: round2(hsl?.[2] || 0),
+    },
+    role: role || "body",
+    zone: zone || "unknown",
+    confidence: Math.round(clamp100(confidence || 0)),
+    source_type: sourceType,
+    segment_label: segmentLabel || zone || "unknown",
+    pct: round2(color?.pct || 0),
+  };
+}
+
+function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColors = []) {
+  const fallbackName = zoneData?.name || titleCase(String(zoneKey || "unknown").replace(/_/g, " "));
+
   if (!zoneData?.hex) {
     return {
       mode: "single",
       cluster_count: 0,
       interpretation: "unknown",
-      display_label: zoneData?.name || "Unknown",
+      display_label: fallbackName,
       dominant_color: null,
       support_colors: [],
       accent_colors: [],
+      confidence: 0,
     };
   }
 
-  const zoneColors = normalizedColors.filter((c) => {
-    if (!c?.hex || !zoneData?.hex) return false;
-
-    const dist = colorDistanceLab(c.hex, zoneData.hex);
-
-    // only keep very close colors
+  const baseHex = safeHex(zoneData.hex) || zoneData.hex;
+  const zoneColors = (regionColors.length ? regionColors : normalizedColors).filter((c) => {
+    if (!c?.hex || !baseHex) return false;
+    const dist = colorDistanceLab(c.hex, baseHex);
     if (dist < 14) return true;
-
-    // slight expansion only for stronger colors
     if (Number(c?.pct || 0) >= 0.18 && dist < 20) return true;
-
     return false;
   });
 
   const clusters = buildColorClusters(zoneColors.length ? zoneColors : [zoneData]);
-
-  // force garment label to stay tied to the chosen zone color
   const dominant = {
-    base: zoneData.hex,
+    base: baseHex,
     pct: 1,
   };
 
@@ -800,7 +837,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = []) {
   let interpretation = "single_color";
 
   if (
-    zoneKey === "lower" &&
+    zoneKey === "lower_garment" &&
     clusters.some((c) => {
       const h = getHue(c.base);
       return h >= 200 && h <= 245;
@@ -814,105 +851,25 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = []) {
     displayLabel = "Multicolor Sneaker";
     mode = "multicolor";
     interpretation = "multi_material";
-  } else if (zoneKey === "accessory" && clusters.length >= 3) {
-    displayLabel = "Multicolor Accessory";
-    mode = "multicolor";
-    interpretation = "patterned";
-  }
-
-  return {
-    mode,
-    cluster_count: clusters.length,
-    interpretation,
-    display_label: displayLabel,
-    dominant_color: {
-      hex: dominant.base,
-      name: getColorName(dominant.base),
-      pct: round2(dominant.pct),
-    },
-    support_colors: clusters.slice(1, 3).map((c) => ({
-      hex: c.base,
-      name: getColorName(c.base),
-      pct: round2(c.pct),
-    })),
-    accent_colors: clusters.slice(3, 5).map((c) => ({
-      hex: c.base,
-      name: getColorName(c.base),
-      pct: round2(c.pct),
-    })),
-  };
-}
-/* =========================
-   GARMENT + MATERIAL + COLOR ACCURACY
-========================= */
-function inferZoneColorRead(zoneKey, zoneData, normalizedColors = []) {
-  if (!zoneData?.hex) {
-    return {
-      mode: "single",
-      cluster_count: 0,
-      interpretation: "unknown",
-      display_label: zoneData?.name || "Unknown",
-      dominant_color: null,
-      support_colors: [],
-      accent_colors: [],
-    };
-  }
-
-  const zoneColors = normalizedColors.filter((c) => {
-  if (!c?.hex || !zoneData?.hex) return false;
-
-  const dist = colorDistanceLab(c.hex, zoneData.hex);
-
-  // 🔒 HARD FILTER — only VERY similar colors allowed
-  if (dist < 14) return true;
-
-  // 🔒 allow slight expansion ONLY if dominant (prevents dilution)
-  if (c.pct >= 0.18 && dist < 20) return true;
-
-  return false;
-});
-
-  const clusters = buildColorClusters(zoneColors.length ? zoneColors : [zoneData]);
-
-// 🔥 FIX: force TRUE garment color (no cluster override)
-const dominant = {
-  base: zoneData.hex,
-  pct: 1,
-};
-
-  // 🔥 DENIM DETECTION
-  if (
-    zoneKey === "lower" &&
-    clusters.some(c => {
-      const h = getHue(c.base);
-      return h >= 200 && h <= 245;
-    }) &&
-    clusters.every(c => getPerceptualTraits(c.base).chroma_magnitude < 40)
+  } else if (
+    ["accessory_jewelry", "bag", "eyewear"].includes(zoneKey) &&
+    clusters.length >= 3
   ) {
-    displayLabel = "Light Wash Denim";
-    mode = "washed_fabric";
-    interpretation = "denim";
-  }
-
-  // 🔥 MULTICOLOR FOOTWEAR
-  else if (zoneKey === "footwear" && clusters.length >= 3) {
-    displayLabel = "Multicolor Sneaker";
-    mode = "multicolor";
-    interpretation = "multi_material";
-  }
-
-  // 🔥 MULTICOLOR ACCESSORY
-  else if (zoneKey === "accessory" && clusters.length >= 3) {
     displayLabel = "Multicolor Accessory";
     mode = "multicolor";
     interpretation = "patterned";
   }
+
+  const zoneConfidence = Math.round(
+    clamp100(Number(zoneData?.score || 0) * 0.55 + Number(zoneData?.confidence || 0) * 0.45)
+  );
 
   return {
     mode,
     cluster_count: clusters.length,
     interpretation,
     display_label: displayLabel,
+    confidence: zoneConfidence,
     dominant_color: {
       hex: dominant.base,
       name: getColorName(dominant.base),
@@ -930,7 +887,121 @@ const dominant = {
     })),
   };
 }
+
+function getZoneFromLabel(label = "") {
+  const t = normalizeText(label);
+  if (/upper|shirt|top|torso/.test(t)) return "upper_garment";
+  if (/lower|pants|trouser|jean|skirt/.test(t)) return "lower_garment";
+  if (/outer|jacket|coat|blazer/.test(t)) return "outerwear";
+  if (/shoe|boot|sneaker|foot/.test(t)) return "footwear";
+  if (/eyewear|glass|sunglass/.test(t)) return "eyewear";
+  if (/bag|purse|tote|handbag/.test(t)) return "bag";
+  if (/hair/.test(t)) return "hair";
+  if (/lip/.test(t)) return "lips";
+  if (/fur|trim/.test(t)) return "fur_trim";
+  if (/logo|text|graphic|print/.test(t)) return "logo_text_detail";
+  if (/accessor|jewel|necklace|watch|ring|bracelet|earring/.test(t)) return "accessory_jewelry";
+  return "unknown";
+}
+
+function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelligence = {}, segmentedRegions = []) {
+  const roleByName = Object.fromEntries((colorRoles || []).map((r) => [r.role, r]));
+  const dominant = visualIntelligence?.dominant_body_color || roleByName.anchor || normalizedColors[0] || null;
+  const secondary = roleByName.support || normalizedColors[1] || dominant;
+  const accent = roleByName.accent || normalizedColors[2] || secondary;
+  const stabilizer = roleByName.stabilizer || normalizedColors[3] || secondary;
+
+  const segmentedByZone = {};
+  for (const region of segmentedRegions || []) {
+    const zone = region?.zone && region.zone !== "unknown" ? region.zone : getZoneFromLabel(region?.segment_label);
+    if (!segmentedByZone[zone]) segmentedByZone[zone] = [];
+    segmentedByZone[zone].push(region);
+  }
+
+  const zoneMap = {
+    upper_garment: dominant,
+    lower_garment: secondary,
+    outerwear: stabilizer,
+    footwear: accent,
+    eyewear: stabilizer,
+    bag: secondary,
+    hair: dominant,
+    lips: accent,
+    fur_trim: stabilizer,
+    logo_text_detail: accent,
+    accessory_jewelry: accent,
+  };
+
+  const zones = {};
+  const regionColorAnalysis = [];
+
+  for (const [zoneKey, fallbackColor] of Object.entries(zoneMap)) {
+    const zoneRegions = segmentedByZone[zoneKey] || [];
+    const regionColors = zoneRegions
+      .map((r) => ({
+        hex: safeHex(r?.dominant_hex || r?.hex),
+        pct: Number(r?.coverage || r?.confidence || 0.2),
+      }))
+      .filter((c) => !!c.hex);
+
+    const chosenColor = regionColors[0]?.hex
+      ? { ...fallbackColor, hex: regionColors[0].hex, pct: regionColors[0].pct }
+      : fallbackColor;
+
+    const zoneData = buildZoneCandidate(chosenColor, zoneKey, Math.max(45, Math.round((chosenColor?.pct || 0.25) * 100)));
+    const zoneRead = inferZoneColorRead(zoneKey, zoneData, normalizedColors, regionColors);
+
+    zones[zoneKey] = {
+      ...zoneData,
+      ...zoneRead,
+    };
+
+    const dominantObj = buildSegmentedColorObject({
+      color: { hex: zoneRead?.dominant_color?.hex, pct: zoneRead?.dominant_color?.pct },
+      zone: zoneKey,
+      role: "dominant",
+      sourceType: zoneRegions.length ? "sam_segment" : "global_palette",
+      segmentLabel: zoneRegions[0]?.segment_label || zoneKey,
+      confidence: zoneRead?.confidence || zoneData?.score || 0,
+    });
+
+    if (dominantObj) regionColorAnalysis.push(dominantObj);
+
+    for (const support of zoneRead.support_colors || []) {
+      const obj = buildSegmentedColorObject({
+        color: support,
+        zone: zoneKey,
+        role: "support",
+        sourceType: zoneRegions.length ? "sam_segment" : "global_palette",
+        segmentLabel: zoneRegions[0]?.segment_label || zoneKey,
+        confidence: Math.max(40, (zoneRead?.confidence || 0) - 12),
+      });
+      if (obj) regionColorAnalysis.push(obj);
+    }
+
+    for (const accentColor of zoneRead.accent_colors || []) {
+      const obj = buildSegmentedColorObject({
+        color: accentColor,
+        zone: zoneKey,
+        role: "accent",
+        sourceType: zoneRegions.length ? "sam_segment" : "global_palette",
+        segmentLabel: zoneRegions[0]?.segment_label || zoneKey,
+        confidence: Math.max(35, (zoneRead?.confidence || 0) - 16),
+      });
+      if (obj) regionColorAnalysis.push(obj);
+    }
+  }
+
+  return {
+    version: "garment_zone_v3",
+    segmented_regions: segmentedRegions,
+    zones,
+    region_color_analysis: regionColorAnalysis,
+  };
+}
+
 function buildColorClusters(colors = []) {
+
   const clusters = [];
 
   for (const c of colors || []) {
@@ -1010,7 +1081,7 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
 
     const dominantTraits = getPerceptualTraits(dominant.base);
 
-    let material = "unknown";
+    let material = "mixed_material";
     let materialConfidence = 50;
     let displayLabel = zoneData.display_label || zoneData.name || getColorName(dominant.base);
 
@@ -1026,16 +1097,31 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
       material = "patterned_textile";
       materialConfidence = 74;
       displayLabel = "Multicolor Accessory";
-    } else if (dominantTraits.temperature === "cool" && dominantTraits.chroma_magnitude < 30) {
-      material = "washed_fabric";
+    } else if (type === "fur_trim") {
+      material = "fur";
+      materialConfidence = 68;
+    } else if (type === "logo_text_detail" && dominantTraits.chroma_magnitude < 24) {
+      material = "cotton";
+      materialConfidence = 58;
+    } else if (type === "eyewear" && getLight(dominant.base) < 0.32) {
+      material = "nylon";
+      materialConfidence = 62;
+    } else if (type === "accessory_jewelry" && dominantTraits.chroma_magnitude < 20 && getLight(dominant.base) > 0.45) {
+      material = "metallic";
       materialConfidence = 64;
-    } else if (dominantTraits.chroma_magnitude > 48) {
-      material = "vivid_surface";
+    } else if (dominantTraits.temperature === "cool" && dominantTraits.chroma_magnitude < 30) {
+      material = "wool";
       materialConfidence = 60;
+    } else if (dominantTraits.chroma_magnitude > 48) {
+      material = "knit";
+      materialConfidence = 58;
+    } else if (type === "outerwear") {
+      material = getLight(dominant.base) < 0.4 ? "leather" : "cotton";
+      materialConfidence = 61;
     }
 
     if (type === "footwear" && getLight(dominant.base) < 0.35) {
-      material = material === "mixed_material" ? material : "rubber_or_leather";
+      material = material === "mixed_material" ? "rubber" : "leather";
       materialConfidence = Math.max(materialConfidence, 66);
     }
 
@@ -1059,10 +1145,17 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
     };
   }
 
-  items.push(buildItem("upper_garment", z.upper));
-  items.push(buildItem("lower_garment", z.lower));
+  items.push(buildItem("upper_garment", z.upper_garment));
+  items.push(buildItem("lower_garment", z.lower_garment));
+  items.push(buildItem("outerwear", z.outerwear));
   items.push(buildItem("footwear", z.footwear));
-  items.push(buildItem("accessory", z.accessory));
+  items.push(buildItem("eyewear", z.eyewear));
+  items.push(buildItem("bag", z.bag));
+  items.push(buildItem("hair", z.hair));
+  items.push(buildItem("lips", z.lips));
+  items.push(buildItem("fur_trim", z.fur_trim));
+  items.push(buildItem("logo_text_detail", z.logo_text_detail));
+  items.push(buildItem("accessory_jewelry", z.accessory_jewelry));
 
   return {
     version: "garment_scaffold_v2",
@@ -2031,7 +2124,7 @@ function buildSuggestedAdjustment(scoreBreakdown, colorRoles, bestMode) {
   return `Refining the relationship between ${anchorName}, ${supportName}, and ${accentName} would improve the overall outfit score.`;
 }
 
-function buildOutfitAnalysis({ dominantHex, topColors }) {
+function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], pipeline = null }) {
   const normalizedColors = normalizeDetectedColors(topColors, dominantHex);
   const baseRoles = assignColorRoles(normalizedColors);
   const colorRoles = enforceStructuralPreservation(baseRoles, normalizedColors);
@@ -2045,7 +2138,8 @@ function buildOutfitAnalysis({ dominantHex, topColors }) {
   const garmentZones = inferGarmentZones(
     normalizedColors,
     colorRoles,
-    visualIntelligence
+    visualIntelligence,
+    segmentedRegions
   );
 
   const garmentAnalysis = inferGarmentAndMaterial({
@@ -2083,7 +2177,28 @@ function buildOutfitAnalysis({ dominantHex, topColors }) {
     suggested_adjustment: buildSuggestedAdjustment(scoreBreakdown, colorRoles, best.mode),
     visual_importance: visualImportance,
     visual_intelligence: visualIntelligence,
+    visual_intelligence_layer: visualIntelligence,
     garment_zones: garmentZones,
+    segmented_regions: garmentZones.segmented_regions || segmentedRegions,
+    region_color_analysis: garmentZones.region_color_analysis || [],
+    detail_colors: visualIntelligence?.body_vs_detail?.detail_colors || [],
+    accessory_analysis: (garmentAnalysis?.detected_items || []).filter((item) =>
+      ["accessory_jewelry", "eyewear", "bag"].includes(item.type)
+    ),
+    confidence_scores: {
+      outfit: outfitScore,
+      best_mode: best.score,
+      zones: Object.fromEntries(
+        Object.entries(garmentZones?.zones || {}).map(([k, v]) => [k, Number(v?.confidence || v?.score || 0)])
+      ),
+    },
+    material_analysis: garmentAnalysis,
+    pipeline: pipeline || {
+      sam_enabled: false,
+      sam_ok: false,
+      sam_reason: "not_requested",
+      fallback_mode: true,
+    },
     garment_analysis: garmentAnalysis,
     structural_analysis: normalizedColors.map((c) => ({
       hex: c.hex,
@@ -2709,6 +2824,153 @@ function buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts = [
   };
 }
 
+const REPLICATE_SAM_TIMEOUT_MS = 25000;
+const REPLICATE_SAM_POLL_MS = 1200;
+const DEFAULT_REPLICATE_SAM_VERSION =
+  process.env.REPLICATE_SAM_VERSION ||
+  "95e1b2f2f15f96c6b2f6fbeee3f2f6af95f63d652f6f0cead4b9f4b6f8e6a100";
+
+async function replicateRequest(url, options = {}, timeoutMs = REPLICATE_SAM_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const resp = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    const text = await resp.text();
+
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
+
+    if (!resp.ok) {
+      throw new Error(data?.detail || `Replicate request failed (${resp.status})`);
+    }
+
+    return data;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("Replicate SAM timed out");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function parseSamOutputToRegions(output) {
+  if (!output) return [];
+
+  const rows = Array.isArray(output)
+    ? output
+    : Array.isArray(output?.segments)
+      ? output.segments
+      : Array.isArray(output?.predictions)
+        ? output.predictions
+        : [];
+
+  return rows
+    .map((row, idx) => {
+      const segmentLabel = String(
+        row?.label || row?.class || row?.name || row?.segment_label || `segment_${idx + 1}`
+      );
+      const zone = getZoneFromLabel(segmentLabel);
+
+      return {
+        id: row?.id || `sam_${idx + 1}`,
+        segment_label: segmentLabel,
+        zone,
+        confidence: Math.round(clamp100(Number(row?.confidence || row?.score || 65))),
+        coverage: clamp01(Number(row?.coverage || row?.area || row?.weight || 0.2)),
+        mask_url: row?.mask || row?.mask_url || row?.url || null,
+        dominant_hex: safeHex(row?.dominant_hex || row?.hex || row?.color || ""),
+        source_type: "sam_segment",
+      };
+    })
+    .filter((r) => r.zone !== "unknown" || r.mask_url || r.dominant_hex);
+}
+
+async function runSamSegmentation(imageUrl) {
+  const token = process.env.REPLICATE_API_TOKEN;
+  if (!token) {
+    return {
+      enabled: false,
+      ok: false,
+      reason: "missing_REPLICATE_API_TOKEN",
+      regions: [],
+    };
+  }
+
+  try {
+    const createResp = await replicateRequest("https://api.replicate.com/v1/predictions", {
+      method: "POST",
+      headers: {
+        Authorization: `Token ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        version: DEFAULT_REPLICATE_SAM_VERSION,
+        input: {
+          image: imageUrl,
+          output_format: "json",
+        },
+      }),
+    });
+
+    const statusUrl = createResp?.urls?.get;
+    if (!statusUrl) {
+      return {
+        enabled: true,
+        ok: false,
+        reason: "missing_poll_url",
+        regions: [],
+      };
+    }
+
+    const startedAt = Date.now();
+    let prediction = createResp;
+
+    while (Date.now() - startedAt < REPLICATE_SAM_TIMEOUT_MS) {
+      if (["succeeded", "failed", "canceled"].includes(prediction?.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, REPLICATE_SAM_POLL_MS));
+      prediction = await replicateRequest(statusUrl, {
+        method: "GET",
+        headers: { Authorization: `Token ${token}` },
+      });
+    }
+
+    if (prediction?.status !== "succeeded") {
+      return {
+        enabled: true,
+        ok: false,
+        reason: prediction?.error || prediction?.status || "unknown_failure",
+        regions: [],
+      };
+    }
+
+    const parsedRegions = parseSamOutputToRegions(prediction?.output);
+
+    return {
+      enabled: true,
+      ok: parsedRegions.length > 0,
+      reason: parsedRegions.length ? null : "malformed_output",
+      regions: parsedRegions,
+    };
+  } catch (error) {
+    return {
+      enabled: true,
+      ok: false,
+      reason: error?.message || "sam_request_error",
+      regions: [],
+    };
+  }
+}
+
 /* =========================
    IMAGE OPS
 ========================= */
@@ -2811,10 +3073,20 @@ async function analyzeGhostColors(ghostUrl) {
     })
     .filter((x) => !!x.hex);
 
+  const sam = await runSamSegmentation(ghostUrl);
+
   return {
     dominantHex,
     dominantName: getColorName(dominantHex),
     topColors,
+    segmentedRegions: sam?.ok ? sam.regions : [],
+    pipeline: {
+      sam_enabled: !!sam?.enabled,
+      sam_ok: !!sam?.ok,
+      sam_reason: sam?.reason || null,
+      sam_version: process.env.REPLICATE_SAM_VERSION || DEFAULT_REPLICATE_SAM_VERSION,
+      fallback_mode: !sam?.ok,
+    },
   };
 }
 
@@ -2862,6 +3134,8 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       outfitAnalysis = buildOutfitAnalysis({
         dominantHex: analysis.dominantHex,
         topColors: analysis.topColors,
+        segmentedRegions: analysis.segmentedRegions,
+        pipeline: analysis.pipeline,
       });
     } catch (error) {
       return sendStepError(res, 500, "palette_engine", error);
@@ -2928,6 +3202,8 @@ app.post("/api/recommendations", async (req, res) => {
       outfitAnalysis = buildOutfitAnalysis({
         dominantHex: analysis.dominantHex,
         topColors: analysis.topColors,
+        segmentedRegions: analysis.segmentedRegions,
+        pipeline: analysis.pipeline,
       });
     } catch (error) {
       return sendStepError(res, 500, "palette_engine", error);
@@ -3045,6 +3321,8 @@ app.post("/api/retrieval/preview", async (req, res) => {
         outfitAnalysis = buildOutfitAnalysis({
           dominantHex: analysis.dominantHex,
           topColors: analysis.topColors,
+          segmentedRegions: analysis.segmentedRegions,
+          pipeline: analysis.pipeline,
         });
       } catch (error) {
         return sendStepError(res, 500, "palette_engine", error);
