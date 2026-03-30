@@ -3071,11 +3071,11 @@ async function runSamSegmentation(imageUrl) {
   }
 
   try {
-    const samModel = process.env.REPLICATE_SAM_MODEL || DEFAULT_REPLICATE_SAM_MODEL;
-    const createUrl = getSamPredictionsUrl(samModel);
+    const samVersion = process.env.REPLICATE_SAM_VERSION || DEFAULT_REPLICATE_SAM_VERSION;
+    const createUrl = "https://api.replicate.com/v1/predictions";
     console.info("[SAM DEBUG] Starting SAM segmentation request", {
       imageUrl,
-      model: samModel,
+      version: samVersion,
       createUrl,
     });
     const createResp = await replicateRequest(createUrl, {
@@ -3085,6 +3085,7 @@ async function runSamSegmentation(imageUrl) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        version: samVersion,
         input: {
           image: imageUrl,
         },
