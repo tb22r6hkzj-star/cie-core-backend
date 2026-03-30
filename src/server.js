@@ -2834,9 +2834,13 @@ function buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts = [
 
 const REPLICATE_SAM_TIMEOUT_MS = 25000;
 const REPLICATE_SAM_POLL_MS = 1200;
-const DEFAULT_REPLICATE_SAM_VERSION =
-  process.env.REPLICATE_SAM_VERSION ||
-  "95e1b2f2f15f96c6b2f6fbeee3f2f6af95f63d652f6f0cead4b9f4b6f8e6a100";
+const DEFAULT_REPLICATE_SAM_MODEL = process.env.REPLICATE_SAM_MODEL || "meta/sam-2";
+
+function getSamPredictionsUrl(modelId = DEFAULT_REPLICATE_SAM_MODEL) {
+  const configured = String(process.env.REPLICATE_SAM_MODEL_PREDICTIONS_URL || "").trim();
+  if (configured) return configured;
+  return `https://api.replicate.com/v1/models/${modelId}/predictions`;
+}
 
 async function replicateRequest(url, options = {}, timeoutMs = REPLICATE_SAM_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -2852,7 +2856,12 @@ async function replicateRequest(url, options = {}, timeoutMs = REPLICATE_SAM_TIM
     let data = null;
     try {
       data = text ? JSON.parse(text) : null;
-    } catch {
+    } catch (parseError) {
+      console.warn("[SAM DEBUG] Replicate response JSON parse failed", {
+        url,
+        parseError: parseError?.message || String(parseError),
+        preview: String(text || "").slice(0, 240),
+      });
       data = null;
     }
 
@@ -3033,7 +3042,7 @@ async function enrichSamRegionsWithMaskedColors(imageUrl, regions = []) {
 async function runSamSegmentation(imageUrl) {
   const token = process.env.REPLICATE_API_TOKEN;
   if (!token) {
-    console.warn("[SAM DEBUG] Skipping SAM segmentation: missing REPLICATE_API_TOKEN");
+    console.warn("[SAM DEBUG] Missing REPLICATE_API_TOKEN: skipping SAM segmentation");
     return {
       enabled: false,
       ok: false,
@@ -3043,28 +3052,35 @@ async function runSamSegmentation(imageUrl) {
   }
 
   try {
+    const samModel = process.env.REPLICATE_SAM_MODEL || DEFAULT_REPLICATE_SAM_MODEL;
+    const createUrl = getSamPredictionsUrl(samModel);
     console.info("[SAM DEBUG] Starting SAM segmentation request", {
       imageUrl,
-      version: DEFAULT_REPLICATE_SAM_VERSION,
+      model: samModel,
+      createUrl,
     });
-    const createResp = await replicateRequest("https://api.replicate.com/v1/predictions", {
+    const createResp = await replicateRequest(createUrl, {
       method: "POST",
       headers: {
         Authorization: `Token ${token}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        version: DEFAULT_REPLICATE_SAM_VERSION,
         input: {
           image: imageUrl,
-          output_format: "json",
         },
       }),
+    });
+    console.info("[SAM DEBUG] SAM create response received", {
+      predictionId: createResp?.id || null,
+      status: createResp?.status || "unknown",
     });
 
     const statusUrl = createResp?.urls?.get;
     if (!statusUrl) {
-      console.error("[SAM DEBUG] SAM create response missing poll URL");
+      console.error("[SAM DEBUG] SAM create response missing poll URL", {
+        predictionId: createResp?.id || null,
+      });
       return {
         enabled: true,
         ok: false,
@@ -3091,8 +3107,10 @@ async function runSamSegmentation(imageUrl) {
 
     if (prediction?.status !== "succeeded") {
       console.error("[SAM DEBUG] SAM segmentation did not succeed", {
+        predictionId: prediction?.id || createResp?.id || null,
         status: prediction?.status || "unknown",
         error: prediction?.error || null,
+        elapsedMs: Date.now() - startedAt,
       });
       return {
         enabled: true,
@@ -3107,6 +3125,7 @@ async function runSamSegmentation(imageUrl) {
     console.info("[SAM DEBUG] SAM segmentation succeeded", {
       regionCount: enrichedRegions.length,
       predictionId: prediction?.id || null,
+      elapsedMs: Date.now() - startedAt,
     });
 
     return {
@@ -3239,7 +3258,7 @@ async function analyzeGhostColors(ghostUrl) {
       sam_enabled: !!sam?.enabled,
       sam_ok: !!sam?.ok,
       sam_reason: sam?.reason || null,
-      sam_version: process.env.REPLICATE_SAM_VERSION || DEFAULT_REPLICATE_SAM_VERSION,
+      sam_version: process.env.REPLICATE_SAM_MODEL || DEFAULT_REPLICATE_SAM_MODEL,
       fallback_mode: !sam?.ok,
     },
   };
@@ -3281,11 +3300,13 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
     } catch (error) {
       return sendStepError(res, 500, "analyze_cloudinary_colors", error);
     }
-    if (!analysis?.pipeline?.sam_ok) {
+    const segmentedRegions = Array.isArray(analysis?.segmentedRegions) ? analysis.segmentedRegions : [];
+    if (!analysis?.pipeline?.sam_ok || !segmentedRegions.length) {
       const samReason = analysis?.pipeline?.sam_reason || "sam_failed";
       console.error("[SAM DEBUG] Failing /api/images/transform due to SAM failure", {
         reason: samReason,
         sam_enabled: !!analysis?.pipeline?.sam_enabled,
+        regionCount: segmentedRegions.length,
       });
       return res.status(502).json({
         success: false,
@@ -3301,7 +3322,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       outfitAnalysis = buildOutfitAnalysis({
         dominantHex: analysis.dominantHex,
         topColors: analysis.topColors,
-        segmentedRegions: analysis.segmentedRegions,
+        segmentedRegions,
         pipeline: analysis.pipeline,
       });
     } catch (error) {
