@@ -202,6 +202,33 @@ function getLight(hex) {
   }
 }
 
+function isBlueHue(h) {
+  return h >= 205 && h <= 252;
+}
+
+function isNavyCandidate(hex) {
+  const safe = safeHex(hex);
+  if (!safe) return false;
+  const h = getHue(safe);
+  const s = getSat(safe);
+  const l = getLight(safe);
+  const traits = getPerceptualTraits(safe);
+  const chromaMagnitude = Number(traits?.chroma_magnitude || 0);
+
+  if (!isBlueHue(h)) return false;
+  if (l < 0.28 && (s < 0.2 || chromaMagnitude < 22)) return false;
+  return s >= 0.18 && chromaMagnitude >= 20;
+}
+
+function isVeryDarkLowChroma(hex) {
+  const safe = safeHex(hex);
+  if (!safe) return false;
+  const s = getSat(safe);
+  const l = getLight(safe);
+  const traits = getPerceptualTraits(safe);
+  return l < 0.26 && (s < 0.18 || Number(traits?.chroma_magnitude || 0) < 20);
+}
+
 function hueDistance(a, b) {
   const ha = getHue(a);
   const hb = getHue(b);
@@ -342,6 +369,7 @@ function getColorName(hex) {
   if (s < 0.15 && l > 0.84) return "Linen White";
   if (s < 0.18 && l > 0.74) return "Ivory";
   if (s < 0.22 && l > 0.64) return "Soft Linen";
+  if (isVeryDarkLowChroma(safe)) return l < 0.16 ? "Jet Black" : "Graphite Black";
 
   // =========================
   // MUTED / WASHED DETECTION (CRITICAL FIX)
@@ -380,8 +408,8 @@ function getColorName(hex) {
   if (h >= 145 && h < 175) return l < 0.44 ? "Deep Teal" : "Teal";
 
   if (h >= 175 && h < 205) return l < 0.50 ? "Steel Teal" : "Sea Blue";
-  if (h >= 205 && h < 228) return l < 0.38 ? "Midnight Navy" : "Steel Blue";
-  if (h >= 228 && h < 250) return l < 0.40 ? "Deep Navy" : "Powder Blue";
+  if (h >= 205 && h < 228) return isNavyCandidate(safe) ? (l < 0.38 ? "Midnight Navy" : "Steel Blue") : "Graphite Black";
+  if (h >= 228 && h < 250) return isNavyCandidate(safe) ? (l < 0.40 ? "Deep Navy" : "Powder Blue") : "Graphite Black";
 
   if (h >= 250 && h < 280) return l < 0.48 ? "Royal Purple" : "Periwinkle";
   if (h >= 280 && h < 315) return l < 0.54 ? "Plum" : "Lavender";
@@ -803,10 +831,22 @@ function buildSegmentedColorObject({
   };
 }
 
-function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColors = [], useRegionOnly = false) {
+function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColors = [], useRegionOnly = false, context = {}) {
   const fallbackName = zoneData?.name || titleCase(String(zoneKey || "unknown").replace(/_/g, " "));
 
   if (!zoneData?.hex) {
+    return {
+      mode: "single",
+      cluster_count: 0,
+      interpretation: "unknown",
+      display_label: fallbackName,
+      dominant_color: null,
+      support_colors: [],
+      accent_colors: [],
+      confidence: 0,
+    };
+  }
+  if (zoneKey === "eyewear" && !regionColors.length) {
     return {
       mode: "single",
       cluster_count: 0,
@@ -842,9 +882,21 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       const contrastBoost = Math.max(0, light - 0.45) * 0.12 + Math.max(0, sat - 0.2) * 0.12;
       const chromaBoost = Math.max(0, (Number(traits?.chroma_magnitude || 0) - 18) / 100);
       const anchorBoost = index === 0 ? 0.08 : 0;
+      const sameAsUpper =
+        context?.dominantDarkBodyHex &&
+        colorDistanceLab(cluster.base, context.dominantDarkBodyHex) < 9 &&
+        getLight(cluster.base) < 0.36 &&
+        Number(traits?.chroma_magnitude || 0) < 26;
+      const reusePenaltyZones = ["hair", "eyewear", "fur_trim"];
+      const reusePenalty =
+        reusePenaltyZones.includes(zoneKey) &&
+        sameAsUpper &&
+        (!regionColors.length || regionCoverage < 0.62 || Number(cluster?.pct || 0) < 0.45)
+          ? 0.2
+          : 0;
       return {
         ...cluster,
-        _score: Number(cluster?.pct || 0) + contrastBoost + chromaBoost + anchorBoost,
+        _score: Number(cluster?.pct || 0) + contrastBoost + chromaBoost + anchorBoost - reusePenalty,
       };
     })
     .sort((a, b) => b._score - a._score);
@@ -949,6 +1001,35 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       displayLabel = "Metallic";
       mode = "reflective";
       interpretation = "metallic";
+    }
+  } else if (zoneKey === "fur_trim" && clusters.length >= 2) {
+    const sortedByLight = clusters.slice().sort((a, b) => getLight(a.base) - getLight(b.base));
+    const darkest = sortedByLight[0];
+    const lightest = sortedByLight[sortedByLight.length - 1];
+    const lightDiff = Math.abs(getLight(lightest.base) - getLight(darkest.base));
+    const dualMaterialSignal =
+      lightDiff >= 0.34 &&
+      Number(darkest?.pct || 0) >= 0.16 &&
+      Number(lightest?.pct || 0) >= 0.16;
+    if (dualMaterialSignal) {
+      displayLabel = "Black/White Fur";
+      mode = "multicolor";
+      interpretation = "multi_material";
+    }
+  } else if (zoneKey === "eyewear") {
+    const top = scoredClusters[0] || clusters[0];
+    const second = scoredClusters[1] || clusters[1];
+    const hasReflectiveEdge =
+      !!second &&
+      Math.abs(getLight(top.base) - getLight(second.base)) >= 0.22 &&
+      Number(second?.pct || 0) >= 0.12;
+    const topVeryDark = getLight(top.base) < 0.28;
+    if (topVeryDark && hasReflectiveEdge) {
+      displayLabel = getSat(top.base) < 0.12 ? "Black Metal" : "Metallic";
+      mode = "reflective";
+      interpretation = "metallic";
+    } else if (!isNavyCandidate(top.base) && getLight(top.base) < 0.34) {
+      displayLabel = "Graphite Black";
     }
   }
 
@@ -1214,7 +1295,20 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       : promoteFallback && !allowZoneFromRegionOnly
         ? buildZoneCandidate(chosenColor, zoneKey, computedScore)
         : null;
-    const zoneRead = inferZoneColorRead(zoneKey, zoneData, normalizedColors, regionColors, hasSamRegion);
+    const dominantDarkBodyHex =
+      zones.upper_garment?.dominant_color?.hex ||
+      zones.upper_garment?.hex ||
+      zones.body_garment?.dominant_color?.hex ||
+      zones.body_garment?.hex ||
+      null;
+    const zoneRead = inferZoneColorRead(
+      zoneKey,
+      zoneData,
+      normalizedColors,
+      regionColors,
+      hasSamRegion,
+      { dominantDarkBodyHex }
+    );
     regionSummary.push({
       zone: zoneKey,
       region_count: evidence.region_count,
@@ -2636,7 +2730,10 @@ function getRetailColorKeywords(hex) {
   if (h >= 55 && h < 85) return ["olive", "sage", "moss"];
   if (h >= 85 && h < 165) return l < 0.45 ? ["forest green", "olive green", "deep green"] : ["sage green", "muted green", "green"];
   if (h >= 165 && h < 210) return ["teal", "blue green", "sea green"];
-  if (h >= 210 && h < 255) return l < 0.45 ? ["navy", "deep blue", "midnight blue"] : ["blue", "steel blue", "powder blue"];
+  if (h >= 210 && h < 255) {
+    if (l < 0.3 && !isNavyCandidate(safe)) return ["black", "graphite black", "charcoal"];
+    return l < 0.45 ? ["navy", "deep blue", "midnight blue"] : ["blue", "steel blue", "powder blue"];
+  }
   if (h >= 255 && h < 315) return l < 0.45 ? ["plum", "eggplant", "deep purple"] : ["lavender", "soft purple", "mauve"];
   return ["neutral", "muted", "classic"];
 }
