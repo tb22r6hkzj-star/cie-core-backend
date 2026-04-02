@@ -831,6 +831,13 @@ function buildSegmentedColorObject({
   };
 }
 
+function getBlackNuanceLabel(hex) {
+  const light = getLight(hex);
+  if (light < 0.12) return "Jet Black";
+  if (light < 0.18) return "Deep Black";
+  return "Graphite Black";
+}
+
 function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColors = [], useRegionOnly = false, context = {}) {
   const fallbackName = zoneData?.name || titleCase(String(zoneKey || "unknown").replace(/_/g, " "));
 
@@ -1008,7 +1015,8 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     const lightest = sortedByLight[sortedByLight.length - 1];
     const lightDiff = Math.abs(getLight(lightest.base) - getLight(darkest.base));
     const dualMaterialSignal =
-      lightDiff >= 0.34 &&
+      clusters.length >= 2 &&
+      lightDiff > 0.4 &&
       Number(darkest?.pct || 0) >= 0.16 &&
       Number(lightest?.pct || 0) >= 0.16;
     if (dualMaterialSignal) {
@@ -1023,14 +1031,26 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       !!second &&
       Math.abs(getLight(top.base) - getLight(second.base)) >= 0.22 &&
       Number(second?.pct || 0) >= 0.12;
-    const topVeryDark = getLight(top.base) < 0.28;
+    const topVeryDark = getLight(top.base) < 0.3;
     if (topVeryDark && hasReflectiveEdge) {
       displayLabel = getSat(top.base) < 0.12 ? "Black Metal" : "Metallic";
       mode = "reflective";
       interpretation = "metallic";
     } else if (!isNavyCandidate(top.base) && getLight(top.base) < 0.34) {
-      displayLabel = "Graphite Black";
+      displayLabel = getBlackNuanceLabel(top.base);
     }
+  }
+
+  if (zoneKey === "hair" && !isNavyCandidate(dominant.base) && getLight(dominant.base) < 0.26) {
+    displayLabel = getLight(dominant.base) < 0.14 ? "Jet Black" : "Deep Black";
+  }
+
+  if (
+    ["upper_garment", "lower_garment", "outerwear", "body_garment"].includes(zoneKey) &&
+    !isNavyCandidate(dominant.base) &&
+    getLight(dominant.base) < 0.28
+  ) {
+    displayLabel = getBlackNuanceLabel(dominant.base);
   }
 
   const zoneConfidence = Math.round(
@@ -1130,7 +1150,7 @@ function hasExplicitZoneRegionEvidence(zoneKey, zoneRegions = [], evidence = {})
   }
 
   if (zoneKey === "outerwear") {
-    return regionCount >= 1 && coverage >= 0.2 && weightedConfidence >= 46 && colorCount >= 2;
+    return regionCount >= 1 && coverage >= 0.16 && weightedConfidence >= 42 && colorCount >= 1;
   }
 
   return regionCount >= 1;
