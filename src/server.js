@@ -831,12 +831,59 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
 
   const fallbackSet = useRegionOnly && !regionColors.length ? [zoneData] : zoneColors.length ? zoneColors : [zoneData];
   const clusters = buildColorClusters(fallbackSet);
+  const regionCoverage = clamp01(regionColors.reduce((sum, c) => sum + Number(c?.pct || 0), 0));
+  const lowSignalRegion = useRegionOnly && regionCoverage < 0.3 && clusters.length < 2;
   const clustersTotalWeight = clusters.reduce((sum, c) => sum + Number(c?.weight || 0), 0) || 1;
-  const dominantCluster = clusters[0] || null;
+  const scoredClusters = clusters
+    .map((cluster, index) => {
+      const traits = getPerceptualTraits(cluster.base);
+      const light = getLight(cluster.base);
+      const sat = getSat(cluster.base);
+      const contrastBoost = Math.max(0, light - 0.45) * 0.12 + Math.max(0, sat - 0.2) * 0.12;
+      const chromaBoost = Math.max(0, (Number(traits?.chroma_magnitude || 0) - 18) / 100);
+      const anchorBoost = index === 0 ? 0.08 : 0;
+      return {
+        ...cluster,
+        _score: Number(cluster?.pct || 0) + contrastBoost + chromaBoost + anchorBoost,
+      };
+    })
+    .sort((a, b) => b._score - a._score);
+  const dominantCluster = scoredClusters[0] || clusters[0] || null;
   const dominant = {
     base: dominantCluster?.base || baseHex,
     pct: round2((Number(dominantCluster?.weight || 0) || 1) / clustersTotalWeight),
   };
+  const dominantTraits = getPerceptualTraits(dominant.base);
+  const isWeakDominantEvidence = Number(dominant?.pct || 0) < 0.25;
+  const isNeutralContamination =
+    Number(dominantTraits?.chroma_magnitude || 0) < 18 &&
+    Number(dominant?.pct || 0) < 0.35 &&
+    regionCoverage < 0.65;
+  const sameFamilyCount = clusters.filter((c) => {
+    const dominantHue = getHue(dominant.base);
+    const cHue = getHue(c.base);
+    const hueClose = hueDistance(dominant.base, c.base) <= 30;
+    const bothNeutral = getSat(dominant.base) < 0.18 && getSat(c.base) < 0.18;
+    const sameWarmth = Math.abs(dominantHue - cHue) <= 45;
+    return hueClose || bothNeutral || sameWarmth;
+  }).length;
+  const footwearSignalWeak =
+    zoneKey === "footwear" &&
+    sameFamilyCount < 2 &&
+    regionCoverage < 0.55;
+
+  if (lowSignalRegion || isWeakDominantEvidence || isNeutralContamination || footwearSignalWeak) {
+    return {
+      mode: "single",
+      cluster_count: clusters.length,
+      interpretation: "unknown",
+      display_label: fallbackName,
+      dominant_color: null,
+      support_colors: [],
+      accent_colors: [],
+      confidence: Math.round(clamp100(Number(zoneData?.score || 0) * 0.4)),
+    };
+  }
 
   let displayLabel = getColorName(dominant.base);
   let mode = "single";
@@ -875,6 +922,24 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     displayLabel = "Multicolor Accessory";
     mode = "multicolor";
     interpretation = "patterned";
+  } else if (["accessory_jewelry", "bag", "eyewear"].includes(zoneKey) && clusters.length >= 2) {
+    const top = scoredClusters[0] || clusters[0];
+    const second = scoredClusters[1] || clusters[1];
+    const topTraits = getPerceptualTraits(top?.base || dominant.base);
+    const secondTraits = second ? getPerceptualTraits(second.base) : null;
+    const lightContrast = second ? Math.abs(getLight(top.base) - getLight(second.base)) : 0;
+    const chromaSpread = second
+      ? Math.abs(Number(topTraits?.chroma_magnitude || 0) - Number(secondTraits?.chroma_magnitude || 0))
+      : 0;
+    const reflectiveMix =
+      Number(topTraits?.chroma_magnitude || 0) < 24 &&
+      (lightContrast > 0.2 || chromaSpread > 16) &&
+      Number(second?.pct || 0) >= 0.18;
+    if (reflectiveMix) {
+      displayLabel = "Metallic";
+      mode = "reflective";
+      interpretation = "metallic";
+    }
   }
 
   const zoneConfidence = Math.round(
@@ -1078,8 +1143,10 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     const evidence = getZoneRegionEvidence(zoneRegions);
 
     const hasSamRegion = zoneRegions.length > 0;
-    const chosenColor = regionColors[0]?.hex
-      ? { ...fallbackColor, hex: regionColors[0].hex, pct: regionColors[0].pct }
+    const regionClusters = buildColorClusters(regionColors);
+    const consensusCluster = regionClusters[0] || null;
+    const chosenColor = consensusCluster?.base
+      ? { ...fallbackColor, hex: consensusCluster.base, pct: consensusCluster.pct }
       : fallbackColor;
     const computedScore = Math.max(45, Math.round((chosenColor?.pct || 0.25) * 100));
     const promoteFallback = shouldPromoteFallbackZone(zoneKey, evidence, computedScore);
