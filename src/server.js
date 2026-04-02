@@ -1169,7 +1169,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     });
 
     zones[zoneKey] = {
-      ...zoneData,
+      ...(zoneData || {}),
       ...zoneRead,
     };
 
