@@ -871,8 +871,18 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     zoneKey === "footwear" &&
     sameFamilyCount < 2 &&
     regionCoverage < 0.55;
+  const jewelrySkinContamination =
+    zoneKey === "accessory_jewelry" &&
+    (() => {
+      const hue = getHue(dominant.base);
+      const sat = getSat(dominant.base);
+      const light = getLight(dominant.base);
+      const skinLike = hue >= 12 && hue <= 55 && sat >= 0.12 && sat <= 0.55 && light >= 0.32 && light <= 0.86;
+      const highlightLike = light >= 0.8 && sat < 0.22;
+      return (skinLike || highlightLike) && Number(dominant?.pct || 0) < 0.58;
+    })();
 
-  if (lowSignalRegion || isWeakDominantEvidence || isNeutralContamination || footwearSignalWeak) {
+  if (lowSignalRegion || isWeakDominantEvidence || isNeutralContamination || footwearSignalWeak || jewelrySkinContamination) {
     return {
       mode: "single",
       cluster_count: clusters.length,
@@ -1002,8 +1012,54 @@ function getZoneRegionEvidence(zoneRegions = []) {
   };
 }
 
+function hasHighContrastColorSignal(colors = []) {
+  const palette = (colors || []).map((c) => safeHex(c?.hex)).filter(Boolean);
+  if (palette.length < 2) return false;
+  for (let i = 0; i < palette.length; i += 1) {
+    for (let j = i + 1; j < palette.length; j += 1) {
+      if (Math.abs(getLight(palette[i]) - getLight(palette[j])) >= 0.33) return true;
+    }
+  }
+  return false;
+}
+
+function hasExplicitZoneRegionEvidence(zoneKey, zoneRegions = [], evidence = {}) {
+  const regionCount = Number(evidence?.region_count || 0);
+  const coverage = Number(evidence?.coverage || 0);
+  const weightedConfidence = Number(evidence?.weighted_confidence || 0);
+  const colorCount = Number(evidence?.color_count || 0);
+  const labels = (zoneRegions || []).map((r) => normalizeText(r?.segment_label || r?.label || r?.zone || ""));
+
+  if (["bag", "accessory_jewelry", "footwear", "fur_trim"].includes(zoneKey)) {
+    return regionCount >= 1 && coverage >= 0.12 && weightedConfidence >= 40 && colorCount >= 1;
+  }
+
+  if (zoneKey === "logo_text_detail") {
+    const hasTextLikeLabel = labels.some((t) => /logo|text|graphic|print/.test(t));
+    const hasContrastSignal = (zoneRegions || []).some((r) =>
+      hasHighContrastColorSignal(Array.isArray(r?.region_colors) ? r.region_colors : [])
+    );
+    return (
+      regionCount >= 1 &&
+      coverage >= 0.08 &&
+      weightedConfidence >= 42 &&
+      colorCount >= 1 &&
+      (hasTextLikeLabel || hasContrastSignal)
+    );
+  }
+
+  if (zoneKey === "outerwear") {
+    return regionCount >= 1 && coverage >= 0.2 && weightedConfidence >= 46 && colorCount >= 2;
+  }
+
+  return regionCount >= 1;
+}
+
 function shouldPromoteFallbackZone(zoneKey, evidence, zoneScore = 0) {
-  if (!["lower_garment", "outerwear", "footwear"].includes(zoneKey)) return true;
+  if (["bag", "accessory_jewelry", "footwear", "logo_text_detail", "fur_trim", "outerwear"].includes(zoneKey)) {
+    return false;
+  }
+  if (!["lower_garment"].includes(zoneKey)) return true;
   const hasStrongRegionEvidence =
     Number(evidence?.region_count || 0) >= 1 &&
     Number(evidence?.coverage || 0) >= 0.24 &&
@@ -1150,7 +1206,14 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       : fallbackColor;
     const computedScore = Math.max(45, Math.round((chosenColor?.pct || 0.25) * 100));
     const promoteFallback = shouldPromoteFallbackZone(zoneKey, evidence, computedScore);
-    const zoneData = promoteFallback ? buildZoneCandidate(chosenColor, zoneKey, computedScore) : null;
+    const hasExplicitEvidence = hasExplicitZoneRegionEvidence(zoneKey, zoneRegions, evidence);
+    const allowZoneFromRegionOnly = ["bag", "accessory_jewelry", "footwear", "logo_text_detail", "fur_trim", "outerwear"].includes(zoneKey);
+    const useRegionCandidate = hasExplicitEvidence && zoneRegions.length > 0;
+    const zoneData = useRegionCandidate
+      ? buildZoneCandidate(chosenColor, zoneKey, computedScore)
+      : promoteFallback && !allowZoneFromRegionOnly
+        ? buildZoneCandidate(chosenColor, zoneKey, computedScore)
+        : null;
     const zoneRead = inferZoneColorRead(zoneKey, zoneData, normalizedColors, regionColors, hasSamRegion);
     regionSummary.push({
       zone: zoneKey,
