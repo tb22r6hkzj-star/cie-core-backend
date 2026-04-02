@@ -880,6 +880,24 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   const clusters = buildColorClusters(fallbackSet);
   const regionCoverage = clamp01(regionColors.reduce((sum, c) => sum + Number(c?.pct || 0), 0));
   const lowSignalRegion = useRegionOnly && regionCoverage < 0.3 && clusters.length < 2;
+  const sortedByLight = clusters.slice().sort((a, b) => getLight(a.base) - getLight(b.base));
+  const darkestCluster = sortedByLight[0];
+  const lightestCluster = sortedByLight[sortedByLight.length - 1];
+  const darkLightContrast = darkestCluster && lightestCluster
+    ? Math.abs(getLight(lightestCluster.base) - getLight(darkestCluster.base))
+    : 0;
+  const eyewearStrongSignal =
+    zoneKey === "eyewear" &&
+    clusters.length >= 2 &&
+    darkLightContrast >= 0.2 &&
+    Number(darkestCluster?.pct || 0) >= 0.18 &&
+    Number(lightestCluster?.pct || 0) >= 0.1;
+  const furTrimStrongSignal =
+    zoneKey === "fur_trim" &&
+    clusters.length >= 2 &&
+    darkLightContrast >= 0.38 &&
+    Number(darkestCluster?.pct || 0) >= 0.14 &&
+    Number(lightestCluster?.pct || 0) >= 0.14;
   const clustersTotalWeight = clusters.reduce((sum, c) => sum + Number(c?.weight || 0), 0) || 1;
   const scoredClusters = clusters
     .map((cluster, index) => {
@@ -941,7 +959,13 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       return (skinLike || highlightLike) && Number(dominant?.pct || 0) < 0.58;
     })();
 
-  if (lowSignalRegion || isWeakDominantEvidence || isNeutralContamination || footwearSignalWeak || jewelrySkinContamination) {
+  if (
+    (lowSignalRegion && !eyewearStrongSignal && !furTrimStrongSignal) ||
+    (isWeakDominantEvidence && !eyewearStrongSignal && !furTrimStrongSignal) ||
+    (isNeutralContamination && !eyewearStrongSignal && !furTrimStrongSignal) ||
+    footwearSignalWeak ||
+    jewelrySkinContamination
+  ) {
     return {
       mode: "single",
       cluster_count: clusters.length,
@@ -1010,15 +1034,14 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       interpretation = "metallic";
     }
   } else if (zoneKey === "fur_trim" && clusters.length >= 2) {
-    const sortedByLight = clusters.slice().sort((a, b) => getLight(a.base) - getLight(b.base));
     const darkest = sortedByLight[0];
     const lightest = sortedByLight[sortedByLight.length - 1];
-    const lightDiff = Math.abs(getLight(lightest.base) - getLight(darkest.base));
+    const lightDiff = darkLightContrast;
     const dualMaterialSignal =
       clusters.length >= 2 &&
-      lightDiff > 0.4 &&
-      Number(darkest?.pct || 0) >= 0.16 &&
-      Number(lightest?.pct || 0) >= 0.16;
+      lightDiff > 0.36 &&
+      Number(darkest?.pct || 0) >= 0.14 &&
+      Number(lightest?.pct || 0) >= 0.14;
     if (dualMaterialSignal) {
       displayLabel = "Black/White Fur";
       mode = "multicolor";
@@ -1124,6 +1147,55 @@ function hasHighContrastColorSignal(colors = []) {
   return false;
 }
 
+function hasStrongEyewearRegionSignal(zoneRegions = [], evidence = {}) {
+  if (!Array.isArray(zoneRegions) || !zoneRegions.length) return false;
+  const weightedConfidence = Number(evidence?.weighted_confidence || 0);
+  const coverage = Number(evidence?.coverage || 0);
+  const compactRegion = zoneRegions.some((r) => {
+    const localCoverage = Number(r?.coverage || 0);
+    return localCoverage >= 0.03 && localCoverage <= 0.24;
+  });
+  const hasLensLikeContrast = zoneRegions.some((r) => {
+    const colors = Array.isArray(r?.region_colors) ? r.region_colors : [];
+    if (colors.length < 2) return false;
+    const sorted = colors
+      .map((c) => ({ ...c, hex: safeHex(c?.hex) }))
+      .filter((c) => !!c.hex)
+      .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
+    if (sorted.length < 2) return false;
+    const top = sorted[0];
+    const second = sorted[1];
+    const lightDiff = Math.abs(getLight(top.hex) - getLight(second.hex));
+    const darkLens = getLight(top.hex) < 0.34 || getLight(second.hex) < 0.34;
+    const reflectiveEdge = getLight(top.hex) > 0.64 || getLight(second.hex) > 0.64;
+    return lightDiff >= 0.2 && darkLens && reflectiveEdge;
+  });
+  return compactRegion && hasLensLikeContrast && coverage >= 0.05 && weightedConfidence >= 38;
+}
+
+function hasStrongOuterwearRegionSignal(zoneRegions = [], evidence = {}) {
+  if (!Array.isArray(zoneRegions) || !zoneRegions.length) return false;
+  const coverage = Number(evidence?.coverage || 0);
+  const weightedConfidence = Number(evidence?.weighted_confidence || 0);
+  const colorCount = Number(evidence?.color_count || 0);
+  const largeRegion = zoneRegions.some((r) => Number(r?.coverage || 0) >= 0.22);
+  const materialContrast = zoneRegions.some((r) => {
+    const colors = Array.isArray(r?.region_colors) ? r.region_colors : [];
+    if (colors.length < 2) return false;
+    const sorted = colors
+      .map((c) => ({ ...c, hex: safeHex(c?.hex) }))
+      .filter((c) => !!c.hex)
+      .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
+    if (sorted.length < 2) return false;
+    const top = sorted[0];
+    const second = sorted[1];
+    const lightDiff = Math.abs(getLight(top.hex) - getLight(second.hex));
+    const satDiff = Math.abs(getSat(top.hex) - getSat(second.hex));
+    return lightDiff >= 0.16 || satDiff >= 0.22;
+  });
+  return largeRegion && materialContrast && coverage >= 0.2 && weightedConfidence >= 40 && colorCount >= 2;
+}
+
 function hasExplicitZoneRegionEvidence(zoneKey, zoneRegions = [], evidence = {}) {
   const regionCount = Number(evidence?.region_count || 0);
   const coverage = Number(evidence?.coverage || 0);
@@ -1150,7 +1222,13 @@ function hasExplicitZoneRegionEvidence(zoneKey, zoneRegions = [], evidence = {})
   }
 
   if (zoneKey === "outerwear") {
+    if (hasStrongOuterwearRegionSignal(zoneRegions, evidence)) return true;
     return regionCount >= 1 && coverage >= 0.16 && weightedConfidence >= 42 && colorCount >= 1;
+  }
+
+  if (zoneKey === "eyewear") {
+    if (hasStrongEyewearRegionSignal(zoneRegions, evidence)) return true;
+    return regionCount >= 1 && coverage >= 0.08 && weightedConfidence >= 40 && colorCount >= 1;
   }
 
   return regionCount >= 1;
@@ -1532,7 +1610,17 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
 
   function buildItem(type, zoneData) {
     if (!zoneData?.hex) return null;
-    if (["outerwear", "lower_garment", "footwear"].includes(type) && Number(zoneData?.confidence || 0) < 56) {
+    if (
+      ["lower_garment", "footwear"].includes(type) &&
+      Number(zoneData?.confidence || 0) < 56
+    ) {
+      return null;
+    }
+    if (
+      type === "outerwear" &&
+      Number(zoneData?.confidence || 0) < 52 &&
+      Number(zoneData?.cluster_count || 0) < 2
+    ) {
       return null;
     }
 
