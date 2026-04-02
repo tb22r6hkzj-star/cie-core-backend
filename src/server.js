@@ -840,8 +840,23 @@ function getBlackNuanceLabel(hex) {
 
 function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColors = [], useRegionOnly = false, context = {}) {
   const fallbackName = zoneData?.name || titleCase(String(zoneKey || "unknown").replace(/_/g, " "));
+  const debugContext = {
+    suppression_gates: {
+      lowSignalRegion: false,
+      isWeakDominantEvidence: false,
+      isNeutralContamination: false,
+      footwearSignalWeak: false,
+      jewelrySkinContamination: false,
+    },
+    strong_signal_overrides: {
+      eyewearStrongSignal: false,
+      furTrimStrongSignal: false,
+    },
+    unknown_reason: null,
+  };
 
   if (!zoneData?.hex) {
+    debugContext.unknown_reason = "zone_data_missing_hex";
     return {
       mode: "single",
       cluster_count: 0,
@@ -851,9 +866,11 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       support_colors: [],
       accent_colors: [],
       confidence: 0,
+      _debug: debugContext,
     };
   }
   if (zoneKey === "eyewear" && !regionColors.length) {
+    debugContext.unknown_reason = "eyewear_requires_region_colors";
     return {
       mode: "single",
       cluster_count: 0,
@@ -863,6 +880,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       support_colors: [],
       accent_colors: [],
       confidence: 0,
+      _debug: debugContext,
     };
   }
 
@@ -898,6 +916,8 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     darkLightContrast >= 0.38 &&
     Number(darkestCluster?.pct || 0) >= 0.14 &&
     Number(lightestCluster?.pct || 0) >= 0.14;
+  debugContext.strong_signal_overrides.eyewearStrongSignal = eyewearStrongSignal;
+  debugContext.strong_signal_overrides.furTrimStrongSignal = furTrimStrongSignal;
   const clustersTotalWeight = clusters.reduce((sum, c) => sum + Number(c?.weight || 0), 0) || 1;
   const scoredClusters = clusters
     .map((cluster, index) => {
@@ -958,6 +978,11 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       const highlightLike = light >= 0.8 && sat < 0.22;
       return (skinLike || highlightLike) && Number(dominant?.pct || 0) < 0.58;
     })();
+  debugContext.suppression_gates.lowSignalRegion = lowSignalRegion;
+  debugContext.suppression_gates.isWeakDominantEvidence = isWeakDominantEvidence;
+  debugContext.suppression_gates.isNeutralContamination = isNeutralContamination;
+  debugContext.suppression_gates.footwearSignalWeak = footwearSignalWeak;
+  debugContext.suppression_gates.jewelrySkinContamination = jewelrySkinContamination;
 
   if (
     (lowSignalRegion && !eyewearStrongSignal && !furTrimStrongSignal) ||
@@ -966,6 +991,18 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     footwearSignalWeak ||
     jewelrySkinContamination
   ) {
+    debugContext.unknown_reason =
+      lowSignalRegion && !eyewearStrongSignal && !furTrimStrongSignal
+        ? "lowSignalRegion"
+        : isWeakDominantEvidence && !eyewearStrongSignal && !furTrimStrongSignal
+          ? "isWeakDominantEvidence"
+          : isNeutralContamination && !eyewearStrongSignal && !furTrimStrongSignal
+            ? "isNeutralContamination"
+            : footwearSignalWeak
+              ? "footwearSignalWeak"
+              : jewelrySkinContamination
+                ? "jewelrySkinContamination"
+                : "suppressed_by_unknown_gate";
     return {
       mode: "single",
       cluster_count: clusters.length,
@@ -975,6 +1012,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       support_colors: [],
       accent_colors: [],
       confidence: Math.round(clamp100(Number(zoneData?.score || 0) * 0.4)),
+      _debug: debugContext,
     };
   }
 
@@ -1101,6 +1139,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       name: getColorName(c.base),
       pct: round2(c.pct),
     })),
+    _debug: debugContext,
   };
 }
 
@@ -1363,6 +1402,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
   const regionColorAnalysis = [];
   const regionSummary = [];
   const zoneCandidateSummary = [];
+  const missedZoneDebug = [];
 
   for (const [zoneKey, fallbackColor] of Object.entries(zoneMap)) {
     const zoneRegions = segmentedByZone[zoneKey] || [];
@@ -1386,6 +1426,9 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     const computedScore = Math.max(45, Math.round((chosenColor?.pct || 0.25) * 100));
     const promoteFallback = shouldPromoteFallbackZone(zoneKey, evidence, computedScore);
     const hasExplicitEvidence = hasExplicitZoneRegionEvidence(zoneKey, zoneRegions, evidence);
+    const strongEyewearSignal = zoneKey === "eyewear" ? hasStrongEyewearRegionSignal(zoneRegions, evidence) : false;
+    const strongOuterwearSignal = zoneKey === "outerwear" ? hasStrongOuterwearRegionSignal(zoneRegions, evidence) : false;
+    const strongSignalHelper = zoneKey === "eyewear" ? strongEyewearSignal : zoneKey === "outerwear" ? strongOuterwearSignal : false;
     const allowZoneFromRegionOnly = ["bag", "accessory_jewelry", "footwear", "logo_text_detail", "fur_trim", "outerwear"].includes(zoneKey);
     const useRegionCandidate = hasExplicitEvidence && zoneRegions.length > 0;
     const zoneData = useRegionCandidate
@@ -1407,6 +1450,44 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       hasSamRegion,
       { dominantDarkBodyHex }
     );
+    if (["eyewear", "outerwear", "fur_trim"].includes(zoneKey)) {
+      const segmentLabels = zoneRegions.map((r) => r?.segment_label || r?.label || r?.zone || "unknown");
+      const regionColorSummary = zoneRegions.map((r) => ({
+        segment_label: r?.segment_label || r?.label || r?.zone || "unknown",
+        coverage: round2(Number(r?.coverage || 0)),
+        confidence: round2(Number(r?.confidence || 0)),
+        region_colors: (Array.isArray(r?.region_colors) ? r.region_colors : [])
+          .map((c) => ({
+            hex: safeHex(c?.hex) || c?.hex || null,
+            pct: round2(Number(c?.pct || 0)),
+            name: c?.name || null,
+          }))
+          .filter((c) => !!c.hex),
+      }));
+      missedZoneDebug.push({
+        zone: zoneKey,
+        region_count: evidence.region_count,
+        coverage: evidence.coverage,
+        weighted_confidence: evidence.weighted_confidence,
+        color_count: evidence.color_count,
+        has_explicit_zone_region_evidence: hasExplicitEvidence,
+        strong_signal_helper: strongSignalHelper,
+        strong_signal_helper_name:
+          zoneKey === "eyewear"
+            ? "hasStrongEyewearRegionSignal"
+            : zoneKey === "outerwear"
+              ? "hasStrongOuterwearRegionSignal"
+              : "none",
+        zone_data_created: !!zoneData,
+        zone_data_hex: zoneData?.hex || null,
+        infer_zone_unknown: zoneRead?.interpretation === "unknown",
+        infer_zone_unknown_reason: zoneRead?._debug?.unknown_reason || null,
+        suppression_gates: zoneRead?._debug?.suppression_gates || null,
+        infer_zone_strong_signal_overrides: zoneRead?._debug?.strong_signal_overrides || null,
+        segment_labels: segmentLabels,
+        region_colors_summary: regionColorSummary,
+      });
+    }
     regionSummary.push({
       zone: zoneKey,
       region_count: evidence.region_count,
@@ -1513,6 +1594,9 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
 
   console.info("[INTERPRET DEBUG] segmented region summary", regionSummary);
   console.info("[INTERPRET DEBUG] zone candidate summary", zoneCandidateSummary);
+  if (missedZoneDebug.length) {
+    console.info("[INTERPRET DEBUG] missed zone suppression diagnostics", missedZoneDebug);
+  }
   console.info("[INTERPRET DEBUG] one_piece decision summary", onePieceDecision);
   console.info("[INTERPRET DEBUG] denim decision summary", denimSummary);
   console.info(
