@@ -1424,6 +1424,13 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       accepted: proposal.accepted,
       accepted_reasons: proposal.acceptance_reasons,
       rejected_reasons: proposal.rejection_reasons,
+      top_score: proposal.top_score,
+      threshold_used: proposal.threshold_used,
+      expandsPastBody: proposal.expandsPastBody,
+      nearOuterBoundary: proposal.nearOuterBoundary,
+      body_bbox: proposal.body_bbox,
+      bbox: proposal.bbox,
+      final_acceptance_formula: proposal.decision_formula,
     };
     genericMaskDebug.push(candidateDebug);
     console.info("[SAM DEBUG] Generic mask candidate", candidateDebug);
@@ -3842,6 +3849,14 @@ function estimateGenericMaskZone(region = {}, context = {}) {
   const aspectRatio = Number(geometry?.aspect_ratio || 0);
   const colors = Array.isArray(region?.region_colors) ? region.region_colors : [];
   const hasContrast = hasHighContrastColorSignal(colors);
+  const colorSet = new Set(
+    colors
+      .map((c) => safeHex(c?.hex || ""))
+      .filter(Boolean)
+  );
+  const hasNontrivialRegionColors =
+    colorSet.size >= 2 &&
+    (Number(colors?.[0]?.pct || 0) <= 0.92 || Number(colors?.[1]?.pct || 0) >= 0.05);
   const bodyBox = context?.body_bbox || null;
   const outerBox = context?.outer_bbox || null;
   const torsoTop = bodyBox ? bodyBox.y : 0.2;
@@ -3861,6 +3876,9 @@ function estimateGenericMaskZone(region = {}, context = {}) {
     !!bbox &&
     Math.abs((bbox.x + bbox.w / 2) - (outerBox.x + outerBox.w / 2)) <= 0.42 &&
     Math.abs((bbox.y + bbox.h / 2) - (outerBox.y + outerBox.h / 2)) <= 0.42;
+  const hasBoundaryIrregularity = boundaryRatio >= 0.45 || fillRatio <= 0.72;
+  const extremeCoverage = coverage > 0.75;
+  const wholeBodyGarmentCandidate = extremeCoverage && torsoBand && expandsPastBody;
 
   let eyewearScore = 0;
   const eyewearWhy = [];
@@ -3900,6 +3918,24 @@ function estimateGenericMaskZone(region = {}, context = {}) {
     outerwearScore += 1;
     outerwearWhy.push("material_contrast");
   }
+  if (hasBoundaryIrregularity) {
+    outerwearScore += 0.75;
+    outerwearWhy.push("boundary_irregularity");
+  }
+  if (hasNontrivialRegionColors) {
+    outerwearScore += 0.75;
+    outerwearWhy.push("nontrivial_region_colors");
+  }
+  if (wholeBodyGarmentCandidate) {
+    outerwearScore += 1.5;
+    outerwearWhy.push("whole_body_garment_candidate");
+  }
+
+  const explicitOuterwearAcceptance =
+    coverage >= 0.16 &&
+    torsoBand &&
+    expandsPastBody &&
+    (hasContrast || hasBoundaryIrregularity || hasNontrivialRegionColors);
 
   let furTrimScore = 0;
   const furTrimWhy = [];
@@ -3930,15 +3966,50 @@ function estimateGenericMaskZone(region = {}, context = {}) {
     { zone: "fur_trim", score: furTrimScore, reasons: furTrimWhy },
   ].sort((a, b) => b.score - a.score);
   const top = ranked[0];
-  const thresholds = { eyewear: 5, outerwear: 4.5, fur_trim: 4.5 };
-  const accepted = top.score >= Number(thresholds[top.zone] || 99) && coverage >= 0.01;
+  const thresholds = {
+    eyewear: 5,
+    outerwear: explicitOuterwearAcceptance || wholeBodyGarmentCandidate ? 3.75 : 4.5,
+    fur_trim: 4.5,
+  };
+  const thresholdUsed = Number(thresholds[top.zone] || 99);
+  const acceptedByScore = top.score >= thresholdUsed && coverage >= 0.01;
+  const acceptedByOuterwearRule = top.zone === "outerwear" && explicitOuterwearAcceptance;
+  const accepted = acceptedByScore || acceptedByOuterwearRule;
+  const decisionWhyAccepted = [];
+  const decisionWhyRejected = [];
+  if (acceptedByOuterwearRule) decisionWhyAccepted.push("explicit_outerwear_acceptance_rule");
+  if (acceptedByScore) decisionWhyAccepted.push("score_meets_threshold");
+  if (!accepted) {
+    decisionWhyRejected.push("insufficient_contextual_fit");
+    if (top.zone === "outerwear" && explicitOuterwearAcceptance === false) {
+      decisionWhyRejected.push("missing_explicit_outerwear_rule_inputs");
+    }
+    if (top.score < thresholdUsed) {
+      decisionWhyRejected.push(`score_below_threshold:${round2(top.score)}<${round2(thresholdUsed)}`);
+    }
+  }
   return {
     estimated_role: top.zone,
     proposed_zone: accepted ? top.zone : null,
     accepted,
     acceptance_reasons: accepted ? top.reasons : [],
-    rejection_reasons: accepted ? [] : ["insufficient_contextual_fit", ...top.reasons.slice(0, 2)],
+    rejection_reasons: accepted ? [] : [...decisionWhyRejected, ...top.reasons.slice(0, 2)],
     scores: Object.fromEntries(ranked.map((r) => [r.zone, round2(r.score)])),
+    top_score: round2(top.score),
+    threshold_used: round2(thresholdUsed),
+    expandsPastBody,
+    nearOuterBoundary,
+    body_bbox: bodyBox || null,
+    bbox: bbox || null,
+    decision_formula: {
+      accepted_by_score: acceptedByScore,
+      accepted_by_explicit_outerwear_rule: acceptedByOuterwearRule,
+      explicit_outerwear_acceptance_rule: explicitOuterwearAcceptance,
+      whole_body_garment_candidate: wholeBodyGarmentCandidate,
+      extreme_coverage: extremeCoverage,
+      accepted_why: decisionWhyAccepted,
+      rejected_why: decisionWhyRejected,
+    },
   };
 }
 
