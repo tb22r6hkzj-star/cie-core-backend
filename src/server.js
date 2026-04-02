@@ -1378,10 +1378,64 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
   const stabilizer = roleByName.stabilizer || normalizedColors[3] || secondary;
 
   const segmentedByZone = {};
+  const genericSamRegions = [];
   for (const region of segmentedRegions || []) {
     const zone = region?.zone && region.zone !== "unknown" ? region.zone : getZoneFromLabel(region?.segment_label);
+    if (zone === "unknown") {
+      genericSamRegions.push(region);
+      continue;
+    }
     if (!segmentedByZone[zone]) segmentedByZone[zone] = [];
     segmentedByZone[zone].push(region);
+  }
+
+  const bodyContextBoxes = []
+    .concat(segmentedByZone.upper_garment || [])
+    .concat(segmentedByZone.lower_garment || [])
+    .concat(segmentedByZone.body_garment || [])
+    .map((r) => r?.mask_geometry?.bbox)
+    .filter(Boolean);
+  const outerContextBoxes = (segmentedByZone.outerwear || []).map((r) => r?.mask_geometry?.bbox).filter(Boolean);
+  const genericContext = {
+    body_bbox: mergeNormalizedBBoxes(bodyContextBoxes),
+    outer_bbox: mergeNormalizedBBoxes(outerContextBoxes),
+  };
+  const genericMaskDebug = [];
+  for (const region of genericSamRegions) {
+    const proposal = estimateGenericMaskZone(region, genericContext);
+    const dominantHex = safeHex(region?.dominant_hex || region?.region_colors?.[0]?.hex || "");
+    const candidateDebug = {
+      mask_id: region?.id || null,
+      coverage: round2(Number(region?.mask_geometry?.coverage || region?.coverage || 0)),
+      dominant_hex: dominantHex || null,
+      region_colors: (Array.isArray(region?.region_colors) ? region.region_colors : [])
+        .map((c) => ({ hex: safeHex(c?.hex) || c?.hex || null, pct: round2(Number(c?.pct || 0)) }))
+        .filter((c) => !!c.hex)
+        .slice(0, 4),
+      estimated_positional_role: proposal.estimated_role,
+      proposed_zone: proposal.proposed_zone,
+      proposed_zone_flags: {
+        upper_garment: proposal.proposed_zone === "upper_garment",
+        body_garment: proposal.proposed_zone === "body_garment",
+        outerwear: proposal.proposed_zone === "outerwear",
+        eyewear: proposal.proposed_zone === "eyewear",
+        fur_trim: proposal.proposed_zone === "fur_trim",
+      },
+      accepted: proposal.accepted,
+      accepted_reasons: proposal.acceptance_reasons,
+      rejected_reasons: proposal.rejection_reasons,
+    };
+    genericMaskDebug.push(candidateDebug);
+    console.info("[SAM DEBUG] Generic mask candidate", candidateDebug);
+
+    if (proposal.accepted && proposal.proposed_zone) {
+      if (!segmentedByZone[proposal.proposed_zone]) segmentedByZone[proposal.proposed_zone] = [];
+      segmentedByZone[proposal.proposed_zone].push({
+        ...region,
+        zone: proposal.proposed_zone,
+        generic_zone_proposal: proposal,
+      });
+    }
   }
 
   const zoneMap = {
@@ -1597,6 +1651,9 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
   if (missedZoneDebug.length) {
     console.info("[INTERPRET DEBUG] missed zone suppression diagnostics", missedZoneDebug);
   }
+  if (genericMaskDebug.length) {
+    console.info("[INTERPRET DEBUG] generic mask proposal diagnostics", genericMaskDebug);
+  }
   console.info("[INTERPRET DEBUG] one_piece decision summary", onePieceDecision);
   console.info("[INTERPRET DEBUG] denim decision summary", denimSummary);
   console.info(
@@ -1609,6 +1666,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     segmented_regions: segmentedRegions,
     zones: finalZones,
     region_color_analysis: regionColorAnalysis,
+    generic_mask_debug: genericMaskDebug,
   };
 }
 
@@ -3696,6 +3754,194 @@ function extractMaskedRegionColors(baseImage, maskImage, limit = 6) {
     .slice(0, limit);
 }
 
+function extractMaskGeometry(maskImage) {
+  const maskW = Number(maskImage?.width || 0);
+  const maskH = Number(maskImage?.height || 0);
+  if (!maskW || !maskH) return null;
+
+  const isOn = (x, y) => {
+    if (x < 0 || y < 0 || x >= maskW || y >= maskH) return false;
+    const idx = (y * maskW + x) * 4;
+    return getMaskStrength(maskImage.data, idx) >= 25;
+  };
+
+  let onCount = 0;
+  let sumX = 0;
+  let sumY = 0;
+  let minX = maskW;
+  let minY = maskH;
+  let maxX = -1;
+  let maxY = -1;
+  let boundaryPx = 0;
+  let imageEdgePx = 0;
+
+  for (let y = 0; y < maskH; y += 1) {
+    for (let x = 0; x < maskW; x += 1) {
+      if (!isOn(x, y)) continue;
+      onCount += 1;
+      sumX += x;
+      sumY += y;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+
+      const touchesImageEdge = x === 0 || y === 0 || x === maskW - 1 || y === maskH - 1;
+      if (touchesImageEdge) imageEdgePx += 1;
+
+      if (!isOn(x - 1, y) || !isOn(x + 1, y) || !isOn(x, y - 1) || !isOn(x, y + 1)) {
+        boundaryPx += 1;
+      }
+    }
+  }
+
+  if (!onCount || maxX < minX || maxY < minY) return null;
+
+  const bboxW = maxX - minX + 1;
+  const bboxH = maxY - minY + 1;
+  const bboxArea = bboxW * bboxH;
+
+  return {
+    coverage: clamp01(onCount / (maskW * maskH)),
+    centroid_x: clamp01(sumX / onCount / maskW),
+    centroid_y: clamp01(sumY / onCount / maskH),
+    bbox: {
+      x: clamp01(minX / maskW),
+      y: clamp01(minY / maskH),
+      w: clamp01(bboxW / maskW),
+      h: clamp01(bboxH / maskH),
+    },
+    bbox_area: clamp01(bboxArea / (maskW * maskH)),
+    aspect_ratio: bboxH > 0 ? bboxW / bboxH : 0,
+    fill_ratio: bboxArea > 0 ? clamp01(onCount / bboxArea) : 0,
+    boundary_ratio: onCount > 0 ? clamp01(boundaryPx / onCount) : 0,
+    image_edge_ratio: onCount > 0 ? clamp01(imageEdgePx / onCount) : 0,
+  };
+}
+
+function mergeNormalizedBBoxes(boxes = []) {
+  const valid = (boxes || []).filter((b) => b && Number.isFinite(b.x) && Number.isFinite(b.y) && Number.isFinite(b.w) && Number.isFinite(b.h));
+  if (!valid.length) return null;
+  const minX = Math.max(0, Math.min(1, Math.min(...valid.map((b) => b.x))));
+  const minY = Math.max(0, Math.min(1, Math.min(...valid.map((b) => b.y))));
+  const maxX = Math.max(0, Math.min(1, Math.max(...valid.map((b) => b.x + b.w))));
+  const maxY = Math.max(0, Math.min(1, Math.max(...valid.map((b) => b.y + b.h))));
+  if (maxX <= minX || maxY <= minY) return null;
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+function estimateGenericMaskZone(region = {}, context = {}) {
+  const geometry = region?.mask_geometry || {};
+  const bbox = geometry?.bbox || null;
+  const coverage = Number(geometry?.coverage || region?.coverage || 0);
+  const centroidX = Number(geometry?.centroid_x || (bbox ? bbox.x + bbox.w / 2 : 0.5));
+  const centroidY = Number(geometry?.centroid_y || (bbox ? bbox.y + bbox.h / 2 : 0.5));
+  const boundaryRatio = Number(geometry?.boundary_ratio || 0);
+  const imageEdgeRatio = Number(geometry?.image_edge_ratio || 0);
+  const fillRatio = Number(geometry?.fill_ratio || 0);
+  const aspectRatio = Number(geometry?.aspect_ratio || 0);
+  const colors = Array.isArray(region?.region_colors) ? region.region_colors : [];
+  const hasContrast = hasHighContrastColorSignal(colors);
+  const bodyBox = context?.body_bbox || null;
+  const outerBox = context?.outer_bbox || null;
+  const torsoTop = bodyBox ? bodyBox.y : 0.2;
+  const headCutoffY = bodyBox ? bodyBox.y + bodyBox.h * 0.32 : 0.32;
+  const centerAligned = centroidX >= 0.2 && centroidX <= 0.8;
+  const compact = coverage >= 0.008 && coverage <= 0.14;
+  const torsoBand = centroidY >= torsoTop && centroidY <= 0.82;
+  const expandsPastBody =
+    !!bodyBox &&
+    !!bbox &&
+    (bbox.x < bodyBox.x - 0.025 ||
+      bbox.x + bbox.w > bodyBox.x + bodyBox.w + 0.025 ||
+      bbox.y < bodyBox.y - 0.025 ||
+      bbox.y + bbox.h > bodyBox.y + bodyBox.h + 0.02);
+  const nearOuterBoundary =
+    !!outerBox &&
+    !!bbox &&
+    Math.abs((bbox.x + bbox.w / 2) - (outerBox.x + outerBox.w / 2)) <= 0.42 &&
+    Math.abs((bbox.y + bbox.h / 2) - (outerBox.y + outerBox.h / 2)) <= 0.42;
+
+  let eyewearScore = 0;
+  const eyewearWhy = [];
+  if (compact) {
+    eyewearScore += 2;
+    eyewearWhy.push("compact_coverage");
+  }
+  if (centerAligned) {
+    eyewearScore += 1.5;
+    eyewearWhy.push("center_aligned");
+  }
+  if (centroidY <= headCutoffY) {
+    eyewearScore += 2.5;
+    eyewearWhy.push("upper_face_position");
+  }
+  if (hasContrast) {
+    eyewearScore += 1;
+    eyewearWhy.push("lens_like_contrast");
+  }
+  if (aspectRatio >= 0.35 && aspectRatio <= 3.2) eyewearScore += 0.5;
+
+  let outerwearScore = 0;
+  const outerwearWhy = [];
+  if (coverage >= 0.16) {
+    outerwearScore += 2;
+    outerwearWhy.push("large_coverage");
+  }
+  if (torsoBand) {
+    outerwearScore += 1.5;
+    outerwearWhy.push("torso_band");
+  }
+  if (expandsPastBody) {
+    outerwearScore += 2.5;
+    outerwearWhy.push("surrounds_body_silhouette");
+  }
+  if (hasContrast) {
+    outerwearScore += 1;
+    outerwearWhy.push("material_contrast");
+  }
+
+  let furTrimScore = 0;
+  const furTrimWhy = [];
+  if (coverage >= 0.01 && coverage <= 0.22) {
+    furTrimScore += 1.5;
+    furTrimWhy.push("trim_sized_region");
+  }
+  if (hasContrast) {
+    furTrimScore += 1.5;
+    furTrimWhy.push("light_dark_contrast");
+  }
+  if (boundaryRatio >= 0.45 || fillRatio <= 0.72) {
+    furTrimScore += 2;
+    furTrimWhy.push("irregular_boundary");
+  }
+  if (nearOuterBoundary || expandsPastBody) {
+    furTrimScore += 1.5;
+    furTrimWhy.push("near_outerwear_edge");
+  }
+  if (imageEdgeRatio >= 0.12) {
+    furTrimScore += 0.5;
+    furTrimWhy.push("image_edge_adjacent");
+  }
+
+  const ranked = [
+    { zone: "eyewear", score: eyewearScore, reasons: eyewearWhy },
+    { zone: "outerwear", score: outerwearScore, reasons: outerwearWhy },
+    { zone: "fur_trim", score: furTrimScore, reasons: furTrimWhy },
+  ].sort((a, b) => b.score - a.score);
+  const top = ranked[0];
+  const thresholds = { eyewear: 5, outerwear: 4.5, fur_trim: 4.5 };
+  const accepted = top.score >= Number(thresholds[top.zone] || 99) && coverage >= 0.01;
+  return {
+    estimated_role: top.zone,
+    proposed_zone: accepted ? top.zone : null,
+    accepted,
+    acceptance_reasons: accepted ? top.reasons : [],
+    rejection_reasons: accepted ? [] : ["insufficient_contextual_fit", ...top.reasons.slice(0, 2)],
+    scores: Object.fromEntries(ranked.map((r) => [r.zone, round2(r.score)])),
+  };
+}
+
 async function enrichSamRegionsWithMaskedColors(imageUrl, regions = []) {
   if (!imageUrl || !Array.isArray(regions) || !regions.length) return regions || [];
 
@@ -3715,12 +3961,15 @@ async function enrichSamRegionsWithMaskedColors(imageUrl, regions = []) {
         const maskBuffer = await fetchImageBuffer(region.mask_url);
         const maskImage = decodeImageRgba(maskBuffer, region.mask_url);
         const regionColors = extractMaskedRegionColors(baseImage, maskImage, 6);
+        const maskGeometry = extractMaskGeometry(maskImage);
         const dominantHex = safeHex(regionColors[0]?.hex || region?.dominant_hex || "");
 
         return {
           ...region,
+          coverage: round2(Math.max(Number(region?.coverage || 0), Number(maskGeometry?.coverage || 0))),
           dominant_hex: dominantHex || region?.dominant_hex || null,
           region_colors: regionColors,
+          mask_geometry: maskGeometry,
         };
       } catch {
         return region;
