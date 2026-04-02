@@ -3553,6 +3553,9 @@ function buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts = [
 
 const REPLICATE_SAM_TIMEOUT_MS = 90000;
 const REPLICATE_SAM_POLL_MS = 1200;
+const REPLICATE_SAM_POLL_RETRY_MAX = 3;
+const REPLICATE_SAM_POLL_RETRY_DELAY_MIN_MS = 500;
+const REPLICATE_SAM_POLL_RETRY_DELAY_MAX_MS = 1200;
 const DEFAULT_REPLICATE_SAM_VERSION =
   process.env.REPLICATE_SAM_VERSION ||
   "b88dc2ea8f814e5f4af2bac79f2414079800b5035b065d4eab99c857ab67e125";
@@ -3619,6 +3622,26 @@ async function replicateRequest(url, options = {}, timeoutMs = REPLICATE_SAM_TIM
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function isTransientPollingError(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  if (!message) return false;
+  return (
+    message.includes("fetch failed") ||
+    message.includes("network") ||
+    message.includes("econnreset") ||
+    message.includes("etimedout") ||
+    message.includes("socket hang up") ||
+    message.includes("temporar") ||
+    message.includes("eai_again")
+  );
+}
+
+function randomPollRetryDelayMs() {
+  const min = REPLICATE_SAM_POLL_RETRY_DELAY_MIN_MS;
+  const max = REPLICATE_SAM_POLL_RETRY_DELAY_MAX_MS;
+  return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
 function parseSamOutputToRegions(output) {
@@ -4069,19 +4092,28 @@ async function runSamSegmentation(imageUrl) {
       version: samVersion,
       createUrl,
     });
-    const createResp = await replicateRequest(createUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        version: samVersion,
-        input: {
-          image: imageUrl,
+    let createResp;
+    try {
+      createResp = await replicateRequest(createUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
         },
-      }),
-    });
+        body: JSON.stringify({
+          version: samVersion,
+          input: {
+            image: imageUrl,
+          },
+        }),
+      });
+    } catch (error) {
+      console.error("[SAM DEBUG] SAM create request failed", {
+        failure_stage: "create",
+        message: error?.message || String(error),
+      });
+      throw error;
+    }
     console.info("[SAM DEBUG] SAM create response received", {
       predictionId: createResp?.id || null,
       status: createResp?.status || "unknown",
@@ -4106,10 +4138,42 @@ async function runSamSegmentation(imageUrl) {
     while (Date.now() - startedAt < REPLICATE_SAM_TIMEOUT_MS) {
       if (["succeeded", "failed", "canceled"].includes(prediction?.status)) break;
       await new Promise((resolve) => setTimeout(resolve, REPLICATE_SAM_POLL_MS));
-      prediction = await replicateRequest(statusUrl, {
-        method: "GET",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      let retryAttempt = 0;
+      let pollError = null;
+      while (retryAttempt < REPLICATE_SAM_POLL_RETRY_MAX) {
+        try {
+          prediction = await replicateRequest(statusUrl, {
+            method: "GET",
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          pollError = null;
+          break;
+        } catch (error) {
+          pollError = error;
+          const retryReason = error?.message || String(error);
+          const transient = isTransientPollingError(error);
+          retryAttempt += 1;
+          console.warn("[SAM DEBUG] SAM poll request retry evaluation", {
+            failure_stage: "poll",
+            poll_retry_attempt: retryAttempt,
+            poll_retry_reason: retryReason,
+            retryable: transient,
+            retries_remaining: Math.max(REPLICATE_SAM_POLL_RETRY_MAX - retryAttempt, 0),
+          });
+          if (!transient || retryAttempt >= REPLICATE_SAM_POLL_RETRY_MAX) break;
+          const retryDelayMs = randomPollRetryDelayMs();
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+        }
+      }
+      if (pollError) {
+        const exhaustionReason = pollError?.message || String(pollError);
+        console.error("[SAM DEBUG] SAM poll retry exhausted", {
+          failure_stage: "poll",
+          final_retry_exhaustion_reason: exhaustionReason,
+          poll_retry_attempts: retryAttempt,
+        });
+        throw pollError;
+      }
       console.info("[SAM DEBUG] SAM prediction poll", {
         id: prediction?.id || createResp?.id || null,
         status: prediction?.status || "unknown",
@@ -4158,7 +4222,10 @@ async function runSamSegmentation(imageUrl) {
       regions: enrichedRegions,
     };
   } catch (error) {
-    console.error("[SAM DEBUG] SAM request error", error?.message || error);
+    console.error("[SAM DEBUG] SAM request error", {
+      failure_stage: "outer",
+      message: error?.message || String(error),
+    });
     return {
       enabled: true,
       ok: false,
