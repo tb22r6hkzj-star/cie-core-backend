@@ -44,9 +44,9 @@ import jpeg from "jpeg-js";
 import { PNG } from "pngjs";
 import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
 import {
-  buildNamedHex as buildNamedHexFromLabelMapper,
-  buildNamedHexes as buildNamedHexesFromLabelMapper,
-  getColorName as getColorNameFromLabelMapper,
+  buildNamedHex,
+  buildNamedHexes,
+  getColorName,
   normalizeCategoryLabel as normalizeCategoryLabelFromLabelMapper,
   normalizeModeLabel,
 } from "./engines/labelMapper/index.js";
@@ -351,26 +351,8 @@ function getPerceptualTraits(hex) {
 }
 
 /* =========================
-   PREMIUM HUMAN COLOR NAMES
+   COLOR PROFILES
 ========================= */
-function getColorName(hex) {
-  const safe = safeHex(hex);
-  if (!safe) return "Unknown";
-  return getColorNameFromLabelMapper(safe) || "Unknown";
-}
-
-function buildNamedHex(hex) {
-  const safe = safeHex(hex);
-  if (!safe) return null;
-  return buildNamedHexFromLabelMapper(safe) || { hex: safe, name: getColorName(safe) };
-}
-
-function buildNamedHexes(hexes) {
-  const mapped = buildNamedHexesFromLabelMapper(hexes);
-  if (Array.isArray(mapped)) return mapped;
-  return uniqHexes(hexes).map(buildNamedHex).filter(Boolean);
-}
-
 function buildColorProfile(hex, pct = 0) {
   const safe = safeHex(hex);
   if (!safe) return null;
