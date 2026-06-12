@@ -56,6 +56,13 @@ import {
   deriveStyleIdentity as deriveStyleIdentityFromStyleIdentity,
 } from "./engines/styleIdentity/index.js";
 
+let scoreEngine = null;
+try {
+  scoreEngine = await import("./engines/score/index.js");
+} catch (error) {
+  console.warn("Score engine unavailable; using legacy scoring fallback.", error?.message || error);
+}
+
 dotenv.config();
 
 const app = express();
@@ -2169,7 +2176,7 @@ function generatePalettesV2(dominantHex) {
 /* =========================
    OUTFIT SCORING ENGINE
 ========================= */
-const MODE_RULES = {
+const LEGACY_MODE_RULES = {
   Balance: { harmony: 0.34, applicability: 0.28, versatility: 0.24, boldness: 0.14 },
   Contrast: { harmony: 0.2, applicability: 0.2, versatility: 0.2, boldness: 0.4 },
   Cohesion: { harmony: 0.44, applicability: 0.24, versatility: 0.22, boldness: 0.1 },
@@ -2576,20 +2583,111 @@ function computeScoreBreakdown(colorRoles, normalizedColors) {
   };
 }
 
+function normalizeEngineModeScores(modeScores = {}) {
+  if (Array.isArray(modeScores)) {
+    return modeScores
+      .map((entry) => ({ mode: entry?.mode, score: Number(entry?.score) || 0 }))
+      .filter((entry) => entry.mode)
+      .sort((a, b) => b.score - a.score);
+  }
+
+  return Object.entries(modeScores)
+    .map(([mode, score]) => ({ mode, score: Number(score) || 0 }))
+    .sort((a, b) => b.score - a.score);
+}
+
+function toEngineModeScores(modeScores = []) {
+  if (!Array.isArray(modeScores)) return modeScores || {};
+  return modeScores.reduce((acc, entry) => {
+    if (entry?.mode) acc[entry.mode] = Number(entry.score) || 0;
+    return acc;
+  }, {});
+}
+
+function computeOverallScore(scoreBreakdown) {
+  if (typeof scoreEngine?.computeOverallScore === "function") {
+    return scoreEngine.computeOverallScore(scoreBreakdown);
+  }
+
+  return Math.round(
+    clamp100(
+      scoreBreakdown.harmony * 0.32 +
+        scoreBreakdown.applicability * 0.28 +
+        scoreBreakdown.versatility * 0.24 +
+        scoreBreakdown.boldness * 0.16
+    )
+  );
+}
+
+function computeModeScore(mode, scoreBreakdown) {
+  if (typeof scoreEngine?.computeModeScore === "function") {
+    return scoreEngine.computeModeScore(mode, scoreBreakdown);
+  }
+
+  const weights = LEGACY_MODE_RULES[mode];
+  if (!weights) return 0;
+
+  return Math.round(
+    clamp100(
+      scoreBreakdown.harmony * weights.harmony +
+        scoreBreakdown.applicability * weights.applicability +
+        scoreBreakdown.versatility * weights.versatility +
+        scoreBreakdown.boldness * weights.boldness
+    )
+  );
+}
+
 function computeModeScores(scoreBreakdown) {
-  return Object.entries(MODE_RULES)
-    .map(([mode, weights]) => ({
+  if (typeof scoreEngine?.computeModeScores === "function") {
+    return normalizeEngineModeScores(scoreEngine.computeModeScores(scoreBreakdown));
+  }
+
+  return Object.keys(LEGACY_MODE_RULES)
+    .map((mode) => ({
       mode,
-      score: Math.round(
-        clamp100(
-          scoreBreakdown.harmony * weights.harmony +
-            scoreBreakdown.applicability * weights.applicability +
-            scoreBreakdown.versatility * weights.versatility +
-            scoreBreakdown.boldness * weights.boldness
-        )
-      ),
+      score: computeModeScore(mode, scoreBreakdown),
     }))
     .sort((a, b) => b.score - a.score);
+}
+
+function getBestMode(modeScores) {
+  const normalizedModeScores = normalizeEngineModeScores(modeScores);
+  if (!normalizedModeScores.length) return { mode: "Balance", score: 0 };
+
+  if (typeof scoreEngine?.getBestMode === "function") {
+    const bestMode = scoreEngine.getBestMode(toEngineModeScores(normalizedModeScores));
+    const bestScore = normalizedModeScores.find((entry) => entry.mode === bestMode)?.score ?? 0;
+    return { mode: bestMode || normalizedModeScores[0].mode, score: bestScore };
+  }
+
+  return normalizedModeScores[0];
+}
+
+function scoreOutfit(scoreBreakdown) {
+  if (typeof scoreEngine?.scoreOutfit === "function") {
+    const scored = scoreEngine.scoreOutfit(scoreBreakdown);
+    const modeScores = normalizeEngineModeScores(scored?.modeScores || computeModeScores(scoreBreakdown));
+    const best = getBestMode(modeScores);
+
+    return {
+      outfit_score: scored?.overallScore ?? computeOverallScore(scoreBreakdown),
+      best_mode: scored?.bestMode || best.mode,
+      best_mode_score: modeScores.find((entry) => entry.mode === (scored?.bestMode || best.mode))?.score ?? best.score,
+      score_breakdown: scored?.scoreBreakdown || scoreBreakdown,
+      mode_scores: modeScores,
+    };
+  }
+
+  const modeScores = computeModeScores(scoreBreakdown);
+  const best = getBestMode(modeScores);
+
+  return {
+    outfit_score: computeOverallScore(scoreBreakdown),
+    best_mode: best.mode,
+    best_mode_score: best.score,
+    score_breakdown: scoreBreakdown,
+    mode_scores: modeScores,
+  };
 }
 
 /* =========================
@@ -2712,20 +2810,13 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], pi
   });
 
   const scoreBreakdown = computeScoreBreakdown(colorRoles, normalizedColors);
-  const modeScores = computeModeScores(scoreBreakdown);
-  const best = modeScores[0] || { mode: "Balance", score: 0 };
+  const scoredOutfit = scoreOutfit(scoreBreakdown);
+  const modeScores = scoredOutfit.mode_scores;
+  const best = getBestMode(modeScores);
   const detectedPalette = buildDetectedPalette(colorRoles, normalizedColors);
   const styleIdentity = deriveStyleIdentity(best.mode, scoreBreakdown);
   const visualImportance = collectImportantColors(topColors, dominantHex);
-
-  const outfitScore = Math.round(
-    clamp100(
-      scoreBreakdown.harmony * 0.32 +
-        scoreBreakdown.applicability * 0.28 +
-        scoreBreakdown.versatility * 0.24 +
-        scoreBreakdown.boldness * 0.16
-    )
-  );
+  const outfitScore = scoredOutfit.outfit_score;
 
   return {
     analysis_type: "outfit_score",
