@@ -42,7 +42,7 @@ import { v2 as cloudinary } from "cloudinary";
 import chroma from "chroma-js";
 import jpeg from "jpeg-js";
 import { PNG } from "pngjs";
-import { getZoneFromLabel as getZoneFromLabelFromEngine } from "./engines/zoneMapper/index.js";
+import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
 import {
   buildNamedHex as buildNamedHexFromLabelMapper,
   buildNamedHexes as buildNamedHexesFromLabelMapper,
@@ -1088,11 +1088,6 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   };
 }
 
-function getZoneFromLabel(label = "") {
-  const mappedZone = getZoneFromLabelFromEngine(label);
-  if (mappedZone && mappedZone !== "unknown") return mappedZone;
-  return "unknown";
-}
 
 function getZoneRegionEvidence(zoneRegions = []) {
   const coverage = (zoneRegions || []).reduce((sum, r) => sum + Number(r?.coverage || r?.confidence || 0), 0);
