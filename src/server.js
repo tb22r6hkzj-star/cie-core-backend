@@ -48,7 +48,7 @@ import {
   buildNamedHexes as buildNamedHexesFromLabelMapper,
   getColorName as getColorNameFromLabelMapper,
   normalizeCategoryLabel as normalizeCategoryLabelFromLabelMapper,
-  normalizeModeLabel as normalizeModeLabelFromLabelMapper,
+  normalizeModeLabel,
 } from "./engines/labelMapper/index.js";
 import {
   deriveStyleIdentity as deriveStyleIdentityFromStyleIdentity,
@@ -1819,9 +1819,6 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
 /* =========================
    CATEGORY / MODE HELPERS
 ========================= */
-function normalizeModeLabel(mode) {
-  return normalizeModeLabelFromLabelMapper(mode) || "Balance";
-}
 
 function normalizeCategoryLabel(value, fallback = "piece") {
   const text = normalizeText(value);
