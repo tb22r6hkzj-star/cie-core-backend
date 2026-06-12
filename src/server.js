@@ -43,6 +43,13 @@ import chroma from "chroma-js";
 import jpeg from "jpeg-js";
 import { PNG } from "pngjs";
 import { getZoneFromLabel as getZoneFromLabelFromEngine } from "./engines/zoneMapper/index.js";
+import {
+  buildNamedHex as buildNamedHexFromLabelMapper,
+  buildNamedHexes as buildNamedHexesFromLabelMapper,
+  getColorName as getColorNameFromLabelMapper,
+  normalizeCategoryLabel as normalizeCategoryLabelFromLabelMapper,
+  normalizeModeLabel as normalizeModeLabelFromLabelMapper,
+} from "./engines/labelMapper/index.js";
 
 dotenv.config();
 
@@ -347,83 +354,18 @@ function getPerceptualTraits(hex) {
 function getColorName(hex) {
   const safe = safeHex(hex);
   if (!safe) return "Unknown";
-
-  const h = getHue(safe);
-  const s = getSat(safe);
-  const l = getLight(safe);
-
-  const lab = getLab(safe);
-  const chromaMagnitude = getChromaMagnitudeFromLab(lab);
-
-  // =========================
-  // TRUE NEUTRALS
-  // =========================
-  if (s < 0.05 && l < 0.10) return "Jet Black";
-  if (s < 0.07 && l < 0.18) return "Graphite Black";
-  if (s < 0.09 && l < 0.28) return "Charcoal";
-  if (s < 0.10 && l < 0.40) return "Slate Gray";
-  if (s < 0.10 && l >= 0.42 && l <= 0.70) return "Graphite";
-  if (s < 0.08 && l >= 0.70 && l <= 0.90) return "Chrome Silver";
-  if (s < 0.12 && l < 0.58) return "Stone Gray";
-  if (s < 0.12 && l < 0.74) return "Ash Gray";
-  if (s < 0.10 && l > 0.93) return "Soft White";
-  if (s < 0.15 && l > 0.84) return "Linen White";
-  if (s < 0.18 && l > 0.74) return "Ivory";
-  if (s < 0.22 && l > 0.64) return "Soft Linen";
-  if (isVeryDarkLowChroma(safe)) return l < 0.16 ? "Jet Black" : "Graphite Black";
-
-  // =========================
-  // MUTED / WASHED DETECTION (CRITICAL FIX)
-  // =========================
-  const isMuted = chromaMagnitude < 32 || s < 0.32;
-  const isSoft = l >= 0.32 && l <= 0.78;
-
-  if (isMuted && isSoft) {
-    if (h >= 205 && h < 235) return l < 0.52 ? "Muted Blue" : "Dusty Blue";
-    if (h >= 235 && h < 255) return l < 0.52 ? "Washed Indigo" : "Periwinkle Blue";
-    if (h >= 175 && h < 205) return "Muted Teal";
-    if (h >= 255 && h < 290) return "Dusty Violet";
-    if (h >= 105 && h < 165) return "Muted Sage";
-    if (h >= 15 && h < 28) return l < 0.52 ? "Luxury Tan" : "Soft Camel";
-    if (h >= 28 && h < 40) return l < 0.52 ? "Muted Tan" : "Soft Sand";
-    if (h >= 40 && h < 65) return "Warm Sand";
-    if (h >= 315 || h < 15) return "Dusty Rose";
-  }
-
-  // =========================
-  // STRONG COLOR NAMING
-  // =========================
-  if (h >= 345 || h < 8) return l < 0.48 ? "Deep Crimson" : "Rose";
-  if (h >= 8 && h < 18) return l < 0.46 ? "Brick Red" : "Coral";
-  if (h >= 315 && h < 333) return l < 0.54 ? "Berry" : "Dusty Rose";
-  if (h >= 333 && h < 345) return l < 0.52 ? "Muted Lip Rose" : "Soft Blush";
-
-  if (h >= 18 && h < 28) return l < 0.42 ? "Rich Brown" : "Desert Tan";
-  if (h >= 28 && h < 40) return l < 0.48 ? "Cognac" : "Camel";
-  if (h >= 40 && h < 50) return l < 0.52 ? "Burnt Umber" : "Warm Sand";
-  if (h >= 50 && h < 60) return l < 0.56 ? "Golden Amber" : "Sand Beige";
-
-  if (h >= 60 && h < 78) return l < 0.48 ? "Olive" : "Soft Olive";
-  if (h >= 78 && h < 105) return l < 0.50 ? "Olive Green" : "Muted Sage";
-  if (h >= 105 && h < 145) return l < 0.44 ? "Forest Green" : "Sage";
-  if (h >= 145 && h < 175) return l < 0.44 ? "Deep Teal" : "Teal";
-
-  if (h >= 175 && h < 205) return l < 0.50 ? "Steel Teal" : "Sea Blue";
-  if (h >= 205 && h < 228) return isNavyCandidate(safe) ? (l < 0.38 ? "Midnight Navy" : "Steel Blue") : "Graphite Black";
-  if (h >= 228 && h < 250) return isNavyCandidate(safe) ? (l < 0.40 ? "Deep Navy" : "Powder Blue") : "Graphite Black";
-
-  if (h >= 250 && h < 280) return l < 0.48 ? "Royal Purple" : "Periwinkle";
-  if (h >= 280 && h < 315) return l < 0.54 ? "Plum" : "Lavender";
-
-  return "Refined Neutral";
+  return getColorNameFromLabelMapper(safe) || "Unknown";
 }
 
 function buildNamedHex(hex) {
   const safe = safeHex(hex);
-  return safe ? { hex: safe, name: getColorName(safe) } : null;
+  if (!safe) return null;
+  return buildNamedHexFromLabelMapper(safe) || { hex: safe, name: getColorName(safe) };
 }
 
 function buildNamedHexes(hexes) {
+  const mapped = buildNamedHexesFromLabelMapper(hexes);
+  if (Array.isArray(mapped)) return mapped;
   return uniqHexes(hexes).map(buildNamedHex).filter(Boolean);
 }
 
@@ -1881,78 +1823,13 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
    CATEGORY / MODE HELPERS
 ========================= */
 function normalizeModeLabel(mode) {
-  const m = normalizeText(mode);
-  const map = {
-    balance: "Balance",
-    contrast: "Contrast",
-    cohesion: "Cohesion",
-    natural: "Natural",
-    explore: "Explore",
-    emphasis: "Explore",
-  };
-  return map[m] || "Balance";
+  return normalizeModeLabelFromLabelMapper(mode) || "Balance";
 }
 
 function normalizeCategoryLabel(value, fallback = "piece") {
   const text = normalizeText(value);
   if (!text) return fallback;
-
-  const map = {
-    jackets: "jacket",
-    jacket: "jacket",
-    outerwear: "jacket",
-    coat: "jacket",
-    bomber: "jacket",
-    overshirt: "jacket",
-
-    shirts: "shirt",
-    shirt: "shirt",
-    tee: "shirt",
-    "t-shirt": "shirt",
-    top: "shirt",
-    tops: "shirt",
-    "button up": "shirt",
-
-    sweaters: "sweater",
-    sweater: "sweater",
-    knit: "sweater",
-    cardigan: "sweater",
-    cardigans: "sweater",
-    pullover: "sweater",
-
-    hoodies: "hoodie",
-    hoodie: "hoodie",
-    sweatshirt: "hoodie",
-
-    pants: "pants",
-    trousers: "pants",
-    jeans: "pants",
-    chinos: "pants",
-    bottoms: "pants",
-
-    shorts: "shorts",
-
-    shoes: "shoes",
-    footwear: "shoes",
-    loafers: "shoes",
-
-    boots: "boots",
-    sneakers: "sneakers",
-    trainers: "sneakers",
-
-    accessories: "accessory",
-    accessory: "accessory",
-    bag: "accessory",
-    bags: "accessory",
-    hat: "accessory",
-    hats: "accessory",
-    belt: "accessory",
-    belts: "accessory",
-    watch: "accessory",
-    strap: "accessory",
-  };
-
-  return map[text] || text;
+  return normalizeCategoryLabelFromLabelMapper(value, fallback) || text;
 }
 
 function familyBiasForCategory(category) {
