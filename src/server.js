@@ -50,6 +50,11 @@ import {
   normalizeCategoryLabel as normalizeCategoryLabelFromLabelMapper,
   normalizeModeLabel as normalizeModeLabelFromLabelMapper,
 } from "./engines/labelMapper/index.js";
+import {
+  deriveBaseArchetype as deriveBaseArchetypeFromStyleIdentity,
+  deriveModifier as deriveModifierFromStyleIdentity,
+  deriveStyleIdentity as deriveStyleIdentityFromStyleIdentity,
+} from "./engines/styleIdentity/index.js";
 
 dotenv.config();
 
@@ -2591,53 +2596,20 @@ function computeModeScores(scoreBreakdown) {
    STYLE IDENTITY SYSTEM
 ========================= */
 function deriveBaseArchetype(bestMode) {
-  const mode = normalizeModeLabel(bestMode);
-
-  const map = {
-    Cohesion: "Minimalist",
-    Natural: "Natural",
-    Balance: "Classic",
-    Contrast: "Statement",
-    Explore: "Creative",
-  };
-
-  return map[mode] || "Classic";
+  return deriveBaseArchetypeFromStyleIdentity(bestMode);
 }
 
 function deriveModifier(scoreBreakdown = {}) {
-  const harmony = Number(scoreBreakdown.harmony || 0);
-  const applicability = Number(scoreBreakdown.applicability || 0);
-  const versatility = Number(scoreBreakdown.versatility || 0);
-  const boldness = Number(scoreBreakdown.boldness || 0);
-
-  if (boldness >= 82) return "Bold";
-  if (harmony >= 86 && boldness <= 45) return "Controlled";
-  if (versatility >= 90) return "Modern";
-  if (applicability >= 88) return "Refined";
-
-  if (
-    harmony >= 78 &&
-    applicability >= 78 &&
-    versatility >= 78 &&
-    boldness >= 40 &&
-    boldness <= 75
-  ) {
-    return "Balanced";
-  }
-
-  if (boldness <= 38) return "Soft";
-
-  return "Modern";
+  return deriveModifierFromStyleIdentity(scoreBreakdown);
 }
 
 function deriveStyleIdentity(bestMode, scoreBreakdown = {}) {
-  const modifier = deriveModifier(scoreBreakdown);
-  const baseArchetype = deriveBaseArchetype(bestMode);
+  const identity = deriveStyleIdentityFromStyleIdentity(bestMode, scoreBreakdown);
 
   return {
-    modifier,
-    base_archetype: baseArchetype,
-    label: `${modifier} ${baseArchetype}`,
+    modifier: identity.modifier,
+    base_archetype: identity.base_archetype,
+    label: identity.label,
   };
 }
 
