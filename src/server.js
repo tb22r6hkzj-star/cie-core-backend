@@ -47,7 +47,7 @@ import {
   buildNamedHex,
   buildNamedHexes,
   getColorName,
-  normalizeCategoryLabel as normalizeCategoryLabelFromLabelMapper,
+  normalizeCategoryLabel,
   normalizeModeLabel,
 } from "./engines/labelMapper/index.js";
 import {
@@ -1801,12 +1801,6 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
 /* =========================
    CATEGORY / MODE HELPERS
 ========================= */
-
-function normalizeCategoryLabel(value, fallback = "piece") {
-  const text = normalizeText(value);
-  if (!text) return fallback;
-  return normalizeCategoryLabelFromLabelMapper(value, fallback) || text;
-}
 
 function familyBiasForCategory(category) {
   const c = normalizeCategoryLabel(category, "piece");
