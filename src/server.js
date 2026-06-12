@@ -42,6 +42,7 @@ import { v2 as cloudinary } from "cloudinary";
 import chroma from "chroma-js";
 import jpeg from "jpeg-js";
 import { PNG } from "pngjs";
+import { getZoneFromLabel as getZoneFromLabelFromEngine } from "./engines/zoneMapper/index.js";
 
 dotenv.config();
 
@@ -1144,18 +1145,8 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
 }
 
 function getZoneFromLabel(label = "") {
-  const t = normalizeText(label);
-  if (/upper|shirt|top|torso/.test(t)) return "upper_garment";
-  if (/lower|pants|trouser|jean|skirt/.test(t)) return "lower_garment";
-  if (/outer|jacket|coat|blazer/.test(t)) return "outerwear";
-  if (/shoe|boot|sneaker|foot/.test(t)) return "footwear";
-  if (/eyewear|glass|sunglass/.test(t)) return "eyewear";
-  if (/bag|purse|tote|handbag/.test(t)) return "bag";
-  if (/hair/.test(t)) return "hair";
-  if (/lip/.test(t)) return "lips";
-  if (/fur|trim/.test(t)) return "fur_trim";
-  if (/logo|text|graphic|print/.test(t)) return "logo_text_detail";
-  if (/accessor|jewel|necklace|watch|ring|bracelet|earring/.test(t)) return "accessory_jewelry";
+  const mappedZone = getZoneFromLabelFromEngine(label);
+  if (mappedZone && mappedZone !== "unknown") return mappedZone;
   return "unknown";
 }
 
