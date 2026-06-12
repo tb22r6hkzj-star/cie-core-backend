@@ -51,8 +51,6 @@ import {
   normalizeModeLabel as normalizeModeLabelFromLabelMapper,
 } from "./engines/labelMapper/index.js";
 import {
-  deriveBaseArchetype as deriveBaseArchetypeFromStyleIdentity,
-  deriveModifier as deriveModifierFromStyleIdentity,
   deriveStyleIdentity as deriveStyleIdentityFromStyleIdentity,
 } from "./engines/styleIdentity/index.js";
 
@@ -240,14 +238,6 @@ function isNavyCandidate(hex) {
   return s >= 0.18 && chromaMagnitude >= 20;
 }
 
-function isVeryDarkLowChroma(hex) {
-  const safe = safeHex(hex);
-  if (!safe) return false;
-  const s = getSat(safe);
-  const l = getLight(safe);
-  const traits = getPerceptualTraits(safe);
-  return l < 0.26 && (s < 0.18 || Number(traits?.chroma_magnitude || 0) < 20);
-}
 
 function hueDistance(a, b) {
   const ha = getHue(a);
@@ -2693,13 +2683,6 @@ function scoreOutfit(scoreBreakdown) {
 /* =========================
    STYLE IDENTITY SYSTEM
 ========================= */
-function deriveBaseArchetype(bestMode) {
-  return deriveBaseArchetypeFromStyleIdentity(bestMode);
-}
-
-function deriveModifier(scoreBreakdown = {}) {
-  return deriveModifierFromStyleIdentity(scoreBreakdown);
-}
 
 function deriveStyleIdentity(bestMode, scoreBreakdown = {}) {
   const identity = deriveStyleIdentityFromStyleIdentity(bestMode, scoreBreakdown);
