@@ -2,16 +2,7 @@
 // Production label mapper engine for human-readable mode, category, and color labels.
 
 import chroma from "chroma-js";
-import { CATEGORY_ALIASES } from "../ontology/vocabulary.js";
-
-const MODE_LABELS = Object.freeze({
-  balance: "Balance",
-  contrast: "Contrast",
-  cohesion: "Cohesion",
-  natural: "Natural",
-  explore: "Explore",
-  emphasis: "Emphasis",
-});
+import { CATEGORY_ALIASES, MODE_ALIASES } from "../ontology/vocabulary.js";
 
 const CATEGORY_LABELS = Object.freeze(
   Object.entries(CATEGORY_ALIASES).reduce((labels, [category, aliases]) => {
@@ -206,7 +197,7 @@ export function buildNamedHexes(hexes) {
 
 export function normalizeModeLabel(mode) {
   const key = normalizeText(mode);
-  return MODE_LABELS[key] || "Balance";
+  return MODE_ALIASES[key] || "Balance";
 }
 
 export function normalizeCategoryLabel(value, fallback = "piece") {
