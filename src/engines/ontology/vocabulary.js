@@ -67,6 +67,16 @@ export const MODE_ALIASES = Object.freeze({
   emphasis: "Emphasis",
 });
 
+
+export const STYLE_ARCHETYPES = Object.freeze({
+  Cohesion: "Minimalist",
+  Natural: "Natural",
+  Balance: "Classic",
+  Contrast: "Statement",
+  Explore: "Creative",
+  Emphasis: "Statement",
+});
+
 export const CATEGORY_ALIASES = Object.freeze({
   jacket: Object.freeze(["jackets", "jacket", "outerwear", "coat", "bomber", "overshirt"]),
   shirt: Object.freeze([
