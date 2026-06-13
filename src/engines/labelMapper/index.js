@@ -2,6 +2,7 @@
 // Production label mapper engine for human-readable mode, category, and color labels.
 
 import chroma from "chroma-js";
+import { CATEGORY_ALIASES } from "../ontology/vocabulary.js";
 
 const MODE_LABELS = Object.freeze({
   balance: "Balance",
@@ -12,72 +13,14 @@ const MODE_LABELS = Object.freeze({
   emphasis: "Emphasis",
 });
 
-const CATEGORY_LABELS = Object.freeze({
-  jackets: "jacket",
-  jacket: "jacket",
-  outerwear: "jacket",
-  coat: "jacket",
-  bomber: "jacket",
-  overshirt: "jacket",
-
-  shirts: "shirt",
-  shirt: "shirt",
-  tee: "shirt",
-  tshirt: "shirt",
-  "t shirt": "shirt",
-  "t-shirt": "shirt",
-  top: "shirt",
-  tops: "shirt",
-  "button up": "shirt",
-  buttonup: "shirt",
-
-  sweaters: "sweater",
-  sweater: "sweater",
-  knit: "sweater",
-  cardigan: "sweater",
-  cardigans: "sweater",
-  pullover: "sweater",
-
-  hoodies: "hoodie",
-  hoodie: "hoodie",
-  sweatshirt: "hoodie",
-
-  pants: "pants",
-  pant: "pants",
-  trousers: "pants",
-  trouser: "pants",
-  jeans: "pants",
-  jean: "pants",
-  chinos: "pants",
-  chino: "pants",
-  bottoms: "pants",
-
-  shorts: "shorts",
-
-  shoes: "shoes",
-  shoe: "shoes",
-  footwear: "shoes",
-  loafers: "shoes",
-  loafer: "shoes",
-
-  boots: "boots",
-  boot: "boots",
-  sneakers: "sneakers",
-  sneaker: "sneakers",
-  trainers: "sneakers",
-  trainer: "sneakers",
-
-  accessories: "accessory",
-  accessory: "accessory",
-  bag: "accessory",
-  bags: "accessory",
-  hat: "accessory",
-  hats: "accessory",
-  belt: "accessory",
-  belts: "accessory",
-  watch: "accessory",
-  strap: "accessory",
-});
+const CATEGORY_LABELS = Object.freeze(
+  Object.entries(CATEGORY_ALIASES).reduce((labels, [category, aliases]) => {
+    for (const alias of aliases) {
+      labels[alias] = category;
+    }
+    return labels;
+  }, {})
+);
 
 function normalizeText(value = "") {
   return String(value ?? "")
