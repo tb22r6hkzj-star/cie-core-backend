@@ -58,6 +58,15 @@ export const ROLE_IDS = Object.freeze([
   "soft",
 ]);
 
+export const MODE_ALIASES = Object.freeze({
+  balance: "Balance",
+  contrast: "Contrast",
+  cohesion: "Cohesion",
+  natural: "Natural",
+  explore: "Explore",
+  emphasis: "Emphasis",
+});
+
 export const CATEGORY_ALIASES = Object.freeze({
   jacket: Object.freeze(["jackets", "jacket", "outerwear", "coat", "bomber", "overshirt"]),
   shirt: Object.freeze([
