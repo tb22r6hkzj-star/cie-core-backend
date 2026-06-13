@@ -2,6 +2,7 @@
 // Production style identity engine for deriving human-readable style identity labels.
 
 import { normalizeModeLabel } from "../labelMapper/index.js";
+import { STYLE_ARCHETYPES } from "../ontology/vocabulary.js";
 
 export const STYLE_IDENTITY_ENGINE = Object.freeze({
   name: "styleIdentity",
@@ -11,16 +12,7 @@ export const STYLE_IDENTITY_ENGINE = Object.freeze({
 export function deriveBaseArchetype(bestMode) {
   const mode = normalizeModeLabel(bestMode);
 
-  const map = {
-    Cohesion: "Minimalist",
-    Natural: "Natural",
-    Balance: "Classic",
-    Contrast: "Statement",
-    Explore: "Creative",
-    Emphasis: "Statement",
-  };
-
-  return map[mode] || "Classic";
+  return STYLE_ARCHETYPES[mode] || "Classic";
 }
 
 export function deriveModifier(scoreBreakdown = {}) {
