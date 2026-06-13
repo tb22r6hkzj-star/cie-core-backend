@@ -19,6 +19,21 @@ export const CATEGORY_SUBTYPES = Object.freeze({
   piece: Object.freeze(["fashion piece", "style piece"]),
 });
 
+
+export const CATEGORY_SEARCH_KEYWORDS = Object.freeze({
+  jacket: Object.freeze(["jacket", "overshirt", "bomber jacket", "coat"]),
+  shirt: Object.freeze(["shirt", "tee", "button up", "top"]),
+  sweater: Object.freeze(["sweater", "knit sweater", "cardigan", "pullover"]),
+  hoodie: Object.freeze(["hoodie", "zip hoodie", "sweatshirt", "pullover hoodie"]),
+  pants: Object.freeze(["pants", "trousers", "jeans", "chinos"]),
+  shorts: Object.freeze(["shorts", "tailored shorts"]),
+  shoes: Object.freeze(["shoes", "sneakers", "loafers", "footwear"]),
+  boots: Object.freeze(["boots", "chelsea boots", "leather boots"]),
+  sneakers: Object.freeze(["sneakers", "trainers", "low top sneakers"]),
+  accessory: Object.freeze(["crossbody bag", "shoulder bag", "belt", "cap", "watch strap"]),
+  piece: Object.freeze(["fashion piece"]),
+});
+
 export const CATEGORY_COMPATIBILITY = Object.freeze({
   jacket: Object.freeze(["coat", "blazer", "overshirt"]),
   shirt: Object.freeze(["tee", "polo", "henley"]),
