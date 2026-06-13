@@ -54,6 +54,7 @@ import {
   deriveStyleIdentity as deriveStyleIdentityFromStyleIdentity,
 } from "./engines/styleIdentity/index.js";
 import {
+  CATEGORY_COMPATIBILITY,
   CATEGORY_SEARCH_KEYWORDS,
   CATEGORY_SUBTYPES,
 } from "./engines/ontology/garmentTaxonomy.js";
@@ -3105,10 +3106,10 @@ function computeCategoryFitForProduct(product, retrievalIntent) {
 
   if (target === category) return 96;
   if (title.includes(target)) return 88;
-  if (target === "jacket" && ["coat", "outerwear", "overshirt"].includes(category)) return 85;
-  if (target === "shirt" && ["top", "tee"].includes(category)) return 85;
-  if (target === "pants" && ["jeans", "trousers"].includes(category)) return 86;
-  if (target === "shoes" && ["boots", "sneakers", "footwear", "loafers"].includes(category)) return 84;
+  if (target === "jacket" && CATEGORY_COMPATIBILITY.jacket?.includes(category)) return 85;
+  if (target === "shirt" && CATEGORY_COMPATIBILITY.shirt?.includes(category)) return 85;
+  if (target === "pants" && CATEGORY_COMPATIBILITY.pants?.includes(category)) return 86;
+  if (target === "shoes" && CATEGORY_COMPATIBILITY.shoes?.includes(category)) return 84;
   if (target === "accessory" && ["bag", "cap", "belt", "watch"].some((x) => title.includes(x))) return 84;
   return 58;
 }
