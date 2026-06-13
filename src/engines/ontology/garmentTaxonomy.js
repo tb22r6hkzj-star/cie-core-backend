@@ -35,9 +35,10 @@ export const CATEGORY_SEARCH_KEYWORDS = Object.freeze({
 });
 
 export const CATEGORY_COMPATIBILITY = Object.freeze({
-  jacket: Object.freeze(["coat", "blazer", "overshirt"]),
-  shirt: Object.freeze(["tee", "polo", "henley"]),
-  pants: Object.freeze(["jeans", "chinos", "trousers"]),
+  jacket: Object.freeze(["coat", "outerwear", "overshirt"]),
+  shirt: Object.freeze(["top", "tee"]),
+  pants: Object.freeze(["jeans", "trousers"]),
+  shoes: Object.freeze(["boots", "sneakers", "footwear", "loafers"]),
 });
 
 export const CATEGORY_TO_ZONE = Object.freeze({
