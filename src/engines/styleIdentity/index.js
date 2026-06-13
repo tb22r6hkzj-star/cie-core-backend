@@ -16,6 +16,8 @@ export function deriveBaseArchetype(bestMode) {
 }
 
 export function deriveModifier(scoreBreakdown = {}) {
+  if (!scoreBreakdown || Object.keys(scoreBreakdown).length === 0) return "Modern";
+
   const harmony = Number(scoreBreakdown.harmony || 0);
   const applicability = Number(scoreBreakdown.applicability || 0);
   const versatility = Number(scoreBreakdown.versatility || 0);
