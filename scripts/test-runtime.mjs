@@ -5,6 +5,7 @@ const tests = [
   'scripts/test-label-mapper.mjs',
   'scripts/test-style-identity.mjs',
   'scripts/test-score-engine.mjs',
+  'scripts/test-dino-mappings.mjs',
 ];
 
 for (const test of tests) {
