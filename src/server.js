@@ -53,6 +53,7 @@ import {
 import {
   deriveStyleIdentity as deriveStyleIdentityFromStyleIdentity,
 } from "./engines/styleIdentity/index.js";
+import { CATEGORY_SUBTYPES } from "./engines/ontology/garmentTaxonomy.js";
 
 let scoreEngine = null;
 try {
@@ -1829,20 +1830,6 @@ function buildAmazonSearchLink(query) {
 /* =========================
    CATEGORY / CONTEXT LOCK
 ========================= */
-const CATEGORY_SUBTYPE_MAP = {
-  jacket: ["jacket", "bomber jacket", "overshirt", "coat"],
-  shirt: ["shirt", "tee", "button up", "top"],
-  sweater: ["sweater", "knit sweater", "cardigan", "pullover"],
-  hoodie: ["hoodie", "zip hoodie", "sweatshirt", "pullover hoodie"],
-  pants: ["pants", "trousers", "jeans", "chinos"],
-  shorts: ["shorts", "tailored shorts"],
-  shoes: ["shoes", "sneakers", "loafers", "footwear"],
-  boots: ["boots", "chelsea boots", "leather boots"],
-  sneakers: ["sneakers", "trainers", "low top sneakers"],
-  accessory: ["crossbody bag", "shoulder bag", "belt", "cap", "watch strap"],
-  piece: ["fashion piece", "style piece"],
-};
-
 const CATEGORY_CONTEXT_ANCHORS = {
   jacket: ["fashion", "outfit", "mens"],
   shirt: ["fashion", "outfit", "mens"],
@@ -1863,7 +1850,7 @@ const AMBIGUOUS_COLOR_NEGATIVES = {
 
 function resolveCategorySubtypes(category) {
   const normalized = normalizeCategoryLabel(category, "piece");
-  return CATEGORY_SUBTYPE_MAP[normalized] || [normalized];
+  return CATEGORY_SUBTYPES[normalized] || [normalized];
 }
 
 function getCategorySubtypeForIndex(category, idx = 0) {

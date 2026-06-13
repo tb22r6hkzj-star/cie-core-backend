@@ -6,11 +6,17 @@
 // scoring, retrieval, API, or image logic.
 
 export const CATEGORY_SUBTYPES = Object.freeze({
-  jacket: Object.freeze(["jacket", "bomber jacket", "coat", "overshirt", "blazer"]),
-  shirt: Object.freeze(["shirt", "tee", "polo", "henley", "button down"]),
-  pants: Object.freeze(["pants", "jeans", "chinos", "trousers"]),
-  shoes: Object.freeze(["shoes", "sneakers", "loafers"]),
-  accessory: Object.freeze(["watch", "belt", "bag", "hat"]),
+  jacket: Object.freeze(["jacket", "bomber jacket", "overshirt", "coat"]),
+  shirt: Object.freeze(["shirt", "tee", "button up", "top"]),
+  sweater: Object.freeze(["sweater", "knit sweater", "cardigan", "pullover"]),
+  hoodie: Object.freeze(["hoodie", "zip hoodie", "sweatshirt", "pullover hoodie"]),
+  pants: Object.freeze(["pants", "trousers", "jeans", "chinos"]),
+  shorts: Object.freeze(["shorts", "tailored shorts"]),
+  shoes: Object.freeze(["shoes", "sneakers", "loafers", "footwear"]),
+  boots: Object.freeze(["boots", "chelsea boots", "leather boots"]),
+  sneakers: Object.freeze(["sneakers", "trainers", "low top sneakers"]),
+  accessory: Object.freeze(["crossbody bag", "shoulder bag", "belt", "cap", "watch strap"]),
+  piece: Object.freeze(["fashion piece", "style piece"]),
 });
 
 export const CATEGORY_COMPATIBILITY = Object.freeze({
