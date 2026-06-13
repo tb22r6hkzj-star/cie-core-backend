@@ -53,7 +53,10 @@ import {
 import {
   deriveStyleIdentity as deriveStyleIdentityFromStyleIdentity,
 } from "./engines/styleIdentity/index.js";
-import { CATEGORY_SUBTYPES } from "./engines/ontology/garmentTaxonomy.js";
+import {
+  CATEGORY_SEARCH_KEYWORDS,
+  CATEGORY_SUBTYPES,
+} from "./engines/ontology/garmentTaxonomy.js";
 
 let scoreEngine = null;
 try {
@@ -2912,24 +2915,10 @@ function buildSearchTermsFromIntent(retrievalIntent) {
   const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
   const mode = normalizeModeLabel(retrievalIntent?.selected_mode);
 
-  const categoryKeywordsMap = {
-    jacket: ["jacket", "overshirt", "bomber jacket", "coat"],
-    shirt: ["shirt", "tee", "button up", "top"],
-    sweater: ["sweater", "knit sweater", "cardigan", "pullover"],
-    hoodie: ["hoodie", "zip hoodie", "sweatshirt", "pullover hoodie"],
-    pants: ["pants", "trousers", "jeans", "chinos"],
-    shorts: ["shorts", "tailored shorts"],
-    shoes: ["shoes", "sneakers", "loafers", "footwear"],
-    boots: ["boots", "chelsea boots", "leather boots"],
-    sneakers: ["sneakers", "trainers", "low top sneakers"],
-    accessory: ["crossbody bag", "shoulder bag", "belt", "cap", "watch strap"],
-    piece: ["fashion piece"],
-  };
-
   const colorKeywords = dedupeKeywords(palettePriority.flatMap((entry) => getRetailColorKeywords(entry?.hex)));
 
   return {
-    primary_keywords: categoryKeywordsMap[category] || categoryKeywordsMap.piece,
+    primary_keywords: CATEGORY_SEARCH_KEYWORDS[category] || CATEGORY_SEARCH_KEYWORDS.piece,
     color_keywords: colorKeywords,
     style_keywords: getStyleKeywordsForMode(mode),
     negative_keywords: getNegativeKeywordsForMode(mode),
