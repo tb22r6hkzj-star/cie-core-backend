@@ -6,6 +6,7 @@ const tests = [
   'scripts/test-style-identity.mjs',
   'scripts/test-score-engine.mjs',
   'scripts/test-dino-mappings.mjs',
+  'scripts/test-occasion-ontology.mjs',
 ];
 
 for (const test of tests) {
