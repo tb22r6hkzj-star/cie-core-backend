@@ -3155,6 +3155,18 @@ function computeCategoryFitForProduct(product, retrievalIntent) {
   if (target === "pants" && CATEGORY_COMPATIBILITY.pants?.includes(category)) return 86;
   if (target === "shoes" && CATEGORY_COMPATIBILITY.shoes?.includes(category)) return 84;
   if (target === "accessory" && ["bag", "cap", "belt", "watch"].some((x) => title.includes(x))) return 84;
+
+  const occasion = normalizeText(retrievalIntent?.occasion).replace(/[\s-]+/g, "_");
+  const occasionDefaultTarget = normalizeCategoryLabel(OCCASION_CATEGORIES[occasion]?.[0], "piece");
+  const allowsOccasionCategoryBoost =
+    OCCASION_IDS.includes(occasion) && target === occasionDefaultTarget;
+  if (
+    allowsOccasionCategoryBoost &&
+    OCCASION_CATEGORIES[occasion]?.some((occasionCategory) => normalizeCategoryLabel(occasionCategory, "piece") === category)
+  ) {
+    return 84;
+  }
+
   return 58;
 }
 
