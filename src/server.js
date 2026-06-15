@@ -2897,6 +2897,23 @@ function getStyleKeywordsForMode(mode) {
   return map[selectedMode] || [];
 }
 
+const OCCASION_SEARCH_KEYWORDS = Object.freeze({
+  formal: Object.freeze(["formal", "tailored", "dress"]),
+  business: Object.freeze(["business", "professional", "business casual"]),
+  business_casual: Object.freeze(["business casual", "professional"]),
+  streetwear: Object.freeze(["streetwear", "urban"]),
+  athleisure: Object.freeze(["athleisure", "activewear"]),
+  evening: Object.freeze(["evening", "night out"]),
+  casual: Object.freeze(["casual", "everyday"]),
+  smart_casual: Object.freeze(["smart casual"]),
+});
+
+function getOccasionSearchKeywords(occasion) {
+  const normalizedOccasion = normalizeText(occasion).replace(/[\s-]+/g, "_");
+  if (!OCCASION_IDS.includes(normalizedOccasion)) return [];
+  return OCCASION_SEARCH_KEYWORDS[normalizedOccasion] || [];
+}
+
 function getRolePriorityForModeAndTarget(mode, targetItem) {
   const selectedMode = normalizeModeLabel(mode);
   const categoryBias = familyBiasForCategory(targetItem);
@@ -2926,7 +2943,10 @@ function buildSearchTermsFromIntent(retrievalIntent) {
   return {
     primary_keywords: CATEGORY_SEARCH_KEYWORDS[category] || CATEGORY_SEARCH_KEYWORDS.piece,
     color_keywords: colorKeywords,
-    style_keywords: getStyleKeywordsForMode(mode),
+    style_keywords: dedupeKeywords([
+      ...getStyleKeywordsForMode(mode),
+      ...getOccasionSearchKeywords(retrievalIntent?.occasion),
+    ]),
     negative_keywords: getNegativeKeywordsForMode(mode),
   };
 }
@@ -3000,6 +3020,14 @@ function buildRetrievalIntent(outfitAnalysis, opts = {}) {
       min_color_fit_score: matchStrictness === "strict" ? 78 : matchStrictness === "loose" ? 52 : 64,
     },
   };
+
+  if (occasion) {
+    Object.defineProperty(intent, "occasion", {
+      value: occasion,
+      enumerable: false,
+      configurable: true,
+    });
+  }
 
   intent.search_terms = buildSearchTermsFromIntent(intent);
   return intent;
