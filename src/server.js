@@ -58,6 +58,11 @@ import {
   CATEGORY_SEARCH_KEYWORDS,
   CATEGORY_SUBTYPES,
 } from "./engines/ontology/garmentTaxonomy.js";
+import {
+  OCCASION_IDS,
+  OCCASION_CATEGORIES,
+  OCCASION_MODES,
+} from "./engines/ontology/occasionOntology.js";
 
 let scoreEngine = null;
 try {
@@ -2927,9 +2932,20 @@ function buildSearchTermsFromIntent(retrievalIntent) {
 }
 
 function buildRetrievalIntent(outfitAnalysis, opts = {}) {
-  const selectedMode = normalizeModeLabel(opts.selectedMode || outfitAnalysis?.best_mode || "Balance");
+  const normalizedOccasion = normalizeText(opts.occasion).replace(/[\s-]+/g, "_");
+  const occasion = OCCASION_IDS.includes(normalizedOccasion) ? normalizedOccasion : "";
+  const occasionTargetDefault = OCCASION_CATEGORIES[occasion]?.[0];
+  const occasionModeDefault = OCCASION_MODES[occasion]?.[0];
+  const hasExplicitSelectedMode = normalizeText(opts.selectedMode) !== "";
+  const rawTargetItem = normalizeText(opts.targetItem);
+  const selectedMode = normalizeModeLabel(
+    hasExplicitSelectedMode ? opts.selectedMode : occasionModeDefault || outfitAnalysis?.best_mode || "Balance"
+  );
   const sourceItem = normalizeCategoryLabel(opts.sourceItem || "piece", "piece");
-  const targetItem = normalizeCategoryLabel(opts.targetItem || "piece", "piece");
+  const targetItem = normalizeCategoryLabel(
+    !rawTargetItem || rawTargetItem === "piece" ? occasionTargetDefault || "piece" : opts.targetItem,
+    "piece"
+  );
   const industry = normalizeText(opts.industry || "fashion") || "fashion";
   const matchStrictness = normalizeText(opts.matchStrictness || "medium") || "medium";
   const resultCount = Number.isFinite(Number(opts.resultCount))
@@ -4315,6 +4331,7 @@ app.post("/api/recommendations", async (req, res) => {
       matchStrictness,
       resultCount,
       inventory,
+      occasion,
       usePreviewInventory = true,
     } = req.body || {};
 
@@ -4370,12 +4387,13 @@ app.post("/api/recommendations", async (req, res) => {
 
     if (targetItem) {
       retrievalIntent = buildRetrievalIntent(outfitAnalysis, {
-        selectedMode: normalizeModeLabel(mode || outfitAnalysis.best_mode),
+        selectedMode: mode,
         sourceItem: sourceItem || itemType || "piece",
         targetItem,
         industry: industry || "fashion",
         matchStrictness: matchStrictness || "medium",
         resultCount: resultCount || 24,
+        occasion,
       });
 
       const inputInventory =
@@ -4429,6 +4447,7 @@ app.post("/api/retrieval/preview", async (req, res) => {
       matchStrictness,
       resultCount,
       inventory,
+      occasion,
       usePreviewInventory = true,
     } = req.body || {};
 
@@ -4467,12 +4486,13 @@ app.post("/api/retrieval/preview", async (req, res) => {
     }
 
     const retrievalIntent = buildRetrievalIntent(outfitAnalysis, {
-      selectedMode: selectedMode || outfitAnalysis?.best_mode,
+      selectedMode,
       sourceItem: sourceItem || "piece",
-      targetItem: targetItem || "piece",
+      targetItem,
       industry: industry || "fashion",
       matchStrictness: matchStrictness || "medium",
       resultCount: resultCount || 24,
+      occasion,
     });
 
     const inputInventory =
