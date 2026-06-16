@@ -3475,6 +3475,11 @@ const DEFAULT_REPLICATE_SAM_VERSION =
   process.env.REPLICATE_SAM_VERSION ||
   "b88dc2ea8f814e5f4af2bac79f2414079800b5035b065d4eab99c857ab67e125";
 const DEFAULT_REPLICATE_SAM_MODEL = process.env.REPLICATE_SAM_MODEL || "meta/sam-2";
+const DEFAULT_REPLICATE_GROUNDING_DINO_VERSION =
+  process.env.REPLICATE_GROUNDING_DINO_VERSION ||
+  "efd10a8ddc57ea28773327e881ce95e20cc1d734c589f7dd01d2036921ed78aa";
+const DEFAULT_GROUNDING_DINO_QUERY =
+  process.env.GROUNDING_DINO_QUERY || "person. clothing. shoes. bag. hat. glasses. accessory.";
 
 function getSamPredictionsUrl(modelId = DEFAULT_REPLICATE_SAM_MODEL) {
   const configured = String(process.env.REPLICATE_SAM_MODEL_PREDICTIONS_URL || "").trim();
@@ -3557,6 +3562,84 @@ function randomPollRetryDelayMs() {
   const min = REPLICATE_SAM_POLL_RETRY_DELAY_MIN_MS;
   const max = REPLICATE_SAM_POLL_RETRY_DELAY_MAX_MS;
   return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function normalizeGroundingDinoBbox(rawBbox) {
+  let values = null;
+  if (Array.isArray(rawBbox)) {
+    values = rawBbox.slice(0, 4).map(Number);
+  } else if (rawBbox && typeof rawBbox === "object") {
+    const x1 = rawBbox.x_min ?? rawBbox.xmin ?? rawBbox.left ?? rawBbox.x1 ?? rawBbox.x;
+    const y1 = rawBbox.y_min ?? rawBbox.ymin ?? rawBbox.top ?? rawBbox.y1 ?? rawBbox.y;
+    const x2 = rawBbox.x_max ?? rawBbox.xmax ?? rawBbox.right ?? rawBbox.x2;
+    const y2 = rawBbox.y_max ?? rawBbox.ymax ?? rawBbox.bottom ?? rawBbox.y2;
+    const w = rawBbox.width ?? rawBbox.w;
+    const h = rawBbox.height ?? rawBbox.h;
+    values = [Number(x1), Number(y1), Number(x2 ?? Number(x1) + Number(w)), Number(y2 ?? Number(y1) + Number(h))];
+  }
+
+  if (!values || values.some((value) => !Number.isFinite(value))) return null;
+  let [x1, y1, x2, y2] = values;
+  if (x2 < x1) [x1, x2] = [x2, x1];
+  if (y2 < y1) [y1, y2] = [y2, y1];
+
+  return {
+    x_min: round2(x1),
+    y_min: round2(y1),
+    x_max: round2(x2),
+    y_max: round2(y2),
+    width: round2(Math.max(0, x2 - x1)),
+    height: round2(Math.max(0, y2 - y1)),
+  };
+}
+
+function parseGroundingDinoOutputToDetections(output) {
+  if (!output) return [];
+
+  const boxes = Array.isArray(output?.boxes) ? output.boxes : [];
+  const labels = Array.isArray(output?.labels)
+    ? output.labels
+    : Array.isArray(output?.phrases)
+      ? output.phrases
+      : Array.isArray(output?.detected_labels)
+        ? output.detected_labels
+        : [];
+  const scores = Array.isArray(output?.scores)
+    ? output.scores
+    : Array.isArray(output?.logits)
+      ? output.logits
+      : Array.isArray(output?.confidences)
+        ? output.confidences
+        : [];
+
+  const rows = Array.isArray(output)
+    ? output
+    : Array.isArray(output?.detections)
+      ? output.detections
+      : Array.isArray(output?.predictions)
+        ? output.predictions
+        : boxes.map((box, idx) => ({
+            bbox: box,
+            label: labels[idx],
+            confidence: scores[idx],
+          }));
+
+  return rows
+    .map((row, idx) => {
+      const label = String(row?.label || row?.class || row?.name || row?.phrase || row?.text || labels[idx] || "object")
+        .trim()
+        .toLowerCase();
+      const confidenceValue = row?.confidence ?? row?.score ?? row?.logit ?? row?.probability ?? scores[idx] ?? 0;
+      const confidence = clamp01(Number(confidenceValue));
+      const bbox = normalizeGroundingDinoBbox(row?.bbox || row?.box || row?.bounding_box || row?.bounds || boxes[idx]);
+
+      return {
+        label: label || "object",
+        confidence: round2(confidence),
+        bbox,
+      };
+    })
+    .filter((detection) => !!detection.bbox && detection.bbox.width > 0 && detection.bbox.height > 0);
 }
 
 function parseSamOutputToRegions(output) {
@@ -3987,6 +4070,140 @@ async function enrichSamRegionsWithMaskedColors(imageUrl, regions = []) {
   );
 }
 
+async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DINO_QUERY) {
+  const token = process.env.REPLICATE_API_TOKEN;
+  if (!token) {
+    console.warn("[GDINO DEBUG] Missing REPLICATE_API_TOKEN: skipping Grounding DINO detection");
+    return {
+      enabled: false,
+      ok: false,
+      detections: [],
+    };
+  }
+
+  try {
+    const groundingDinoVersion = process.env.REPLICATE_GROUNDING_DINO_VERSION || DEFAULT_REPLICATE_GROUNDING_DINO_VERSION;
+    const createUrl = "https://api.replicate.com/v1/predictions";
+    console.info("[GDINO DEBUG] Starting Grounding DINO detection request", {
+      imageUrl,
+      query,
+      version: groundingDinoVersion,
+      createUrl,
+    });
+
+    let createResp;
+    try {
+      createResp = await replicateRequest(createUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          version: groundingDinoVersion,
+          input: {
+            image: imageUrl,
+            query,
+          },
+        }),
+      });
+    } catch (error) {
+      console.error("[GDINO DEBUG] Grounding DINO create request failed", {
+        failure_stage: "create",
+        message: error?.message || String(error),
+      });
+      throw error;
+    }
+
+    console.info("[GDINO DEBUG] Grounding DINO create response received", {
+      predictionId: createResp?.id || null,
+      status: createResp?.status || "unknown",
+    });
+
+    const statusUrl = createResp?.urls?.get;
+    if (!statusUrl) {
+      console.error("[GDINO DEBUG] Grounding DINO create response missing poll URL", {
+        predictionId: createResp?.id || null,
+      });
+      return { enabled: true, ok: false, detections: [] };
+    }
+
+    const startedAt = Date.now();
+    let prediction = createResp;
+
+    while (Date.now() - startedAt < REPLICATE_SAM_TIMEOUT_MS) {
+      if (["succeeded", "failed", "canceled"].includes(prediction?.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, REPLICATE_SAM_POLL_MS));
+      let retryAttempt = 0;
+      let pollError = null;
+      while (retryAttempt < REPLICATE_SAM_POLL_RETRY_MAX) {
+        try {
+          prediction = await replicateRequest(statusUrl, {
+            method: "GET",
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          pollError = null;
+          break;
+        } catch (error) {
+          pollError = error;
+          const transient = isTransientPollingError(error);
+          retryAttempt += 1;
+          console.warn("[GDINO DEBUG] Grounding DINO poll request retry evaluation", {
+            failure_stage: "poll",
+            poll_retry_attempt: retryAttempt,
+            poll_retry_reason: error?.message || String(error),
+            retryable: transient,
+            retries_remaining: Math.max(REPLICATE_SAM_POLL_RETRY_MAX - retryAttempt, 0),
+          });
+          if (!transient || retryAttempt >= REPLICATE_SAM_POLL_RETRY_MAX) break;
+          await new Promise((resolve) => setTimeout(resolve, randomPollRetryDelayMs()));
+        }
+      }
+      if (pollError) throw pollError;
+      console.info("[GDINO DEBUG] Grounding DINO prediction poll", {
+        id: prediction?.id || createResp?.id || null,
+        status: prediction?.status || "unknown",
+      });
+    }
+
+    if (prediction?.status !== "succeeded") {
+      console.error("[GDINO DEBUG] Grounding DINO detection did not succeed", {
+        predictionId: prediction?.id || createResp?.id || null,
+        status: prediction?.status || "unknown",
+        error: prediction?.error || null,
+        elapsedMs: Date.now() - startedAt,
+      });
+      return { enabled: true, ok: false, detections: [] };
+    }
+
+    console.info("[GDINO DEBUG] RAW Grounding DINO OUTPUT", {
+      outputPreview: JSON.stringify(prediction?.output)?.slice(0, 1000),
+    });
+    const detections = parseGroundingDinoOutputToDetections(prediction?.output);
+    console.info("[GDINO DEBUG] Grounding DINO detection succeeded", {
+      detectionCount: detections.length,
+      predictionId: prediction?.id || null,
+      elapsedMs: Date.now() - startedAt,
+    });
+
+    return {
+      enabled: true,
+      ok: detections.length > 0,
+      detections,
+    };
+  } catch (error) {
+    console.error("[GDINO DEBUG] Grounding DINO request error", {
+      failure_stage: "outer",
+      message: error?.message || String(error),
+    });
+    return {
+      enabled: true,
+      ok: false,
+      detections: [],
+    };
+  }
+}
+
 async function runSamSegmentation(imageUrl) {
   const token = process.env.REPLICATE_API_TOKEN;
   if (!token) {
@@ -4251,6 +4468,13 @@ async function analyzeGhostColors(ghostUrl) {
       };
     })
     .filter((x) => !!x.hex);
+
+  const groundingDino = await runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_QUERY);
+  console.info("[GDINO DEBUG] Temporary detection validation", {
+    enabled: !!groundingDino?.enabled,
+    ok: !!groundingDino?.ok,
+    detectionCount: Array.isArray(groundingDino?.detections) ? groundingDino.detections.length : 0,
+  });
 
   const sam = await runSamSegmentation(ghostUrl);
 
