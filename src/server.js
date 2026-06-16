@@ -3558,6 +3558,19 @@ function isTransientPollingError(error) {
   );
 }
 
+function isReplicateThrottleError(errorOrReason) {
+  const message = String(errorOrReason?.message || errorOrReason || "").toLowerCase();
+  if (!message) return false;
+  return (
+    message.includes("rate limit") ||
+    message.includes("rate-limit") ||
+    message.includes("ratelimit") ||
+    message.includes("too many requests") ||
+    message.includes("thrott") ||
+    message.includes("429")
+  );
+}
+
 function randomPollRetryDelayMs() {
   const min = REPLICATE_SAM_POLL_RETRY_DELAY_MIN_MS;
   const max = REPLICATE_SAM_POLL_RETRY_DELAY_MAX_MS;
@@ -4200,6 +4213,7 @@ async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DIN
       enabled: true,
       ok: false,
       detections: [],
+      reason: error?.message || "grounding_dino_request_error",
     };
   }
 }
@@ -4470,25 +4484,42 @@ async function analyzeGhostColors(ghostUrl) {
     .filter((x) => !!x.hex);
 
   const groundingDino = await runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_QUERY);
+  const dinoDetections = Array.isArray(groundingDino?.detections) ? groundingDino.detections : [];
   console.info("[GDINO DEBUG] Temporary detection validation", {
     enabled: !!groundingDino?.enabled,
     ok: !!groundingDino?.ok,
-    detectionCount: Array.isArray(groundingDino?.detections) ? groundingDino.detections.length : 0,
+    detectionCount: dinoDetections.length,
   });
 
   const sam = await runSamSegmentation(ghostUrl);
+  const samRegions = Array.isArray(sam?.regions) ? sam.regions : [];
+  const samOk = !!sam?.ok && samRegions.length > 0;
+  const dinoOk = !!groundingDino?.ok && dinoDetections.length > 0;
+  const detectionSegmentationOk = samOk || dinoOk;
+  const segmentationProvider = samOk ? "sam" : null;
+  const detectionProvider = dinoOk ? "grounding_dino" : null;
 
   return {
     dominantHex,
     dominantName: getColorName(dominantHex),
     topColors,
-    segmentedRegions: sam?.ok ? sam.regions : [],
+    segmentedRegions: samOk ? samRegions : [],
     pipeline: {
       sam_enabled: !!sam?.enabled,
-      sam_ok: !!sam?.ok,
+      sam_ok: samOk,
       sam_reason: sam?.reason || null,
       sam_version: process.env.REPLICATE_SAM_MODEL || DEFAULT_REPLICATE_SAM_MODEL,
-      fallback_mode: !sam?.ok,
+      sam_throttled: isReplicateThrottleError(sam?.reason),
+      dino_enabled: !!groundingDino?.enabled,
+      dino_ok: dinoOk,
+      dino_reason: groundingDino?.reason || null,
+      dino_detection_count: dinoDetections.length,
+      dino_query: DEFAULT_GROUNDING_DINO_QUERY,
+      detection_segmentation_ok: detectionSegmentationOk,
+      detection_provider: detectionProvider,
+      segmentation_provider: segmentationProvider,
+      mask_provider: segmentationProvider,
+      fallback_mode: !samOk,
     },
   };
 }
@@ -4530,17 +4561,16 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       return sendStepError(res, 500, "analyze_cloudinary_colors", error);
     }
     const segmentedRegions = Array.isArray(analysis?.segmentedRegions) ? analysis.segmentedRegions : [];
-    if (!analysis?.pipeline?.sam_ok || !segmentedRegions.length) {
+    if (!analysis?.pipeline?.detection_segmentation_ok || !segmentedRegions.length) {
       const samReason = analysis?.pipeline?.sam_reason || "sam_failed";
-      console.error("[SAM DEBUG] Failing /api/images/transform due to SAM failure", {
+      console.warn("[SAM DEBUG] Continuing /api/images/transform without SAM segmented regions", {
         reason: samReason,
         sam_enabled: !!analysis?.pipeline?.sam_enabled,
+        sam_ok: !!analysis?.pipeline?.sam_ok,
+        sam_throttled: !!analysis?.pipeline?.sam_throttled,
+        dino_ok: !!analysis?.pipeline?.dino_ok,
+        dino_detection_count: Number(analysis?.pipeline?.dino_detection_count || 0),
         regionCount: segmentedRegions.length,
-      });
-      return res.status(502).json({
-        success: false,
-        step: "sam_segmentation",
-        error: `SAM segmentation failed: ${samReason}`,
       });
     }
 
