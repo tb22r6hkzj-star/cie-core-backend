@@ -1300,6 +1300,42 @@ function dedupeDarkNeutralZoneReuse(zones = {}) {
   return { zones: deduped, removals };
 }
 
+const GARMENT_ZONE_OUTPUT_WHITELIST = new Set([
+  "upper",
+  "upper_garment",
+  "lower",
+  "lower_garment",
+  "body_garment",
+  "one_piece",
+  "outerwear",
+  "footwear",
+  "bag",
+  "accessory",
+  "accessories",
+  "accessory_jewelry",
+  "eyewear",
+  "logo_text_detail",
+  "fur_trim",
+]);
+
+function filterGarmentZoneOutput(zones = {}) {
+  const filteredZones = {};
+  const removedNonGarmentZones = [];
+
+  for (const [zoneKey, zoneData] of Object.entries(zones || {})) {
+    if (GARMENT_ZONE_OUTPUT_WHITELIST.has(zoneKey)) {
+      filteredZones[zoneKey] = zoneData;
+      continue;
+    }
+    removedNonGarmentZones.push(zoneKey);
+  }
+
+  return {
+    zones: filteredZones,
+    removed_non_garment_zones: removedNonGarmentZones,
+  };
+}
+
 function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelligence = {}, segmentedRegions = []) {
   const roleByName = Object.fromEntries((colorRoles || []).map((r) => [r.role, r]));
   const dominant = visualIntelligence?.dominant_body_color || roleByName.anchor || normalizedColors[0] || null;
@@ -1576,7 +1612,8 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
   }
 
   const dedupeResult = dedupeDarkNeutralZoneReuse(zones);
-  const finalZones = dedupeResult.zones;
+  const garmentZoneFilterResult = filterGarmentZoneOutput(dedupeResult.zones);
+  const finalZones = garmentZoneFilterResult.zones;
   const denimSummary = {
     lower_zone_interpretation: finalZones?.lower_garment?.interpretation || "unknown",
     lower_zone_confidence: Number(finalZones?.lower_garment?.confidence || 0),
@@ -1593,6 +1630,9 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
   }
   console.info("[INTERPRET DEBUG] one_piece decision summary", onePieceDecision);
   console.info("[INTERPRET DEBUG] denim decision summary", denimSummary);
+  if (garmentZoneFilterResult.removed_non_garment_zones.length) {
+    console.info("[INTERPRET DEBUG] removed non-garment zones", garmentZoneFilterResult.removed_non_garment_zones);
+  }
   console.info(
     "[INTERPRET DEBUG] final selected zones with confidence",
     Object.fromEntries(Object.entries(finalZones).map(([k, v]) => [k, Number(v?.confidence || v?.score || 0)]))
@@ -1604,6 +1644,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     zones: finalZones,
     region_color_analysis: regionColorAnalysis,
     generic_mask_debug: genericMaskDebug,
+    removed_non_garment_zones: garmentZoneFilterResult.removed_non_garment_zones,
   };
 }
 
