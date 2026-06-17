@@ -1444,7 +1444,12 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       .filter((c) => !!c.hex);
     const evidence = getZoneRegionEvidence(zoneRegions);
 
-    const hasSamRegion = zoneRegions.length > 0;
+    const hasColorRegionEvidence = zoneRegions.some((region) => {
+      const sourceType = region?.source_type;
+      const isDinoRegion = sourceType === "grounding_dino" || sourceType === "dino_detection";
+      const explicitRegionColors = Array.isArray(region?.region_colors) ? region.region_colors : [];
+      return !isDinoRegion && explicitRegionColors.length > 0;
+    });
     const regionClusters = buildColorClusters(regionColors);
     const consensusCluster = regionClusters[0] || null;
     const chosenColor = consensusCluster?.base
@@ -1474,7 +1479,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       zoneData,
       normalizedColors,
       regionColors,
-      hasSamRegion,
+      hasColorRegionEvidence,
       { dominantDarkBodyHex }
     );
     if (["eyewear", "outerwear", "fur_trim"].includes(zoneKey)) {
@@ -1524,7 +1529,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     });
     zoneCandidateSummary.push({
       zone: zoneKey,
-      has_sam_region: hasSamRegion,
+      has_sam_region: hasColorRegionEvidence,
       promote_fallback: promoteFallback,
       score: computedScore,
       selected_hex: zoneData?.hex || null,
@@ -1540,7 +1545,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       color: { hex: zoneRead?.dominant_color?.hex, pct: zoneRead?.dominant_color?.pct },
       zone: zoneKey,
       role: "dominant",
-      sourceType: hasSamRegion ? "sam_segment" : "global_palette",
+      sourceType: hasColorRegionEvidence ? "sam_segment" : "global_palette",
       segmentLabel: zoneRegions[0]?.segment_label || zoneKey,
       confidence: zoneRead?.confidence || zoneData?.score || 0,
     });
@@ -1552,7 +1557,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         color: support,
         zone: zoneKey,
         role: "support",
-        sourceType: hasSamRegion ? "sam_segment" : "global_palette",
+        sourceType: hasColorRegionEvidence ? "sam_segment" : "global_palette",
         segmentLabel: zoneRegions[0]?.segment_label || zoneKey,
         confidence: Math.max(40, (zoneRead?.confidence || 0) - 12),
       });
@@ -1564,7 +1569,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         color: accentColor,
         zone: zoneKey,
         role: "accent",
-        sourceType: hasSamRegion ? "sam_segment" : "global_palette",
+        sourceType: hasColorRegionEvidence ? "sam_segment" : "global_palette",
         segmentLabel: zoneRegions[0]?.segment_label || zoneKey,
         confidence: Math.max(35, (zoneRead?.confidence || 0) - 16),
       });
