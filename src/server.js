@@ -3739,6 +3739,7 @@ function buildDinoSegmentedRegions(detections = []) {
         dominant_hex: null,
         region_colors: [],
         mask_geometry: bbox ? { bbox, coverage: bboxArea } : null,
+        color_debug: null,
       };
     })
     .filter(Boolean);
@@ -4879,6 +4880,7 @@ async function analyzeGhostColors(ghostUrl) {
     dino_color_enrichment_ok: dinoColorEnrichmentOk,
     dino_color_enrichment_reason: dinoColorEnrichmentReason,
     detections: dinoDetections,
+    garment_regions: dinoGarmentRegions,
   };
   console.info("[GDINO DEBUG] Temporary detection validation", {
     enabled: !!groundingDino?.enabled,
