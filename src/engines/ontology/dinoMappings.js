@@ -23,6 +23,12 @@ export const DINO_LABEL_MAPPINGS = [
     confidence_floor: 0,
   },
   {
+    label: 'cap',
+    category: 'accessory',
+    zone: 'accessory_jewelry',
+    confidence_floor: 0,
+  },
+  {
     label: 'sweater',
     category: 'sweater',
     zone: 'upper_garment',
@@ -30,6 +36,12 @@ export const DINO_LABEL_MAPPINGS = [
   },
   {
     label: 'hoodie',
+    category: 'hoodie',
+    zone: 'upper_garment',
+    confidence_floor: 0,
+  },
+  {
+    label: 'sweater hoodie',
     category: 'hoodie',
     zone: 'upper_garment',
     confidence_floor: 0,
@@ -62,6 +74,12 @@ export const DINO_LABEL_MAPPINGS = [
   {
     label: 'shorts',
     category: 'shorts',
+    zone: 'lower_garment',
+    confidence_floor: 0,
+  },
+  {
+    label: 'shorts skirt',
+    category: 'skirt',
     zone: 'lower_garment',
     confidence_floor: 0,
   },

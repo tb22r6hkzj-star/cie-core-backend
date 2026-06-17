@@ -31,4 +31,11 @@ assert.equal(mapDinoLabel('unknown object').confidence_floor, 0);
 
 assert.equal(mapDinoLabel('HOODIE').category, 'hoodie');
 
+assert.equal(mapDinoLabel('hat').zone, 'accessory_jewelry');
+assert.equal(mapDinoLabel('boots').zone, 'footwear');
+assert.equal(mapDinoLabel('shorts skirt').zone, 'lower_garment');
+assert.equal(mapDinoLabel('bag').zone, 'bag');
+assert.equal(mapDinoLabel('sweater hoodie').zone, 'upper_garment');
+assert.equal(mapDinoLabel('person').zone, 'unknown');
+
 console.log('DINO MAPPING TESTS PASSED');
