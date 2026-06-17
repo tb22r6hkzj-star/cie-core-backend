@@ -3978,60 +3978,156 @@ function isNearWhiteOrBlackPixel(r, g, b) {
   return max >= 242 || (max <= 18 && max - min <= 12);
 }
 
-function extractDinoBboxRegionColors(baseImage, bbox, limit = 6) {
+function getDinoSamplePixelBbox(pixelBbox, zone = "", category = "") {
+  const zoneKey = normalizeText(zone);
+  const categoryKey = normalizeText(category);
+  let xStart = 0.18;
+  let xEnd = 0.82;
+  let yStart = 0.15;
+  let yEnd = 0.85;
+
+  if (zoneKey === "upper_garment") {
+    xStart = 0.24;
+    xEnd = 0.76;
+    yStart = 0.12;
+    yEnd = 0.75;
+  } else if (zoneKey === "lower_garment") {
+    xStart = 0.24;
+    xEnd = 0.76;
+    yStart = 0.28;
+    yEnd = 0.86;
+  } else if (zoneKey === "footwear") {
+    xStart = 0.14;
+    xEnd = 0.86;
+    yStart = 0.30;
+    yEnd = 0.92;
+  } else if (zoneKey === "bag") {
+    xStart = 0.15;
+    xEnd = 0.85;
+    yStart = 0.15;
+    yEnd = 0.85;
+  } else if (zoneKey === "accessory_jewelry" || categoryKey.includes("hat") || categoryKey.includes("accessory")) {
+    xStart = 0.20;
+    xEnd = 0.80;
+    yStart = 0.20;
+    yEnd = 0.80;
+  }
+
+  const x1 = Math.max(pixelBbox.x1, Math.min(pixelBbox.x2 - 1, Math.floor(pixelBbox.x1 + pixelBbox.width * xStart)));
+  const x2 = Math.max(x1 + 1, Math.min(pixelBbox.x2, Math.ceil(pixelBbox.x1 + pixelBbox.width * xEnd)));
+  const y1 = Math.max(pixelBbox.y1, Math.min(pixelBbox.y2 - 1, Math.floor(pixelBbox.y1 + pixelBbox.height * yStart)));
+  const y2 = Math.max(y1 + 1, Math.min(pixelBbox.y2, Math.ceil(pixelBbox.y1 + pixelBbox.height * yEnd)));
+  return { x1, y1, x2, y2, width: x2 - x1, height: y2 - y1 };
+}
+
+function getRgbTraits(r, g, b) {
+  const [h, s, l] = chroma(r, g, b).hsl();
+  return {
+    hue: Number.isFinite(h) ? h : 0,
+    saturation: Number.isFinite(s) ? s : 0,
+    lightness: Number.isFinite(l) ? l : 0,
+  };
+}
+
+function isSkinLikePixel(r, g, b) {
+  const { hue, saturation, lightness } = getRgbTraits(r, g, b);
+  return hue >= 8 && hue <= 48 && saturation >= 0.16 && saturation <= 0.68 && lightness >= 0.32 && lightness <= 0.82 && r > b && g > b * 0.72;
+}
+
+function getDinoZoneColorWeight(sample, zone = "") {
+  const zoneKey = normalizeText(zone);
+  const { hue, saturation, lightness } = sample;
+  let weight = 1;
+  const greenOrBrown = (hue >= 65 && hue <= 165 && saturation >= 0.18 && lightness <= 0.55) || (hue >= 18 && hue <= 58 && saturation >= 0.22 && lightness <= 0.58);
+  const warmNeutral = hue >= 24 && hue <= 62 && saturation >= 0.10 && saturation <= 0.48 && lightness >= 0.38 && lightness <= 0.78;
+
+  if (["accessory_jewelry", "lower_garment", "hat"].includes(zoneKey) && greenOrBrown) weight *= 1.35;
+  if (zoneKey === "upper_garment" && warmNeutral) weight *= 1.35;
+  if (["bag", "footwear"].includes(zoneKey) && hue >= 15 && hue <= 55 && saturation >= 0.20 && lightness <= 0.62) weight *= 1.25;
+  if (sample.bg) weight *= 0.35;
+  if (sample.skin) weight *= 0.2;
+  return weight;
+}
+
+function extractDinoBboxRegionColors(baseImage, bbox, limit = 6, context = {}) {
   const baseW = Number(baseImage?.width || 0);
   const baseH = Number(baseImage?.height || 0);
   const data = baseImage?.data;
   const pixelBbox = getPixelBboxFromDinoBbox(bbox, baseW, baseH);
-  if (!data || !pixelBbox) return [];
+  if (!data || !pixelBbox) return { colors: [], debug: null };
 
-  const stride = Math.max(1, Math.floor(Math.sqrt((pixelBbox.width * pixelBbox.height) / 12000)));
+  const zone = context?.zone || "";
+  const sampleBbox = getDinoSamplePixelBbox(pixelBbox, zone, context?.category || context?.label || "");
+  const stride = Math.max(1, Math.floor(Math.sqrt((sampleBbox.width * sampleBbox.height) / 12000)));
   const samples = [];
   let backgroundLike = 0;
 
-  for (let y = pixelBbox.y1; y < pixelBbox.y2; y += stride) {
-    for (let x = pixelBbox.x1; x < pixelBbox.x2; x += stride) {
+  for (let y = sampleBbox.y1; y < sampleBbox.y2; y += stride) {
+    for (let x = sampleBbox.x1; x < sampleBbox.x2; x += stride) {
       const idx = (y * baseW + x) * 4;
       const alpha = Number(data[idx + 3] ?? 255);
       if (alpha < 20) continue;
       const r = Number(data[idx] || 0);
       const g = Number(data[idx + 1] || 0);
       const b = Number(data[idx + 2] || 0);
+      const traits = getRgbTraits(r, g, b);
       const bg = isNearWhiteOrBlackPixel(r, g, b);
+      const skin = isSkinLikePixel(r, g, b);
       if (bg) backgroundLike += 1;
-      samples.push({ r, g, b, bg });
+      samples.push({ r, g, b, bg, skin, ...traits });
     }
   }
 
-  if (!samples.length) return [];
-  const backgroundDominates = backgroundLike / samples.length >= 0.45;
-  const garmentSamples = backgroundDominates ? samples.filter((sample) => !sample.bg) : samples;
-  const usableSamples = garmentSamples.length >= Math.max(20, samples.length * 0.08) ? garmentSamples : samples;
+  if (!samples.length) return { colors: [], debug: { color_sample_bbox: sampleBbox, sample_count: 0, filtered_sample_count: 0, dominant_hex_before_cluster: null } };
+  const nonBgSamples = samples.filter((sample) => !sample.bg);
+  const nonSkinSamples = samples.filter((sample) => !sample.skin);
+  let usableSamples = nonBgSamples.length >= Math.max(20, samples.length * 0.08) ? nonBgSamples : samples;
+  const nonSkinUsable = usableSamples.filter((sample) => !sample.skin);
+  if (!["skin", "face", "body"].includes(normalizeText(zone)) && nonSkinUsable.length >= Math.max(20, usableSamples.length * 0.12)) {
+    usableSamples = nonSkinUsable;
+  } else if (nonSkinSamples.length >= Math.max(20, samples.length * 0.12)) {
+    usableSamples = nonSkinSamples;
+  }
+
   const buckets = new Map();
 
   for (const sample of usableSamples) {
     const key = `${Math.round(sample.r / 16)}_${Math.round(sample.g / 16)}_${Math.round(sample.b / 16)}`;
-    if (!buckets.has(key)) buckets.set(key, { count: 0, rSum: 0, gSum: 0, bSum: 0 });
+    if (!buckets.has(key)) buckets.set(key, { count: 0, weight: 0, rSum: 0, gSum: 0, bSum: 0 });
     const row = buckets.get(key);
+    const weight = getDinoZoneColorWeight(sample, zone);
     row.count += 1;
-    row.rSum += sample.r;
-    row.gSum += sample.g;
-    row.bSum += sample.b;
+    row.weight += weight;
+    row.rSum += sample.r * weight;
+    row.gSum += sample.g * weight;
+    row.bSum += sample.b * weight;
   }
 
+  const totalWeight = Array.from(buckets.values()).reduce((sum, row) => sum + row.weight, 0) || usableSamples.length;
   const colorRows = Array.from(buckets.values())
     .map((row) => ({
-      hex: safeHex(chroma(Math.round(row.rSum / row.count), Math.round(row.gSum / row.count), Math.round(row.bSum / row.count)).hex()),
-      pct: row.count / usableSamples.length,
+      hex: safeHex(chroma(Math.round(row.rSum / Math.max(row.weight, 0.0001)), Math.round(row.gSum / Math.max(row.weight, 0.0001)), Math.round(row.bSum / Math.max(row.weight, 0.0001))).hex()),
+      pct: row.weight / totalWeight,
+      count: row.count,
     }))
-    .filter((row) => !!row.hex);
+    .filter((row) => !!row.hex)
+    .sort((a, b) => b.pct - a.pct);
 
   const clusters = buildColorClusters(colorRows);
-  return clusters.slice(0, limit).map((cluster) => ({
+  const colors = clusters.slice(0, limit).map((cluster) => ({
     hex: safeHex(cluster.base),
     pct: round2(cluster.pct),
     name: getColorName(cluster.base),
   })).filter((color) => !!color.hex);
+  return {
+    colors,
+    debug: {
+      color_sample_bbox: sampleBbox,
+      sample_count: samples.length,
+      filtered_sample_count: usableSamples.length,
+      dominant_hex_before_cluster: colorRows[0]?.hex || null,
+    },
+  };
 }
 
 function extractColorsFromDinoBboxes(imageBuffer, dinoRegions = []) {
@@ -4045,13 +4141,22 @@ function extractColorsFromDinoBboxes(imageBuffer, dinoRegions = []) {
 
   return dinoRegions.map((region) => {
     if (!region?.bbox) return region;
-    const regionColors = extractDinoBboxRegionColors(baseImage, region.bbox, 6);
+    const extraction = extractDinoBboxRegionColors(baseImage, region.bbox, 6, {
+      zone: region?.zone,
+      category: region?.category,
+      label: region?.label || region?.segment_label,
+    });
+    const regionColors = extraction.colors || [];
     if (!regionColors.length) return region;
     const dominantHex = safeHex(regionColors[0]?.hex || region?.dominant_hex || "");
     return {
       ...region,
       dominant_hex: dominantHex || region?.dominant_hex || null,
       region_colors: regionColors,
+      color_debug: {
+        ...(region?.color_debug || {}),
+        dino_bbox_sampling: extraction.debug,
+      },
       coverage: round2(Math.max(Number(region?.coverage || 0), getDinoBboxArea(region.bbox))),
       mask_geometry: region?.mask_geometry || { bbox: region.bbox, coverage: getDinoBboxArea(region.bbox) },
     };
