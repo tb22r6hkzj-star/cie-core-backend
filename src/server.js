@@ -779,6 +779,8 @@ function getBlackNuanceLabel(hex) {
 function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColors = [], useRegionOnly = false, context = {}) {
   const fallbackName = zoneData?.name || titleCase(String(zoneKey || "unknown").replace(/_/g, " "));
   const debugContext = {
+    zone_color_source: context?.zoneColorSource || (regionColors.length ? "cluster" : "fallback"),
+    preserved_dino_hex: safeHex(context?.preservedDinoHex || "") || null,
     suppression_gates: {
       lowSignalRegion: false,
       isWeakDominantEvidence: false,
@@ -884,9 +886,17 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     })
     .sort((a, b) => b._score - a._score);
   const dominantCluster = scoredClusters[0] || clusters[0] || null;
+  const preservedDinoHex = safeHex(context?.preservedDinoHex || "");
+  const preservedDinoCluster = preservedDinoHex
+    ? clusters.find((c) => colorDistanceLab(c.base, preservedDinoHex) < 3)
+    : null;
   const dominant = {
-    base: dominantCluster?.base || baseHex,
-    pct: round2((Number(dominantCluster?.weight || 0) || 1) / clustersTotalWeight),
+    base: preservedDinoHex || dominantCluster?.base || baseHex,
+    pct: round2(
+      preservedDinoCluster
+        ? (Number(preservedDinoCluster?.weight || 0) || 1) / clustersTotalWeight
+        : (Number(dominantCluster?.weight || 0) || 1) / clustersTotalWeight
+    ),
   };
   const dominantTraits = getPerceptualTraits(dominant.base);
   const isWeakDominantEvidence = Number(dominant?.pct || 0) < 0.25;
@@ -1047,7 +1057,8 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   if (
     ["upper_garment", "lower_garment", "outerwear", "body_garment"].includes(zoneKey) &&
     !isNavyCandidate(dominant.base) &&
-    getLight(dominant.base) < 0.28
+    getLight(dominant.base) < 0.28 &&
+    Number(dominantTraits?.chroma_magnitude || 0) < 18
   ) {
     displayLabel = getBlackNuanceLabel(dominant.base);
   }
@@ -1443,6 +1454,18 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       })
       .filter((c) => !!c.hex);
     const evidence = getZoneRegionEvidence(zoneRegions);
+    const isDinoSourceType = (sourceType) => sourceType === "grounding_dino" || sourceType === "dino_detection";
+    const dinoOnlyZone =
+      zoneRegions.length > 0 &&
+      zoneRegions.every((region) => isDinoSourceType(region?.source_type));
+    const dinoPrimaryRegion = dinoOnlyZone ? zoneRegions.find((region) => isDinoSourceType(region?.source_type)) : null;
+    const dinoPrimaryHex = dinoOnlyZone
+      ? safeHex(dinoPrimaryRegion?.dominant_hex || dinoPrimaryRegion?.region_colors?.[0]?.hex || "")
+      : null;
+    const preserveDinoZoneColor =
+      ["accessory_jewelry", "bag", "footwear", "lower_garment", "upper_garment"].includes(zoneKey) &&
+      dinoOnlyZone &&
+      !!dinoPrimaryHex;
 
     const hasColorRegionEvidence = zoneRegions.some((region) => {
       const sourceType = region?.source_type;
@@ -1452,9 +1475,11 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     });
     const regionClusters = buildColorClusters(regionColors);
     const consensusCluster = regionClusters[0] || null;
-    const chosenColor = consensusCluster?.base
-      ? { ...fallbackColor, hex: consensusCluster.base, pct: consensusCluster.pct }
-      : fallbackColor;
+    const chosenColor = preserveDinoZoneColor
+      ? { ...fallbackColor, hex: dinoPrimaryHex, pct: dinoPrimaryRegion?.region_colors?.[0]?.pct || dinoPrimaryRegion?.coverage || dinoPrimaryRegion?.confidence || consensusCluster?.pct || fallbackColor?.pct }
+      : consensusCluster?.base
+        ? { ...fallbackColor, hex: consensusCluster.base, pct: consensusCluster.pct }
+        : fallbackColor;
     const computedScore = Math.max(45, Math.round((chosenColor?.pct || 0.25) * 100));
     const promoteFallback = shouldPromoteFallbackZone(zoneKey, evidence, computedScore);
     const hasExplicitEvidence = hasExplicitZoneRegionEvidence(zoneKey, zoneRegions, evidence);
@@ -1479,8 +1504,12 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       zoneData,
       normalizedColors,
       regionColors,
-      hasColorRegionEvidence,
-      { dominantDarkBodyHex }
+      hasColorRegionEvidence || preserveDinoZoneColor,
+      {
+        dominantDarkBodyHex,
+        preservedDinoHex: preserveDinoZoneColor ? dinoPrimaryHex : null,
+        zoneColorSource: preserveDinoZoneColor ? "dino_primary" : consensusCluster?.base ? "cluster" : "fallback",
+      }
     );
     if (["eyewear", "outerwear", "fur_trim"].includes(zoneKey)) {
       const segmentLabels = zoneRegions.map((r) => r?.segment_label || r?.label || r?.zone || "unknown");
@@ -1534,6 +1563,8 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       score: computedScore,
       selected_hex: zoneData?.hex || null,
       confidence: zoneRead?.confidence || 0,
+      zone_color_source: zoneRead?._debug?.zone_color_source || null,
+      preserved_dino_hex: zoneRead?._debug?.preserved_dino_hex || null,
     });
 
     zones[zoneKey] = {
