@@ -250,6 +250,25 @@ function isNavyCandidate(hex) {
   return s >= 0.18 && chromaMagnitude >= 20;
 }
 
+function isDarkOliveFamily(hex) {
+  const safe = safeHex(hex);
+  if (!safe) return false;
+
+  const hue = getHue(safe);
+  const saturation = getSat(safe);
+  const lightness = getLight(safe);
+  const [red, green, blue] = chroma(safe).rgb();
+  const greenHighestOrTied = green >= red && green >= blue;
+
+  return (
+    lightness < 0.18 &&
+    hue >= 60 &&
+    hue < 105 &&
+    saturation >= 0.06 &&
+    greenHighestOrTied
+  );
+}
+
 
 function hueDistance(a, b) {
   const ha = getHue(a);
@@ -1058,6 +1077,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   if (
     ["upper_garment", "lower_garment", "outerwear", "body_garment"].includes(zoneKey) &&
     !isNavyCandidate(dominant.base) &&
+    !isDarkOliveFamily(dominant.base) &&
     getLight(dominant.base) < 0.28 &&
     Number(dominantTraits?.chroma_magnitude || 0) < 18
   ) {

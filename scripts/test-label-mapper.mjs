@@ -18,6 +18,8 @@ assert.equal(normalizeCategoryLabel("", "piece"), "piece");
 
 assert.equal(typeof getColorName("#111111"), "string");
 assert.notEqual(getColorName("#111111"), "");
+assert.notEqual(getColorName("#111111"), "Deep Olive");
+assert.equal(getColorName("#1E201B"), "Deep Olive");
 assert.equal(getColorName("not-a-color"), "Unknown");
 
 const namedBlack = buildNamedHex("#000000");
