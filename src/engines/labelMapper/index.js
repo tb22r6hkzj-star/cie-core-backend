@@ -109,6 +109,25 @@ function isNavyCandidate(hex) {
   return saturation >= 0.18 && chromaMagnitude >= 20;
 }
 
+function isDarkOliveFamily(hex) {
+  const safe = safeHex(hex);
+  if (!safe) return false;
+
+  const hue = getHue(safe);
+  const saturation = getSat(safe);
+  const lightness = getLight(safe);
+  const [red, green, blue] = chroma(safe).rgb();
+  const greenHighestOrTied = green >= red && green >= blue;
+
+  return (
+    lightness < 0.18 &&
+    hue >= 60 &&
+    hue < 105 &&
+    saturation >= 0.06 &&
+    greenHighestOrTied
+  );
+}
+
 function uniqHexes(hexes = []) {
   if (!Array.isArray(hexes)) return [];
 
@@ -132,6 +151,7 @@ export function getColorName(hex) {
   const lightness = getLight(safe);
   const chromaMagnitude = getChromaMagnitudeFromLab(getLab(safe));
 
+  if (isDarkOliveFamily(safe)) return "Deep Olive";
   if (saturation < 0.05 && lightness < 0.1) return "Jet Black";
   if (saturation < 0.07 && lightness < 0.18) return "Graphite Black";
   if (saturation < 0.09 && lightness < 0.28) return "Charcoal";
