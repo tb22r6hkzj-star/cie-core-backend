@@ -43,6 +43,7 @@ import chroma from "chroma-js";
 import jpeg from "jpeg-js";
 import { PNG } from "pngjs";
 import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
+import { mapDinoLabel } from "./engines/ontology/dinoMappings.js";
 import {
   buildNamedHex,
   buildNamedHexes,
@@ -1163,6 +1164,11 @@ function hasExplicitZoneRegionEvidence(zoneKey, zoneRegions = [], evidence = {})
   const weightedConfidence = Number(evidence?.weighted_confidence || 0);
   const colorCount = Number(evidence?.color_count || 0);
   const labels = (zoneRegions || []).map((r) => normalizeText(r?.segment_label || r?.label || r?.zone || ""));
+  const hasDinoEvidence = (zoneRegions || []).some((r) => r?.source_type === "dino_detection");
+
+  if (hasDinoEvidence) {
+    return regionCount >= 1 && weightedConfidence >= 35;
+  }
 
   if (["bag", "accessory_jewelry", "footwear", "fur_trim"].includes(zoneKey)) {
     return regionCount >= 1 && coverage >= 0.12 && weightedConfidence >= 40 && colorCount >= 1;
@@ -2733,7 +2739,7 @@ function buildSuggestedAdjustment(scoreBreakdown, colorRoles, bestMode) {
   return `Refining the relationship between ${anchorName}, ${supportName}, and ${accentName} would improve the overall outfit score.`;
 }
 
-function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], pipeline = null }) {
+function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], dinoGarmentRegions = [], pipeline = null }) {
   const normalizedColors = normalizeDetectedColors(topColors, dominantHex);
   const baseRoles = assignColorRoles(normalizedColors);
   const colorRoles = enforceStructuralPreservation(baseRoles, normalizedColors);
@@ -2744,11 +2750,16 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], pi
     colorRoles,
   });
 
+  const samRegions = Array.isArray(segmentedRegions) ? segmentedRegions : [];
+  const dinoRegions = Array.isArray(dinoGarmentRegions) ? dinoGarmentRegions : [];
+  const garmentEvidenceRegions = samRegions.length ? samRegions.concat(dinoRegions) : dinoRegions;
+  const garmentZoneSource = getGarmentZoneSource(samRegions, dinoRegions);
+
   const garmentZones = inferGarmentZones(
     normalizedColors,
     colorRoles,
     visualIntelligence,
-    segmentedRegions
+    garmentEvidenceRegions
   );
 
   const garmentAnalysis = inferGarmentAndMaterial({
@@ -2781,7 +2792,7 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], pi
     visual_intelligence: visualIntelligence,
     visual_intelligence_layer: visualIntelligence,
     garment_zones: garmentZones,
-    segmented_regions: garmentZones.segmented_regions || segmentedRegions,
+    segmented_regions: garmentZones.segmented_regions || garmentEvidenceRegions,
     region_color_analysis: garmentZones.region_color_analysis || [],
     detail_colors: visualIntelligence?.body_vs_detail?.detail_colors || [],
     accessory_analysis: (garmentAnalysis?.detected_items || []).filter((item) =>
@@ -2795,11 +2806,12 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], pi
       ),
     },
     material_analysis: garmentAnalysis,
-    pipeline: pipeline || {
+    pipeline: pipeline ? { ...pipeline, garment_zone_source: garmentZoneSource } : {
       sam_enabled: false,
       sam_ok: false,
       sam_reason: "not_requested",
       fallback_mode: true,
+      garment_zone_source: garmentZoneSource,
     },
     garment_analysis: garmentAnalysis,
     structural_analysis: normalizedColors.map((c) => ({
@@ -3479,7 +3491,8 @@ const DEFAULT_REPLICATE_GROUNDING_DINO_VERSION =
   process.env.REPLICATE_GROUNDING_DINO_VERSION ||
   "efd10a8ddc57ea28773327e881ce95e20cc1d734c589f7dd01d2036921ed78aa";
 const DEFAULT_GROUNDING_DINO_QUERY =
-  process.env.GROUNDING_DINO_QUERY || "person. clothing. shoes. bag. hat. glasses. accessory.";
+  process.env.GROUNDING_DINO_QUERY ||
+  "person. hat. bag. shoes. boots. sneakers. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. accessory.";
 
 function getSamPredictionsUrl(modelId = DEFAULT_REPLICATE_SAM_MODEL) {
   const configured = String(process.env.REPLICATE_SAM_MODEL_PREDICTIONS_URL || "").trim();
@@ -3604,6 +3617,73 @@ function normalizeGroundingDinoBbox(rawBbox) {
     width: round2(Math.max(0, x2 - x1)),
     height: round2(Math.max(0, y2 - y1)),
   };
+}
+
+
+function getNormalizedDinoRegionBBox(bbox = null) {
+  if (!bbox) return null;
+  const xMin = Number(bbox.x_min);
+  const yMin = Number(bbox.y_min);
+  const xMax = Number(bbox.x_max);
+  const yMax = Number(bbox.y_max);
+  if (![xMin, yMin, xMax, yMax].every(Number.isFinite)) return null;
+  if (xMin < 0 || yMin < 0 || xMax > 1 || yMax > 1) return null;
+  if (xMax <= xMin || yMax <= yMin) return null;
+  return {
+    x: round2(xMin),
+    y: round2(yMin),
+    w: round2(xMax - xMin),
+    h: round2(yMax - yMin),
+  };
+}
+
+function buildDinoGarmentRegions(detections = []) {
+  if (!Array.isArray(detections) || !detections.length) return [];
+
+  return detections
+    .map((detection, idx) => {
+      const mapping = mapDinoLabel(detection?.label);
+      if (!mapping?.zone || mapping.zone === "unknown") return null;
+
+      const confidence = Math.round(clamp100(Number(detection?.confidence || 0) * 100));
+      if (confidence < Math.round(clamp100(Number(mapping?.confidence_floor || 0) * 100))) return null;
+
+      const normalizedBbox = getNormalizedDinoRegionBBox(detection?.bbox);
+      const bboxCoverage = normalizedBbox ? normalizedBbox.w * normalizedBbox.h : 0;
+
+      return {
+        id: `dino_${idx + 1}`,
+        segment_label: mapping.label || detection?.label || `dino_${idx + 1}`,
+        label: detection?.label || mapping.label || "object",
+        category: mapping.category || "piece",
+        zone: mapping.zone,
+        confidence,
+        coverage: round2(bboxCoverage || Math.max(0.05, Number(detection?.confidence || 0) * 0.2)),
+        bbox: detection?.bbox || null,
+        mask_geometry: normalizedBbox
+          ? {
+              bbox: normalizedBbox,
+              coverage: round2(bboxCoverage),
+              centroid_x: round2(normalizedBbox.x + normalizedBbox.w / 2),
+              centroid_y: round2(normalizedBbox.y + normalizedBbox.h / 2),
+            }
+          : null,
+        dominant_hex: null,
+        region_colors: [],
+        source_type: "dino_detection",
+        color_extraction_enabled: false,
+      };
+    })
+    .filter(Boolean);
+}
+
+function getGarmentZoneSource(samRegions = [], dinoRegions = []) {
+  const hasSam = Array.isArray(samRegions) && samRegions.length > 0;
+  const hasDino = Array.isArray(dinoRegions) && dinoRegions.length > 0;
+  if (hasSam && hasDino) return "hybrid";
+  if (hasSam) return "sam";
+  if (hasDino) return "dino";
+  return "sam";
 }
 
 function parseGroundingDinoOutputToDetections(output) {
@@ -4486,11 +4566,13 @@ async function analyzeGhostColors(ghostUrl) {
 
   const groundingDino = await runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_QUERY);
   const dinoDetections = Array.isArray(groundingDino?.detections) ? groundingDino.detections : [];
+  const dinoGarmentRegions = buildDinoGarmentRegions(dinoDetections);
   const dinoDebug = {
     enabled: !!groundingDino?.enabled,
     ok: !!groundingDino?.ok,
     reason: groundingDino?.reason || null,
     detection_count: dinoDetections.length,
+    garment_region_count: dinoGarmentRegions.length,
     detections: dinoDetections,
   };
   console.info("[GDINO DEBUG] Temporary detection validation", {
@@ -4503,7 +4585,9 @@ async function analyzeGhostColors(ghostUrl) {
   const samRegions = Array.isArray(sam?.regions) ? sam.regions : [];
   const samOk = !!sam?.ok && samRegions.length > 0;
   const dinoOk = !!groundingDino?.ok && dinoDetections.length > 0;
-  const detectionSegmentationOk = samOk || dinoOk;
+  const dinoGarmentOk = dinoGarmentRegions.length > 0;
+  const detectionSegmentationOk = samOk || dinoGarmentOk;
+  const garmentZoneSource = getGarmentZoneSource(samOk ? samRegions : [], dinoGarmentRegions);
   const segmentationProvider = samOk ? "sam" : null;
   const detectionProvider = dinoOk ? "grounding_dino" : null;
 
@@ -4512,6 +4596,7 @@ async function analyzeGhostColors(ghostUrl) {
     dominantName: getColorName(dominantHex),
     topColors,
     segmentedRegions: samOk ? samRegions : [],
+    dinoGarmentRegions,
     dino_debug: dinoDebug,
     pipeline: {
       sam_enabled: !!sam?.enabled,
@@ -4523,12 +4608,14 @@ async function analyzeGhostColors(ghostUrl) {
       dino_ok: dinoOk,
       dino_reason: groundingDino?.reason || null,
       dino_detection_count: dinoDetections.length,
+      dino_garment_region_count: dinoGarmentRegions.length,
       dino_query: DEFAULT_GROUNDING_DINO_QUERY,
       detection_segmentation_ok: detectionSegmentationOk,
       detection_provider: detectionProvider,
       segmentation_provider: segmentationProvider,
       mask_provider: segmentationProvider,
       fallback_mode: !samOk,
+      garment_zone_source: garmentZoneSource,
     },
   };
 }
@@ -4591,6 +4678,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         dominantHex: analysis.dominantHex,
         topColors: analysis.topColors,
         segmentedRegions,
+        dinoGarmentRegions: analysis.dinoGarmentRegions,
         pipeline: analysis.pipeline,
       });
     } catch (error) {
@@ -4664,6 +4752,7 @@ app.post("/api/recommendations", async (req, res) => {
         dominantHex: analysis.dominantHex,
         topColors: analysis.topColors,
         segmentedRegions: analysis.segmentedRegions,
+        dinoGarmentRegions: analysis.dinoGarmentRegions,
         pipeline: analysis.pipeline,
       });
     } catch (error) {
@@ -4785,6 +4874,7 @@ app.post("/api/retrieval/preview", async (req, res) => {
           dominantHex: analysis.dominantHex,
           topColors: analysis.topColors,
           segmentedRegions: analysis.segmentedRegions,
+          dinoGarmentRegions: analysis.dinoGarmentRegions,
           pipeline: analysis.pipeline,
         });
       } catch (error) {
