@@ -77,6 +77,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 10000;
 const PIXELCUT_TIMEOUT_MS = 45000;
+const LOWER_SAMPLING_VERSION = "multi_window_v1";
 
 /* =========================
    CORS
@@ -5109,7 +5110,10 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       outfit_analysis: outfitAnalysis,
       debug: {
         dino: analysis.dino_debug,
-        pipeline: analysis.pipeline,
+        pipeline: {
+          ...analysis.pipeline,
+          lower_sampling_version: LOWER_SAMPLING_VERSION,
+        },
       },
       summary:
         "Primary color detected. Use Balance, Contrast, Cohesion, Natural, or Explore for structured mode-specific directions.",
