@@ -1164,7 +1164,9 @@ function hasExplicitZoneRegionEvidence(zoneKey, zoneRegions = [], evidence = {})
   const weightedConfidence = Number(evidence?.weighted_confidence || 0);
   const colorCount = Number(evidence?.color_count || 0);
   const labels = (zoneRegions || []).map((r) => normalizeText(r?.segment_label || r?.label || r?.zone || ""));
-  const hasDinoEvidence = (zoneRegions || []).some((r) => r?.source_type === "dino_detection");
+  const hasDinoEvidence = (zoneRegions || []).some((r) =>
+    r?.source_type === "dino_detection" || r?.source_type === "grounding_dino"
+  );
 
   if (hasDinoEvidence) {
     return regionCount >= 1 && weightedConfidence >= 35;
@@ -2750,10 +2752,22 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     colorRoles,
   });
 
-  const samRegions = Array.isArray(segmentedRegions) ? segmentedRegions : [];
-  const dinoRegions = Array.isArray(dinoGarmentRegions) ? dinoGarmentRegions : [];
-  const garmentEvidenceRegions = samRegions.length ? samRegions.concat(dinoRegions) : dinoRegions;
-  const garmentZoneSource = getGarmentZoneSource(samRegions, dinoRegions);
+  const inputSegmentedRegions = Array.isArray(segmentedRegions) ? segmentedRegions : [];
+  const samRegions = inputSegmentedRegions.filter(
+    (region) => region?.source_type !== "grounding_dino" && region?.source_type !== "dino_detection"
+  );
+  const inputDinoRegions = inputSegmentedRegions.filter(
+    (region) => region?.source_type === "grounding_dino" || region?.source_type === "dino_detection"
+  );
+  const dinoRegions = [...inputDinoRegions, ...(Array.isArray(dinoGarmentRegions) ? dinoGarmentRegions : [])].filter(
+    (region, idx, arr) => idx === arr.findIndex((candidate) => candidate?.segment_label === region?.segment_label && candidate?.zone === region?.zone)
+  );
+  const samZones = new Set(samRegions.map((region) => region?.zone).filter((zone) => zone && zone !== "unknown"));
+  const dedupedDinoRegions = samRegions.length
+    ? dinoRegions.filter((region) => !samZones.has(region?.zone))
+    : dinoRegions;
+  const garmentEvidenceRegions = samRegions.length ? samRegions.concat(dedupedDinoRegions) : dinoRegions;
+  const garmentZoneSource = getGarmentZoneSource(samRegions, dedupedDinoRegions);
 
   const garmentZones = inferGarmentZones(
     normalizedColors,
@@ -3637,19 +3651,23 @@ function getNormalizedDinoRegionBBox(bbox = null) {
   };
 }
 
-function buildDinoGarmentRegions(detections = []) {
+function isIgnoredDinoLabel(label) {
+  const normalized = normalizeText(label);
+  return ["person", "clothing", "object", "body"].includes(normalized);
+}
+
+function buildDinoSegmentedRegions(detections = []) {
   if (!Array.isArray(detections) || !detections.length) return [];
 
   return detections
     .map((detection, idx) => {
+      if (isIgnoredDinoLabel(detection?.label)) return null;
+
       const mapping = mapDinoLabel(detection?.label);
       if (!mapping?.zone || mapping.zone === "unknown") return null;
 
       const confidence = Math.round(clamp100(Number(detection?.confidence || 0) * 100));
       if (confidence < Math.round(clamp100(Number(mapping?.confidence_floor || 0) * 100))) return null;
-
-      const normalizedBbox = getNormalizedDinoRegionBBox(detection?.bbox);
-      const bboxCoverage = normalizedBbox ? normalizedBbox.w * normalizedBbox.h : 0;
 
       return {
         id: `dino_${idx + 1}`,
@@ -3658,24 +3676,20 @@ function buildDinoGarmentRegions(detections = []) {
         category: mapping.category || "piece",
         zone: mapping.zone,
         confidence,
-        coverage: round2(bboxCoverage || Math.max(0.05, Number(detection?.confidence || 0) * 0.2)),
-        bbox: detection?.bbox || null,
-        mask_geometry: normalizedBbox
-          ? {
-              bbox: normalizedBbox,
-              coverage: round2(bboxCoverage),
-              centroid_x: round2(normalizedBbox.x + normalizedBbox.w / 2),
-              centroid_y: round2(normalizedBbox.y + normalizedBbox.h / 2),
-            }
-          : null,
+        source_type: "grounding_dino",
+        coverage: 0,
         dominant_hex: null,
         region_colors: [],
-        source_type: "dino_detection",
-        color_extraction_enabled: false,
+        mask_geometry: null,
       };
     })
     .filter(Boolean);
 }
+
+function buildDinoGarmentRegions(detections = []) {
+  return buildDinoSegmentedRegions(detections);
+}
+
 
 function getGarmentZoneSource(samRegions = [], dinoRegions = []) {
   const hasSam = Array.isArray(samRegions) && samRegions.length > 0;
@@ -3683,7 +3697,7 @@ function getGarmentZoneSource(samRegions = [], dinoRegions = []) {
   if (hasSam && hasDino) return "hybrid";
   if (hasSam) return "sam";
   if (hasDino) return "dino";
-  return "sam";
+  return "none";
 }
 
 function parseGroundingDinoOutputToDetections(output) {
@@ -4566,7 +4580,7 @@ async function analyzeGhostColors(ghostUrl) {
 
   const groundingDino = await runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_QUERY);
   const dinoDetections = Array.isArray(groundingDino?.detections) ? groundingDino.detections : [];
-  const dinoGarmentRegions = buildDinoGarmentRegions(dinoDetections);
+  const dinoGarmentRegions = buildDinoSegmentedRegions(dinoDetections);
   const dinoDebug = {
     enabled: !!groundingDino?.enabled,
     ok: !!groundingDino?.ok,
@@ -4595,7 +4609,7 @@ async function analyzeGhostColors(ghostUrl) {
     dominantHex,
     dominantName: getColorName(dominantHex),
     topColors,
-    segmentedRegions: samOk ? samRegions : [],
+    segmentedRegions: samOk ? samRegions : dinoGarmentRegions,
     dinoGarmentRegions,
     dino_debug: dinoDebug,
     pipeline: {
@@ -4609,6 +4623,7 @@ async function analyzeGhostColors(ghostUrl) {
       dino_reason: groundingDino?.reason || null,
       dino_detection_count: dinoDetections.length,
       dino_garment_region_count: dinoGarmentRegions.length,
+      dino_region_count: dinoGarmentRegions.length,
       dino_query: DEFAULT_GROUNDING_DINO_QUERY,
       detection_segmentation_ok: detectionSegmentationOk,
       detection_provider: detectionProvider,
