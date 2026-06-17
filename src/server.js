@@ -4011,8 +4011,30 @@ function isNearWhiteOrBlackPixel(r, g, b) {
 }
 
 function getDinoSamplePixelBbox(pixelBbox, zone = "", category = "") {
+  return getDinoSamplePixelBboxes(pixelBbox, zone, category)[0];
+}
+
+function buildRelativePixelBbox(pixelBbox, xStart, xEnd, yStart, yEnd, label = "center") {
+  const x1 = Math.max(pixelBbox.x1, Math.min(pixelBbox.x2 - 1, Math.floor(pixelBbox.x1 + pixelBbox.width * xStart)));
+  const x2 = Math.max(x1 + 1, Math.min(pixelBbox.x2, Math.ceil(pixelBbox.x1 + pixelBbox.width * xEnd)));
+  const y1 = Math.max(pixelBbox.y1, Math.min(pixelBbox.y2 - 1, Math.floor(pixelBbox.y1 + pixelBbox.height * yStart)));
+  const y2 = Math.max(y1 + 1, Math.min(pixelBbox.y2, Math.ceil(pixelBbox.y1 + pixelBbox.height * yEnd)));
+  return { label, x1, y1, x2, y2, width: x2 - x1, height: y2 - y1 };
+}
+
+function getDinoSamplePixelBboxes(pixelBbox, zone = "", category = "") {
   const zoneKey = normalizeText(zone);
   const categoryKey = normalizeText(category);
+
+  if (zoneKey === "lower_garment") {
+    return [
+      buildRelativePixelBbox(pixelBbox, 0.24, 0.76, 0.18, 0.46, "upper-center"),
+      buildRelativePixelBbox(pixelBbox, 0.10, 0.48, 0.34, 0.70, "left-center"),
+      buildRelativePixelBbox(pixelBbox, 0.52, 0.90, 0.34, 0.70, "right-center"),
+      buildRelativePixelBbox(pixelBbox, 0.26, 0.74, 0.60, 0.92, "lower-center"),
+    ];
+  }
+
   let xStart = 0.18;
   let xEnd = 0.82;
   let yStart = 0.15;
@@ -4023,11 +4045,6 @@ function getDinoSamplePixelBbox(pixelBbox, zone = "", category = "") {
     xEnd = 0.76;
     yStart = 0.12;
     yEnd = 0.75;
-  } else if (zoneKey === "lower_garment") {
-    xStart = 0.24;
-    xEnd = 0.76;
-    yStart = 0.28;
-    yEnd = 0.86;
   } else if (zoneKey === "footwear") {
     xStart = 0.14;
     xEnd = 0.86;
@@ -4045,11 +4062,7 @@ function getDinoSamplePixelBbox(pixelBbox, zone = "", category = "") {
     yEnd = 0.80;
   }
 
-  const x1 = Math.max(pixelBbox.x1, Math.min(pixelBbox.x2 - 1, Math.floor(pixelBbox.x1 + pixelBbox.width * xStart)));
-  const x2 = Math.max(x1 + 1, Math.min(pixelBbox.x2, Math.ceil(pixelBbox.x1 + pixelBbox.width * xEnd)));
-  const y1 = Math.max(pixelBbox.y1, Math.min(pixelBbox.y2 - 1, Math.floor(pixelBbox.y1 + pixelBbox.height * yStart)));
-  const y2 = Math.max(y1 + 1, Math.min(pixelBbox.y2, Math.ceil(pixelBbox.y1 + pixelBbox.height * yEnd)));
-  return { x1, y1, x2, y2, width: x2 - x1, height: y2 - y1 };
+  return [buildRelativePixelBbox(pixelBbox, xStart, xEnd, yStart, yEnd)];
 }
 
 function getRgbTraits(r, g, b) {
@@ -4066,6 +4079,33 @@ function isSkinLikePixel(r, g, b) {
   return hue >= 8 && hue <= 48 && saturation >= 0.16 && saturation <= 0.68 && lightness >= 0.32 && lightness <= 0.82 && r > b && g > b * 0.72;
 }
 
+function isChromaticGreenOrOlive(color) {
+  const hex = safeHex(color?.hex || color || "");
+  if (!hex) return false;
+  const [lightness, chromaValue, hue] = chroma(hex).lch();
+  return Number.isFinite(hue) && Number.isFinite(chromaValue) && hue >= 55 && hue <= 170 && chromaValue >= 8 && lightness <= 62;
+}
+
+function isNeutralDarkColor(color) {
+  const hex = safeHex(color?.hex || color || "");
+  if (!hex) return false;
+  const [hue, saturation, lightness] = chroma(hex).hsl();
+  const [, chromaValue] = chroma(hex).lch();
+  return lightness <= 0.30 && (!Number.isFinite(hue) || saturation <= 0.18 || chromaValue < 8);
+}
+
+function sortLowerGarmentColors(colorRows = []) {
+  return [...colorRows].sort((a, b) => {
+    const aGreen = isChromaticGreenOrOlive(a);
+    const bGreen = isChromaticGreenOrOlive(b);
+    const aNeutralDark = isNeutralDarkColor(a);
+    const bNeutralDark = isNeutralDarkColor(b);
+    const aScore = a.pct * (aGreen ? 1.55 : 1) * (aNeutralDark ? 0.72 : 1);
+    const bScore = b.pct * (bGreen ? 1.55 : 1) * (bNeutralDark ? 0.72 : 1);
+    return bScore - aScore;
+  });
+}
+
 function getDinoZoneColorWeight(sample, zone = "") {
   const zoneKey = normalizeText(zone);
   const { hue, saturation, lightness } = sample;
@@ -4073,7 +4113,7 @@ function getDinoZoneColorWeight(sample, zone = "") {
   const greenOrBrown = (hue >= 65 && hue <= 165 && saturation >= 0.18 && lightness <= 0.55) || (hue >= 18 && hue <= 58 && saturation >= 0.22 && lightness <= 0.58);
   const warmNeutral = hue >= 24 && hue <= 62 && saturation >= 0.10 && saturation <= 0.48 && lightness >= 0.38 && lightness <= 0.78;
 
-  if (["accessory_jewelry", "lower_garment", "hat"].includes(zoneKey) && greenOrBrown) weight *= 1.35;
+  if (["accessory_jewelry", "lower_garment", "hat"].includes(zoneKey) && greenOrBrown) weight *= zoneKey === "lower_garment" ? 1.6 : 1.35;
   if (zoneKey === "upper_garment" && warmNeutral) weight *= 1.35;
   if (["bag", "footwear"].includes(zoneKey) && hue >= 15 && hue <= 55 && saturation >= 0.20 && lightness <= 0.62) weight *= 1.25;
   if (sample.bg) weight *= 0.35;
@@ -4089,28 +4129,49 @@ function extractDinoBboxRegionColors(baseImage, bbox, limit = 6, context = {}) {
   if (!data || !pixelBbox) return { colors: [], debug: null };
 
   const zone = context?.zone || "";
-  const sampleBbox = getDinoSamplePixelBbox(pixelBbox, zone, context?.category || context?.label || "");
-  const stride = Math.max(1, Math.floor(Math.sqrt((sampleBbox.width * sampleBbox.height) / 12000)));
+  const zoneKey = normalizeText(zone);
+  const previousSampleBbox = zoneKey === "lower_garment"
+    ? buildRelativePixelBbox(pixelBbox, 0.24, 0.76, 0.28, 0.86, "previous-center-crop")
+    : getDinoSamplePixelBbox(pixelBbox, zone, context?.category || context?.label || "");
+  const sampleBboxes = getDinoSamplePixelBboxes(pixelBbox, zone, context?.category || context?.label || "");
   const samples = [];
   let backgroundLike = 0;
 
-  for (let y = sampleBbox.y1; y < sampleBbox.y2; y += stride) {
-    for (let x = sampleBbox.x1; x < sampleBbox.x2; x += stride) {
-      const idx = (y * baseW + x) * 4;
-      const alpha = Number(data[idx + 3] ?? 255);
-      if (alpha < 20) continue;
-      const r = Number(data[idx] || 0);
-      const g = Number(data[idx + 1] || 0);
-      const b = Number(data[idx + 2] || 0);
-      const traits = getRgbTraits(r, g, b);
-      const bg = isNearWhiteOrBlackPixel(r, g, b);
-      const skin = isSkinLikePixel(r, g, b);
-      if (bg) backgroundLike += 1;
-      samples.push({ r, g, b, bg, skin, ...traits });
+  for (const sampleBbox of sampleBboxes) {
+    const stride = Math.max(1, Math.floor(Math.sqrt((sampleBbox.width * sampleBbox.height) / 3000)));
+    for (let y = sampleBbox.y1; y < sampleBbox.y2; y += stride) {
+      for (let x = sampleBbox.x1; x < sampleBbox.x2; x += stride) {
+        const idx = (y * baseW + x) * 4;
+        const alpha = Number(data[idx + 3] ?? 255);
+        if (alpha < 20) continue;
+        const r = Number(data[idx] || 0);
+        const g = Number(data[idx + 1] || 0);
+        const b = Number(data[idx + 2] || 0);
+        const traits = getRgbTraits(r, g, b);
+        const bg = isNearWhiteOrBlackPixel(r, g, b);
+        const skin = isSkinLikePixel(r, g, b);
+        if (bg) backgroundLike += 1;
+        samples.push({ r, g, b, bg, skin, ...traits });
+      }
     }
   }
 
-  if (!samples.length) return { colors: [], debug: { color_sample_bbox: sampleBbox, sample_count: 0, filtered_sample_count: 0, dominant_hex_before_cluster: null } };
+  if (!samples.length) {
+    return {
+      colors: [],
+      debug: {
+        color_sample_bbox: sampleBboxes[0],
+        color_sample_bboxes: sampleBboxes,
+        sample_windows_before: zoneKey === "lower_garment" ? [previousSampleBbox] : null,
+        sample_windows_after: zoneKey === "lower_garment" ? sampleBboxes : null,
+        previous_color_sample_bbox: zoneKey === "lower_garment" ? previousSampleBbox : null,
+        sample_count: 0,
+        filtered_sample_count: 0,
+        dominant_hex_before_cluster: null,
+        expected_dominant_color: null,
+      },
+    };
+  }
   const nonBgSamples = samples.filter((sample) => !sample.bg);
   const nonSkinSamples = samples.filter((sample) => !sample.skin);
   let usableSamples = nonBgSamples.length >= Math.max(20, samples.length * 0.08) ? nonBgSamples : samples;
@@ -4145,8 +4206,10 @@ function extractDinoBboxRegionColors(baseImage, bbox, limit = 6, context = {}) {
     .filter((row) => !!row.hex)
     .sort((a, b) => b.pct - a.pct);
 
-  const clusters = buildColorClusters(colorRows);
-  const colors = clusters.slice(0, limit).map((cluster) => ({
+  const rankedColorRows = zoneKey === "lower_garment" ? sortLowerGarmentColors(colorRows) : colorRows;
+  const clusters = buildColorClusters(rankedColorRows);
+  const rankedClusters = zoneKey === "lower_garment" ? sortLowerGarmentColors(clusters.map((cluster) => ({ ...cluster, hex: cluster.base }))) : clusters;
+  const colors = rankedClusters.slice(0, limit).map((cluster) => ({
     hex: safeHex(cluster.base),
     pct: round2(cluster.pct),
     name: getColorName(cluster.base),
@@ -4154,10 +4217,15 @@ function extractDinoBboxRegionColors(baseImage, bbox, limit = 6, context = {}) {
   return {
     colors,
     debug: {
-      color_sample_bbox: sampleBbox,
+      color_sample_bbox: sampleBboxes[0],
+      color_sample_bboxes: sampleBboxes,
+      sample_windows_before: zoneKey === "lower_garment" ? [previousSampleBbox] : null,
+      sample_windows_after: zoneKey === "lower_garment" ? sampleBboxes : null,
+      previous_color_sample_bbox: zoneKey === "lower_garment" ? previousSampleBbox : null,
       sample_count: samples.length,
       filtered_sample_count: usableSamples.length,
       dominant_hex_before_cluster: colorRows[0]?.hex || null,
+      expected_dominant_color: zoneKey === "lower_garment" ? (colors[0]?.hex || null) : null,
     },
   };
 }
