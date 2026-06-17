@@ -4090,6 +4090,7 @@ async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DIN
     return {
       enabled: false,
       ok: false,
+      reason: "missing_REPLICATE_API_TOKEN",
       detections: [],
     };
   }
@@ -4138,7 +4139,7 @@ async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DIN
       console.error("[GDINO DEBUG] Grounding DINO create response missing poll URL", {
         predictionId: createResp?.id || null,
       });
-      return { enabled: true, ok: false, detections: [] };
+      return { enabled: true, ok: false, reason: "missing_poll_url", detections: [] };
     }
 
     const startedAt = Date.now();
@@ -4186,7 +4187,7 @@ async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DIN
         error: prediction?.error || null,
         elapsedMs: Date.now() - startedAt,
       });
-      return { enabled: true, ok: false, detections: [] };
+      return { enabled: true, ok: false, reason: prediction?.error || prediction?.status || "unknown_failure", detections: [] };
     }
 
     console.info("[GDINO DEBUG] RAW Grounding DINO OUTPUT", {
@@ -4485,6 +4486,13 @@ async function analyzeGhostColors(ghostUrl) {
 
   const groundingDino = await runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_QUERY);
   const dinoDetections = Array.isArray(groundingDino?.detections) ? groundingDino.detections : [];
+  const dinoDebug = {
+    enabled: !!groundingDino?.enabled,
+    ok: !!groundingDino?.ok,
+    reason: groundingDino?.reason || null,
+    detection_count: dinoDetections.length,
+    detections: dinoDetections,
+  };
   console.info("[GDINO DEBUG] Temporary detection validation", {
     enabled: !!groundingDino?.enabled,
     ok: !!groundingDino?.ok,
@@ -4504,6 +4512,7 @@ async function analyzeGhostColors(ghostUrl) {
     dominantName: getColorName(dominantHex),
     topColors,
     segmentedRegions: samOk ? samRegions : [],
+    dino_debug: dinoDebug,
     pipeline: {
       sam_enabled: !!sam?.enabled,
       sam_ok: samOk,
@@ -4600,6 +4609,10 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       topColors: analysis.topColors,
       palettes: v2.palettes,
       outfit_analysis: outfitAnalysis,
+      debug: {
+        dino: analysis.dino_debug,
+        pipeline: analysis.pipeline,
+      },
       summary:
         "Primary color detected. Use Balance, Contrast, Cohesion, Natural, or Explore for structured mode-specific directions.",
     });
