@@ -3702,6 +3702,14 @@ function isIgnoredDinoLabel(label) {
   return ["person", "clothing", "object", "body"].includes(normalized);
 }
 
+function getDinoBboxArea(bbox = null) {
+  if (!bbox) return 0;
+  const width = Number(bbox.width ?? (Number(bbox.x_max) - Number(bbox.x_min)) ?? 0);
+  const height = Number(bbox.height ?? (Number(bbox.y_max) - Number(bbox.y_min)) ?? 0);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return 0;
+  return round2(width * height);
+}
+
 function buildDinoSegmentedRegions(detections = []) {
   if (!Array.isArray(detections) || !detections.length) return [];
 
@@ -3715,6 +3723,9 @@ function buildDinoSegmentedRegions(detections = []) {
       const confidence = Math.round(clamp100(Number(detection?.confidence || 0) * 100));
       if (confidence < Math.round(clamp100(Number(mapping?.confidence_floor || 0) * 100))) return null;
 
+      const bbox = detection?.bbox || null;
+      const bboxArea = getDinoBboxArea(bbox);
+
       return {
         id: `dino_${idx + 1}`,
         segment_label: mapping.label || detection?.label || `dino_${idx + 1}`,
@@ -3723,10 +3734,11 @@ function buildDinoSegmentedRegions(detections = []) {
         zone: mapping.zone,
         confidence,
         source_type: "grounding_dino",
-        coverage: 0,
+        bbox,
+        coverage: bboxArea,
         dominant_hex: null,
         region_colors: [],
-        mask_geometry: null,
+        mask_geometry: bbox ? { bbox, coverage: bboxArea } : null,
       };
     })
     .filter(Boolean);
@@ -3792,7 +3804,11 @@ function parseGroundingDinoOutputToDetections(output) {
         bbox,
       };
     })
-    .filter((detection) => !!detection.bbox && detection.bbox.width > 0 && detection.bbox.height > 0);
+    .filter((detection) => {
+      if (!detection) return false;
+      if (!detection.bbox) return true;
+      return Number(detection.bbox.width || 0) > 0 && Number(detection.bbox.height || 0) > 0;
+    });
 }
 
 function parseSamOutputToRegions(output) {
@@ -3933,6 +3949,113 @@ function extractMaskedRegionColors(baseImage, maskImage, limit = 6) {
     .filter((c) => !!c.hex)
     .sort((a, b) => b.pct - a.pct)
     .slice(0, limit);
+}
+
+
+function getPixelBboxFromDinoBbox(bbox = null, imageWidth = 0, imageHeight = 0) {
+  if (!bbox || !imageWidth || !imageHeight) return null;
+  const xMin = Number(bbox.x_min);
+  const yMin = Number(bbox.y_min);
+  const xMax = Number(bbox.x_max);
+  const yMax = Number(bbox.y_max);
+  if (![xMin, yMin, xMax, yMax].every(Number.isFinite)) return null;
+  const normalized = xMin >= 0 && yMin >= 0 && xMax <= 1 && yMax <= 1;
+  const left = normalized ? xMin * imageWidth : xMin;
+  const top = normalized ? yMin * imageHeight : yMin;
+  const right = normalized ? xMax * imageWidth : xMax;
+  const bottom = normalized ? yMax * imageHeight : yMax;
+  const x1 = Math.max(0, Math.min(imageWidth - 1, Math.floor(Math.min(left, right))));
+  const y1 = Math.max(0, Math.min(imageHeight - 1, Math.floor(Math.min(top, bottom))));
+  const x2 = Math.max(0, Math.min(imageWidth, Math.ceil(Math.max(left, right))));
+  const y2 = Math.max(0, Math.min(imageHeight, Math.ceil(Math.max(top, bottom))));
+  if (x2 <= x1 || y2 <= y1) return null;
+  return { x1, y1, x2, y2, width: x2 - x1, height: y2 - y1 };
+}
+
+function isNearWhiteOrBlackPixel(r, g, b) {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  return max >= 242 || (max <= 18 && max - min <= 12);
+}
+
+function extractDinoBboxRegionColors(baseImage, bbox, limit = 6) {
+  const baseW = Number(baseImage?.width || 0);
+  const baseH = Number(baseImage?.height || 0);
+  const data = baseImage?.data;
+  const pixelBbox = getPixelBboxFromDinoBbox(bbox, baseW, baseH);
+  if (!data || !pixelBbox) return [];
+
+  const stride = Math.max(1, Math.floor(Math.sqrt((pixelBbox.width * pixelBbox.height) / 12000)));
+  const samples = [];
+  let backgroundLike = 0;
+
+  for (let y = pixelBbox.y1; y < pixelBbox.y2; y += stride) {
+    for (let x = pixelBbox.x1; x < pixelBbox.x2; x += stride) {
+      const idx = (y * baseW + x) * 4;
+      const alpha = Number(data[idx + 3] ?? 255);
+      if (alpha < 20) continue;
+      const r = Number(data[idx] || 0);
+      const g = Number(data[idx + 1] || 0);
+      const b = Number(data[idx + 2] || 0);
+      const bg = isNearWhiteOrBlackPixel(r, g, b);
+      if (bg) backgroundLike += 1;
+      samples.push({ r, g, b, bg });
+    }
+  }
+
+  if (!samples.length) return [];
+  const backgroundDominates = backgroundLike / samples.length >= 0.45;
+  const garmentSamples = backgroundDominates ? samples.filter((sample) => !sample.bg) : samples;
+  const usableSamples = garmentSamples.length >= Math.max(20, samples.length * 0.08) ? garmentSamples : samples;
+  const buckets = new Map();
+
+  for (const sample of usableSamples) {
+    const key = `${Math.round(sample.r / 16)}_${Math.round(sample.g / 16)}_${Math.round(sample.b / 16)}`;
+    if (!buckets.has(key)) buckets.set(key, { count: 0, rSum: 0, gSum: 0, bSum: 0 });
+    const row = buckets.get(key);
+    row.count += 1;
+    row.rSum += sample.r;
+    row.gSum += sample.g;
+    row.bSum += sample.b;
+  }
+
+  const colorRows = Array.from(buckets.values())
+    .map((row) => ({
+      hex: safeHex(chroma(Math.round(row.rSum / row.count), Math.round(row.gSum / row.count), Math.round(row.bSum / row.count)).hex()),
+      pct: row.count / usableSamples.length,
+    }))
+    .filter((row) => !!row.hex);
+
+  const clusters = buildColorClusters(colorRows);
+  return clusters.slice(0, limit).map((cluster) => ({
+    hex: safeHex(cluster.base),
+    pct: round2(cluster.pct),
+    name: getColorName(cluster.base),
+  })).filter((color) => !!color.hex);
+}
+
+function extractColorsFromDinoBboxes(imageBuffer, dinoRegions = []) {
+  if (!imageBuffer || !Array.isArray(dinoRegions) || !dinoRegions.length) return dinoRegions || [];
+  let baseImage;
+  try {
+    baseImage = decodeImageRgba(imageBuffer);
+  } catch {
+    return dinoRegions;
+  }
+
+  return dinoRegions.map((region) => {
+    if (!region?.bbox) return region;
+    const regionColors = extractDinoBboxRegionColors(baseImage, region.bbox, 6);
+    if (!regionColors.length) return region;
+    const dominantHex = safeHex(regionColors[0]?.hex || region?.dominant_hex || "");
+    return {
+      ...region,
+      dominant_hex: dominantHex || region?.dominant_hex || null,
+      region_colors: regionColors,
+      coverage: round2(Math.max(Number(region?.coverage || 0), getDinoBboxArea(region.bbox))),
+      mask_geometry: region?.mask_geometry || { bbox: region.bbox, coverage: getDinoBboxArea(region.bbox) },
+    };
+  });
 }
 
 function extractMaskGeometry(maskImage) {
@@ -4626,13 +4749,30 @@ async function analyzeGhostColors(ghostUrl) {
 
   const groundingDino = await runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_QUERY);
   const dinoDetections = Array.isArray(groundingDino?.detections) ? groundingDino.detections : [];
-  const dinoGarmentRegions = buildDinoSegmentedRegions(dinoDetections);
+  let dinoGarmentRegions = buildDinoSegmentedRegions(dinoDetections);
+  let dinoColorEnrichmentReason = dinoGarmentRegions.length ? "no_bbox_color_enrichment" : "no_dino_garment_regions";
+  try {
+    if (dinoGarmentRegions.some((region) => !!region?.bbox)) {
+      const ghostBuffer = await fetchImageBuffer(ghostUrl);
+      dinoGarmentRegions = extractColorsFromDinoBboxes(ghostBuffer, dinoGarmentRegions);
+      dinoColorEnrichmentReason = "bbox_color_extraction_complete";
+    } else if (dinoGarmentRegions.length) {
+      dinoColorEnrichmentReason = "no_dino_bboxes";
+    }
+  } catch (error) {
+    dinoColorEnrichmentReason = error?.message || "bbox_color_extraction_failed";
+  }
+  const dinoColorEnrichmentCount = dinoGarmentRegions.filter((region) => safeHex(region?.dominant_hex) && Array.isArray(region?.region_colors) && region.region_colors.length > 0).length;
+  const dinoColorEnrichmentOk = dinoColorEnrichmentCount > 0;
   const dinoDebug = {
     enabled: !!groundingDino?.enabled,
     ok: !!groundingDino?.ok,
     reason: groundingDino?.reason || null,
     detection_count: dinoDetections.length,
     garment_region_count: dinoGarmentRegions.length,
+    dino_color_enrichment_count: dinoColorEnrichmentCount,
+    dino_color_enrichment_ok: dinoColorEnrichmentOk,
+    dino_color_enrichment_reason: dinoColorEnrichmentReason,
     detections: dinoDetections,
   };
   console.info("[GDINO DEBUG] Temporary detection validation", {
@@ -4670,6 +4810,9 @@ async function analyzeGhostColors(ghostUrl) {
       dino_detection_count: dinoDetections.length,
       dino_garment_region_count: dinoGarmentRegions.length,
       dino_region_count: dinoGarmentRegions.length,
+      dino_color_enrichment_count: dinoColorEnrichmentCount,
+      dino_color_enrichment_ok: dinoColorEnrichmentOk,
+      dino_color_enrichment_reason: dinoColorEnrichmentReason,
       dino_query: DEFAULT_GROUNDING_DINO_QUERY,
       detection_segmentation_ok: detectionSegmentationOk,
       detection_provider: detectionProvider,
