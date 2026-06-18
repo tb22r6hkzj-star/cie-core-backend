@@ -461,7 +461,7 @@ function buildColorStory(primaryColor, secondaryColors = [], accentColors = []) 
 }
 
 function buildGarmentColorProfile({ zoneKey, mode, dominantColor, supportColors = [], accentColors = [] }) {
-  if (!isGarmentZoneKey(zoneKey) || mode !== "multicolor") return {};
+  if (!isGarmentZoneKey(zoneKey) || !["multicolor", "multi_color"].includes(mode)) return {};
 
   const primaryColor = compactColorRead(dominantColor);
   if (!primaryColor) return {};
@@ -477,6 +477,63 @@ function buildGarmentColorProfile({ zoneKey, mode, dominantColor, supportColors 
   };
 }
 
+function normalizeColorPct(pct = 0) {
+  const value = Number(pct || 0);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return value > 1 ? value / 100 : value;
+}
+
+function formatColorPct(pct = 0) {
+  return `${Math.round(normalizeColorPct(pct) * 100)}%`;
+}
+
+function compactRegionColor(color) {
+  const hex = safeHex(color?.hex || color?.base);
+  if (!hex) return null;
+  const pct = round2(normalizeColorPct(color?.pct));
+  return {
+    hex,
+    name: color?.name || getColorName(hex),
+    pct,
+    percentage: formatColorPct(pct),
+  };
+}
+
+function getZoneColorMode(clusters = []) {
+  const sorted = (clusters || [])
+    .filter((c) => safeHex(c?.base || c?.hex))
+    .map((c) => ({ ...c, pct: normalizeColorPct(c?.pct) }))
+    .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
+  const topPct = Number(sorted?.[0]?.pct || 0);
+  const secondPct = Number(sorted?.[1]?.pct || 0);
+  const meaningfulCount = sorted.filter((c) => Number(c?.pct || 0) >= 0.08).length;
+  const reason = sorted.length > 0 && topPct < 0.55
+    ? "top_pct_lt_0_55"
+    : secondPct >= 0.18
+      ? "second_pct_gte_0_18"
+      : meaningfulCount >= 3
+        ? "three_colors_pct_gte_0_08"
+        : null;
+  return {
+    color_mode: reason ? "multi_color" : "single_color",
+    reason,
+    topPct,
+    secondPct,
+    meaningfulCount,
+  };
+}
+
+function buildEvidenceSummary(colorMode, clusters = [], source = null) {
+  const primary = clusters?.[0] ? compactRegionColor({ hex: clusters[0].base || clusters[0].hex, pct: clusters[0].pct }) : null;
+  const secondary = (clusters || []).slice(1, 4).map((c) => compactRegionColor({ hex: c.base || c.hex, pct: c.pct })).filter(Boolean);
+  if (!primary) return "No reliable color evidence for this zone.";
+  if (colorMode === "multi_color") {
+    const names = secondary.map((c) => `${c.name} ${c.percentage}`);
+    return `Multicolor evidence: primary ${primary.name} ${primary.percentage}${names.length ? ` with secondary ${joinHumanList(names)}` : ""}${source ? ` from ${source}` : ""}.`;
+  }
+  return `Single-color evidence: ${primary.name} ${primary.percentage} is the dominant zone read${source ? ` from ${source}` : ""}.`;
+}
+
 function buildRawDinoColorClusters(regionColors = []) {
   const clusters = [];
 
@@ -484,7 +541,7 @@ function buildRawDinoColorClusters(regionColors = []) {
     const hex = safeHex(color?.hex);
     if (!hex) continue;
 
-    const pct = Number(color?.pct || 0);
+    const pct = normalizeColorPct(color?.pct);
     if (pct <= 0) continue;
 
     let placed = false;
@@ -943,9 +1000,14 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       cluster_count: 0,
       interpretation: "unknown",
       display_label: fallbackName,
+      color_mode: "single_color",
       dominant_color: null,
+      primary_color: null,
       support_colors: [],
+      secondary_colors: [],
       accent_colors: [],
+      region_colors: [],
+      evidence_summary: "No reliable color evidence for this zone.",
       confidence: 0,
       _debug: debugContext,
     };
@@ -957,9 +1019,14 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       cluster_count: 0,
       interpretation: "unknown",
       display_label: fallbackName,
+      color_mode: "single_color",
       dominant_color: null,
+      primary_color: null,
       support_colors: [],
+      secondary_colors: [],
       accent_colors: [],
+      region_colors: [],
+      evidence_summary: "No reliable color evidence for this zone.",
       confidence: 0,
       _debug: debugContext,
     };
@@ -1098,9 +1165,14 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       cluster_count: clusters.length,
       interpretation: "unknown",
       display_label: fallbackName,
+      color_mode: "single_color",
       dominant_color: null,
+      primary_color: null,
       support_colors: [],
+      secondary_colors: [],
       accent_colors: [],
+      region_colors: clusters.map((c) => compactRegionColor({ hex: c.base, pct: c.pct })).filter(Boolean),
+      evidence_summary: buildEvidenceSummary("single_color", clusters, debugContext.zone_color_source),
       confidence: Math.round(clamp100(Number(zoneData?.score || 0) * 0.4)),
       _debug: debugContext,
     };
@@ -1119,14 +1191,9 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     meaningfulClusters.length >= 3 &&
     meaningfulThreshold === 0.06;
   const generalMulticolorSignal = meaningfulClusters.length >= 3 && meaningfulThreshold === 0.08;
-  const balancedTwoPlusSignal = topPct < 0.55 && secondPct >= 0.15;
-  const multicolorReason = footwearMulticolorSignal
-    ? "footwear_three_colors_pct_gte_0_06"
-    : generalMulticolorSignal
-      ? "three_colors_pct_gte_0_08"
-      : balancedTwoPlusSignal
-        ? "top_pct_lt_0_55_second_pct_gte_0_15"
-        : null;
+  const zoneColorModeRead = getZoneColorMode(pctSortedClusters);
+  const balancedTwoPlusSignal = topPct < 0.55 || secondPct >= 0.18;
+  const multicolorReason = zoneColorModeRead.reason;
   const multicolorDetected = !!multicolorReason;
   debugContext.multicolor_detected = multicolorDetected;
   debugContext.multicolor_reason = multicolorReason;
@@ -1136,23 +1203,17 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     !!safeHex(context?.preservedDinoHex || "") ||
     context?.preserveDinoZoneColor === true;
   const rawDinoClusters = isDinoPreservedZone ? buildRawDinoColorClusters(regionColors) : [];
-  const rawDinoMeaningfulThreshold = zoneKey === "footwear" ? 0.06 : 0.08;
+  const rawDinoMeaningfulThreshold = 0.08;
   const rawDinoMeaningfulClusters = rawDinoClusters.filter((c) => Number(c?.pct || 0) >= rawDinoMeaningfulThreshold);
-  const rawDinoTopPct = Number(rawDinoClusters?.[0]?.pct || 0);
-  const rawDinoSecondPct = Number(rawDinoClusters?.[1]?.pct || 0);
+  const rawDinoColorModeRead = getZoneColorMode(rawDinoClusters);
+  const rawDinoTopPct = rawDinoColorModeRead.topPct;
+  const rawDinoSecondPct = rawDinoColorModeRead.secondPct;
   const rawDinoMulticolorReason =
     isDinoPreservedZone &&
     (isGarmentZoneKey(zoneKey) || zoneKey === "footwear") &&
-    rawDinoMeaningfulClusters.length >= 3
-      ? zoneKey === "footwear"
-        ? "raw_dino_three_colors_pct_gte_0_06"
-        : "raw_dino_three_colors_pct_gte_0_08"
-      : isDinoPreservedZone &&
-          (isGarmentZoneKey(zoneKey) || zoneKey === "footwear") &&
-          rawDinoTopPct < 0.55 &&
-          rawDinoSecondPct >= 0.15
-        ? "raw_dino_top_pct_lt_0_55_second_pct_gte_0_15"
-        : null;
+    rawDinoColorModeRead.reason
+      ? `raw_dino_${rawDinoColorModeRead.reason}`
+      : null;
   const rawDinoMulticolorDetected = !!rawDinoMulticolorReason;
   debugContext.raw_dino_meaningful_color_count = rawDinoMeaningfulClusters.length;
   debugContext.raw_dino_multicolor_reason = rawDinoMulticolorReason;
@@ -1279,12 +1340,12 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     name: getColorName(dominantReadCluster.base),
     pct: round2(dominantReadCluster.pct),
   };
-  const supportColors = colorReadClusters.slice(1, 3).map((c) => ({
+  const supportColors = colorReadClusters.slice(1, 4).map((c) => ({
     hex: c.base,
     name: getColorName(c.base),
     pct: round2(c.pct),
   }));
-  const accentColors = colorReadClusters.slice(3, 5).map((c) => ({
+  const accentColors = colorReadClusters.slice(4, 6).map((c) => ({
     hex: c.base,
     name: getColorName(c.base),
     pct: round2(c.pct),
@@ -1297,14 +1358,14 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       }
     : null;
   const rawDinoSecondaryColors = useRawDinoMulticolorRead
-    ? colorReadClusters.slice(1, 3).map((c) => ({
+    ? colorReadClusters.slice(1, 4).map((c) => ({
         hex: c.base,
         name: getColorName(c.base),
         pct: round2(c.pct),
       }))
     : [];
   const rawDinoAccentColors = useRawDinoMulticolorRead
-    ? colorReadClusters.slice(3, 5).map((c) => ({
+    ? colorReadClusters.slice(4, 6).map((c) => ({
         hex: c.base,
         name: getColorName(c.base),
         pct: round2(c.pct),
@@ -1315,12 +1376,17 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     mode,
     read_mode: mode,
     cluster_count: clusters.length,
+    color_mode: mode === "multicolor" ? "multi_color" : "single_color",
     interpretation,
     display_label: displayLabel,
     confidence: zoneConfidence,
     dominant_color: dominantColor,
+    primary_color: compactColorRead(dominantColor),
     support_colors: supportColors,
+    secondary_colors: supportColors.map(compactColorRead).filter(Boolean),
     accent_colors: accentColors,
+    region_colors: colorReadClusters.map((c) => compactRegionColor({ hex: c.base, pct: c.pct })).filter(Boolean),
+    evidence_summary: buildEvidenceSummary(mode === "multicolor" ? "multi_color" : "single_color", colorReadClusters, useRawDinoMulticolorRead ? "raw DINO region colors" : debugContext.zone_color_source),
     ...(
       useRawDinoMulticolorRead && isGarmentZoneKey(zoneKey)
         ? {
@@ -3107,8 +3173,10 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
   const inputDinoRegions = inputSegmentedRegions.filter(
     (region) => region?.source_type === "grounding_dino" || region?.source_type === "dino_detection"
   );
-  const dinoRegions = [...inputDinoRegions, ...(Array.isArray(dinoGarmentRegions) ? dinoGarmentRegions : [])].filter(
-    (region, idx, arr) => idx === arr.findIndex((candidate) => candidate?.segment_label === region?.segment_label && candidate?.zone === region?.zone)
+  const dinoRegions = dedupeDinoRegionsByZoneAndOverlap(
+    [...inputDinoRegions, ...(Array.isArray(dinoGarmentRegions) ? dinoGarmentRegions : [])].filter(
+      (region, idx, arr) => idx === arr.findIndex((candidate) => candidate?.id === region?.id && candidate?.segment_label === region?.segment_label && candidate?.zone === region?.zone)
+    )
   );
   const samZones = new Set(samRegions.map((region) => region?.zone).filter((zone) => zone && zone !== "unknown"));
   const dedupedDinoRegions = samRegions.length
@@ -4010,6 +4078,78 @@ function getDinoBboxArea(bbox = null) {
   const height = Number(bbox.height ?? (Number(bbox.y_max) - Number(bbox.y_min)) ?? 0);
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return 0;
   return round2(width * height);
+}
+
+
+function getRegionBBox(region = {}) {
+  return region?.bbox || region?.mask_geometry?.bbox || null;
+}
+
+function getBboxIoU(a = null, b = null) {
+  const boxA = normalizeGroundingDinoBbox(a) || a;
+  const boxB = normalizeGroundingDinoBbox(b) || b;
+  if (!boxA || !boxB) return 0;
+  const ax1 = Number(boxA.x_min ?? boxA.x ?? 0);
+  const ay1 = Number(boxA.y_min ?? boxA.y ?? 0);
+  const ax2 = Number(boxA.x_max ?? (Number(boxA.x || 0) + Number(boxA.w || 0)));
+  const ay2 = Number(boxA.y_max ?? (Number(boxA.y || 0) + Number(boxA.h || 0)));
+  const bx1 = Number(boxB.x_min ?? boxB.x ?? 0);
+  const by1 = Number(boxB.y_min ?? boxB.y ?? 0);
+  const bx2 = Number(boxB.x_max ?? (Number(boxB.x || 0) + Number(boxB.w || 0)));
+  const by2 = Number(boxB.y_max ?? (Number(boxB.y || 0) + Number(boxB.h || 0)));
+  if (![ax1, ay1, ax2, ay2, bx1, by1, bx2, by2].every(Number.isFinite)) return 0;
+  const ix1 = Math.max(ax1, bx1);
+  const iy1 = Math.max(ay1, by1);
+  const ix2 = Math.min(ax2, bx2);
+  const iy2 = Math.min(ay2, by2);
+  const intersection = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
+  const areaA = Math.max(0, ax2 - ax1) * Math.max(0, ay2 - ay1);
+  const areaB = Math.max(0, bx2 - bx1) * Math.max(0, by2 - by1);
+  const union = areaA + areaB - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
+function mergeRegionColors(...colorLists) {
+  return buildColorClusters(colorLists.flat().filter(Boolean))
+    .map((c) => compactRegionColor({ hex: c.base, pct: c.pct }))
+    .filter(Boolean);
+}
+
+function dedupeDinoRegionsByZoneAndOverlap(regions = [], overlapThreshold = 0.72) {
+  const merged = [];
+  for (const region of regions || []) {
+    const zone = region?.zone || "unknown";
+    const bbox = getRegionBBox(region);
+    const matchIndex = merged.findIndex((candidate) =>
+      candidate?.zone === zone && bbox && getRegionBBox(candidate) && getBboxIoU(bbox, getRegionBBox(candidate)) >= overlapThreshold
+    );
+
+    if (matchIndex < 0) {
+      merged.push(region);
+      continue;
+    }
+
+    const current = merged[matchIndex];
+    const best = Number(region?.confidence || 0) > Number(current?.confidence || 0) ? region : current;
+    const other = best === region ? current : region;
+    const regionColors = mergeRegionColors(current?.region_colors || [], region?.region_colors || []);
+    const dominant = regionColors[0]?.hex || safeHex(best?.dominant_hex || other?.dominant_hex || "") || null;
+
+    merged[matchIndex] = {
+      ...other,
+      ...best,
+      confidence: Math.max(Number(current?.confidence || 0), Number(region?.confidence || 0)),
+      coverage: round2(Math.max(Number(current?.coverage || 0), Number(region?.coverage || 0))),
+      dominant_hex: dominant,
+      region_colors: regionColors,
+      mask_geometry: best?.mask_geometry || other?.mask_geometry || null,
+      duplicate_detection_ids: [
+        ...(Array.isArray(current?.duplicate_detection_ids) ? current.duplicate_detection_ids : [current?.id].filter(Boolean)),
+        region?.id,
+      ].filter(Boolean),
+    };
+  }
+  return merged;
 }
 
 function buildDinoSegmentedRegions(detections = []) {
