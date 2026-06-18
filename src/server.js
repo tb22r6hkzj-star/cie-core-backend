@@ -813,6 +813,9 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       furTrimStrongSignal: false,
     },
     unknown_reason: null,
+    multicolor_detected: false,
+    multicolor_reason: null,
+    meaningful_color_count: 0,
   };
 
   if (!zoneData?.hex) {
@@ -987,6 +990,28 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   let displayLabel = getColorName(dominant.base);
   let mode = "single";
   let interpretation = "single_color";
+  const pctSortedClusters = clusters.slice().sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
+  const meaningfulThreshold = zoneKey === "footwear" ? 0.06 : 0.08;
+  const meaningfulClusters = pctSortedClusters.filter((c) => Number(c?.pct || 0) >= meaningfulThreshold);
+  const topPct = Number(pctSortedClusters?.[0]?.pct || 0);
+  const secondPct = Number(pctSortedClusters?.[1]?.pct || 0);
+  const footwearMulticolorSignal =
+    zoneKey === "footwear" &&
+    meaningfulClusters.length >= 3 &&
+    meaningfulThreshold === 0.06;
+  const generalMulticolorSignal = meaningfulClusters.length >= 3 && meaningfulThreshold === 0.08;
+  const balancedTwoPlusSignal = topPct < 0.55 && secondPct >= 0.15;
+  const multicolorReason = footwearMulticolorSignal
+    ? "footwear_three_colors_pct_gte_0_06"
+    : generalMulticolorSignal
+      ? "three_colors_pct_gte_0_08"
+      : balancedTwoPlusSignal
+        ? "top_pct_lt_0_55_second_pct_gte_0_15"
+        : null;
+  const multicolorDetected = !!multicolorReason;
+  debugContext.multicolor_detected = multicolorDetected;
+  debugContext.multicolor_reason = multicolorReason;
+  debugContext.meaningful_color_count = meaningfulClusters.length;
   const evidenceCoverage = clusters.reduce((sum, c) => sum + Number(c?.pct || 0), 0);
 
   if (
@@ -1010,17 +1035,18 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     displayLabel = "Light Wash Denim";
     mode = "washed_fabric";
     interpretation = "denim";
-  } else if (zoneKey === "footwear" && clusters.length >= 3) {
+  } else if (multicolorDetected && zoneKey === "footwear") {
     displayLabel = "Multicolor Sneaker";
     mode = "multicolor";
     interpretation = "multi_material";
-  } else if (
-    ["accessory_jewelry", "bag", "eyewear"].includes(zoneKey) &&
-    clusters.length >= 3
-  ) {
+  } else if (multicolorDetected && ["accessory_jewelry", "bag", "eyewear"].includes(zoneKey)) {
     displayLabel = "Multicolor Accessory";
     mode = "multicolor";
     interpretation = "patterned";
+  } else if (multicolorDetected && ["upper_garment", "outerwear", "body_garment"].includes(zoneKey)) {
+    displayLabel = "Multicolor Garment";
+    mode = "multicolor";
+    interpretation = "multi_material";
   } else if (["accessory_jewelry", "bag", "eyewear"].includes(zoneKey) && clusters.length >= 2) {
     const top = scoredClusters[0] || clusters[0];
     const second = scoredClusters[1] || clusters[1];
@@ -1087,24 +1113,31 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   const zoneConfidence = Math.round(
     clamp100(Number(zoneData?.score || 0) * 0.55 + Number(zoneData?.confidence || 0) * 0.45)
   );
+  const colorReadClusters = mode === "multicolor" && meaningfulClusters.length
+    ? meaningfulClusters
+    : clusters;
+  const dominantReadCluster = mode === "multicolor"
+    ? colorReadClusters[0] || { base: dominant.base, pct: dominant.pct }
+    : { base: dominant.base, pct: dominant.pct };
 
   return {
     mode,
+    read_mode: mode,
     cluster_count: clusters.length,
     interpretation,
     display_label: displayLabel,
     confidence: zoneConfidence,
     dominant_color: {
-      hex: dominant.base,
-      name: getColorName(dominant.base),
-      pct: round2(dominant.pct),
+      hex: dominantReadCluster.base,
+      name: getColorName(dominantReadCluster.base),
+      pct: round2(dominantReadCluster.pct),
     },
-    support_colors: clusters.slice(1, 3).map((c) => ({
+    support_colors: colorReadClusters.slice(1, 3).map((c) => ({
       hex: c.base,
       name: getColorName(c.base),
       pct: round2(c.pct),
     })),
-    accent_colors: clusters.slice(3, 5).map((c) => ({
+    accent_colors: colorReadClusters.slice(3, 5).map((c) => ({
       hex: c.base,
       name: getColorName(c.base),
       pct: round2(c.pct),
