@@ -381,6 +381,137 @@ function getPerceptualTraits(hex) {
   };
 }
 
+
+const COLOR_IDENTITY_TRANSLATIONS = {
+  "Graphite": "Cool Gray",
+  "Deep Crimson": "Dark Red",
+  "Soft Linen": "Off White",
+  "Warm Sand": "Golden Beige",
+  "Cognac": "Caramel Brown",
+  "Forest Green": "Dark Green",
+  "Deep Navy": "Dark Blue",
+  "Deep Olive": "Olive Green",
+  "Rose": "Red-Pink",
+  "Graphite Black": "Dark Gray",
+};
+
+function getColorIdentityTone(name, traits = {}) {
+  const text = String(name || "").toLowerCase();
+  if (text.includes("deep") || text.includes("dark") || text.includes("black") || traits.depth === "deep") return "deep";
+  if (text.includes("soft") || text.includes("muted") || traits.intensity === "muted") return "soft";
+  if (text.includes("light") || text.includes("linen") || traits.depth === "light") return "light";
+  if (text.includes("vivid") || text.includes("bright") || traits.intensity === "vivid") return "vivid";
+  if (text.includes("warm") || traits.temperature === "warm") return "warm";
+  if (text.includes("cool") || traits.temperature === "cool") return "cool";
+  return traits.depth || "balanced";
+}
+
+function getEverydayColorFamily(hex, classification = null, traits = null) {
+  const safe = safeHex(hex);
+  if (!safe) return "neutral";
+  const meta = classification || classifyColorV2(safe);
+  const perceptual = traits || getPerceptualTraits(safe);
+  const light = getLight(safe);
+  const sat = getSat(safe);
+  const lane = meta?.lane || "other";
+
+  if (sat < 0.12) {
+    if (light < 0.18) return "black";
+    if (light > 0.82) return "white";
+    return "gray";
+  }
+  if (lane === "cyan") return "blue-green";
+  if (meta?.family === "earth" && ["orange", "yellow"].includes(lane)) return "brown";
+  if (lane === "pink") return "pink";
+  if (lane && lane !== "other") return lane;
+  return perceptual?.bias || meta?.family || "neutral";
+}
+
+function titleEverydayFamily(family) {
+  return String(family || "neutral")
+    .split("-")
+    .map((part) => titleCase(part))
+    .join("-");
+}
+
+function generateColorIdentityTranslation({ name, hex, family, tone, traits = {} }) {
+  const text = String(name || "").toLowerCase();
+  const everydayFamily = family || getEverydayColorFamily(hex, null, traits);
+  const familyLabel = titleEverydayFamily(everydayFamily);
+
+  if (text.includes("taupe")) return "Brown Gray";
+  if (text.includes("teal")) return tone === "deep" ? "Dark Blue-Green" : "Blue-Green";
+  if (text.includes("olive")) return tone === "deep" ? "Olive Green" : tone === "soft" ? "Soft Green" : "Green";
+  if (text.includes("linen") || text.includes("ivory") || text.includes("cream")) return "Off White";
+  if (text.includes("navy")) return "Dark Blue";
+  if (text.includes("crimson") || text.includes("burgundy")) return tone === "deep" ? "Dark Red" : "Red";
+  if (text.includes("cognac")) return "Caramel Brown";
+  if (text.includes("sand") || text.includes("beige")) return traits.temperature === "warm" || text.includes("warm") ? "Golden Beige" : "Beige";
+
+  if (tone === "deep") return `Dark ${familyLabel}`;
+  if (tone === "soft" || tone === "muted") return `Soft ${familyLabel}`;
+  if (tone === "light") return everydayFamily === "white" ? "Off White" : `Light ${familyLabel}`;
+  return familyLabel;
+}
+
+function buildColorIdentity({ name, hex, family = null, tone = null, perceptual = null } = {}) {
+  const safe = safeHex(hex);
+  const visionName = String(name || (safe ? getColorName(safe) : "Unknown")).trim();
+  const classification = safe ? classifyColorV2(safe) : null;
+  const traits = perceptual || (safe ? getPerceptualTraits(safe) : {});
+  const identityFamily = family || getEverydayColorFamily(safe, classification, traits);
+  const identityTone = tone || getColorIdentityTone(visionName, traits);
+  const translation = COLOR_IDENTITY_TRANSLATIONS[visionName] || generateColorIdentityTranslation({
+    name: visionName,
+    hex: safe,
+    family: identityFamily,
+    tone: identityTone,
+    traits,
+  });
+
+  return {
+    name: visionName,
+    translation,
+    family: identityFamily,
+    tone: identityTone,
+  };
+}
+
+function withColorIdentity(color) {
+  if (!color) return color;
+  const hex = safeHex(color?.hex || color?.base);
+  const name = color?.name || (hex ? getColorName(hex) : "Unknown");
+  return {
+    ...color,
+    color_identity: color.color_identity || buildColorIdentity({
+      name,
+      hex,
+      family: color?.family,
+      tone: color?.tone,
+      perceptual: color?.perceptual || color?.perceptual_traits,
+    }),
+  };
+}
+
+function buildColorIdentitySummary(identity, role = "dominant color family") {
+  if (!identity?.name) return null;
+  return `${identity.name} (${identity.translation}) is the ${role}.`;
+}
+
+function buildGarmentIdentity(primaryColor, secondaryColors = []) {
+  const primaryIdentity = primaryColor?.color_identity || withColorIdentity(primaryColor)?.color_identity || null;
+  return {
+    primary_identity: primaryIdentity ? {
+      name: primaryIdentity.name,
+      translation: primaryIdentity.translation,
+    } : null,
+    secondary_identities: (secondaryColors || [])
+      .map((color) => color?.color_identity || withColorIdentity(color)?.color_identity)
+      .filter(Boolean)
+      .map((identity) => ({ name: identity.name, translation: identity.translation })),
+  };
+}
+
 /* =========================
    COLOR PROFILES
 ========================= */
@@ -392,7 +523,7 @@ function buildColorProfile(hex, pct = 0) {
   const lab = getLab(safe);
   const traits = getPerceptualTraits(safe);
 
-  return {
+  return withColorIdentity({
     hex: safe,
     name: getColorName(safe),
     pct: round2(pct),
@@ -404,7 +535,13 @@ function buildColorProfile(hex, pct = 0) {
     family: classification.family,
     lane: classification.lane,
     vivid: classification.vivid,
-  };
+    color_identity: buildColorIdentity({
+      name: getColorName(safe),
+      hex: safe,
+      family: getEverydayColorFamily(safe, classification, traits),
+      perceptual: traits,
+    }),
+  });
 }
 
 function isGarmentZoneKey(zoneKey) {
@@ -414,11 +551,11 @@ function isGarmentZoneKey(zoneKey) {
 function compactColorRead(color) {
   const safe = safeHex(color?.hex || color?.base);
   if (!safe) return null;
-  return {
+  return withColorIdentity({
     hex: safe,
     name: color?.name || getColorName(safe),
     pct: round2(color?.pct || 0),
-  };
+  });
 }
 
 function joinHumanList(values = []) {
@@ -491,12 +628,12 @@ function compactRegionColor(color) {
   const hex = safeHex(color?.hex || color?.base);
   if (!hex) return null;
   const pct = round2(normalizeColorPct(color?.pct));
-  return {
+  return withColorIdentity({
     hex,
     name: color?.name || getColorName(hex),
     pct,
     percentage: formatColorPct(pct),
-  };
+  });
 }
 
 function getZoneColorMode(clusters = []) {
@@ -728,6 +865,7 @@ function mergeDominantAndImportantColors(topColors, dominantHex) {
       family: profile.family,
       lane: profile.lane,
       vivid: profile.vivid,
+      color_identity: profile.color_identity,
       importance,
     };
   });
@@ -910,7 +1048,7 @@ function buildVisualIntelligence({ dominantHex, normalizedColors = [], colorRole
 function buildZoneCandidate(color, zone, score) {
   if (!color?.hex) return null;
 
-  return {
+  return withColorIdentity({
     zone,
     hex: color.hex,
     name: color.name || getColorName(color.hex),
@@ -920,7 +1058,7 @@ function buildZoneCandidate(color, zone, score) {
     surface_role: classifySurfaceRole(color),
     family: color.family || classifyColorV2(color.hex).family,
     importance: color.importance || null,
-  };
+  });
 }
 
 function buildSegmentedColorObject({
@@ -937,7 +1075,7 @@ function buildSegmentedColorObject({
   const lab = getLab(safe);
   const hsl = chroma(safe).hsl();
 
-  return {
+  return withColorIdentity({
     hex: safe,
     name: getColorName(safe),
     LAB: {
@@ -957,7 +1095,7 @@ function buildSegmentedColorObject({
     source_type: sourceType,
     segment_label: segmentLabel || zone || "unknown",
     pct: round2(color?.pct || 0),
-  };
+  });
 }
 
 function getBlackNuanceLabel(hex) {
@@ -1335,37 +1473,37 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   const dominantReadCluster = mode === "multicolor" && !useRawDinoMulticolorRead
     ? colorReadClusters[0] || { base: dominant.base, pct: dominant.pct }
     : { base: dominant.base, pct: dominant.pct };
-  const dominantColor = {
+  const dominantColor = withColorIdentity({
     hex: dominantReadCluster.base,
     name: getColorName(dominantReadCluster.base),
     pct: round2(dominantReadCluster.pct),
-  };
-  const supportColors = colorReadClusters.slice(1, 4).map((c) => ({
+  });
+  const supportColors = colorReadClusters.slice(1, 4).map((c) => withColorIdentity({
     hex: c.base,
     name: getColorName(c.base),
     pct: round2(c.pct),
   }));
-  const accentColors = colorReadClusters.slice(4, 6).map((c) => ({
+  const accentColors = colorReadClusters.slice(4, 6).map((c) => withColorIdentity({
     hex: c.base,
     name: getColorName(c.base),
     pct: round2(c.pct),
   }));
   const rawDinoPrimaryColor = useRawDinoMulticolorRead
-    ? {
+    ? withColorIdentity({
         hex: colorReadClusters[0].base,
         name: getColorName(colorReadClusters[0].base),
         pct: round2(colorReadClusters[0].pct),
-      }
+      })
     : null;
   const rawDinoSecondaryColors = useRawDinoMulticolorRead
-    ? colorReadClusters.slice(1, 4).map((c) => ({
+    ? colorReadClusters.slice(1, 4).map((c) => withColorIdentity({
         hex: c.base,
         name: getColorName(c.base),
         pct: round2(c.pct),
       }))
     : [];
   const rawDinoAccentColors = useRawDinoMulticolorRead
-    ? colorReadClusters.slice(4, 6).map((c) => ({
+    ? colorReadClusters.slice(4, 6).map((c) => withColorIdentity({
         hex: c.base,
         name: getColorName(c.base),
         pct: round2(c.pct),
@@ -1381,6 +1519,8 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     display_label: displayLabel,
     confidence: zoneConfidence,
     dominant_color: dominantColor,
+    color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
+    garment_identity: isGarmentZoneKey(zoneKey) ? buildGarmentIdentity(dominantColor, supportColors) : undefined,
     primary_color: compactColorRead(dominantColor),
     support_colors: supportColors,
     secondary_colors: supportColors.map(compactColorRead).filter(Boolean),
@@ -1393,6 +1533,8 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
             primary_color: compactColorRead(rawDinoPrimaryColor),
             secondary_colors: rawDinoSecondaryColors.map(compactColorRead).filter(Boolean),
             accent_colors: rawDinoAccentColors.map(compactColorRead).filter(Boolean),
+            color_identity_summary: buildColorIdentitySummary(rawDinoPrimaryColor?.color_identity),
+            garment_identity: buildGarmentIdentity(rawDinoPrimaryColor, rawDinoSecondaryColors),
             color_story: buildColorStory(
               compactColorRead(rawDinoPrimaryColor),
               rawDinoSecondaryColors.map(compactColorRead).filter(Boolean),
@@ -3205,6 +3347,7 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
   const styleIdentity = deriveStyleIdentity(best.mode, scoreBreakdown);
   const visualImportance = collectImportantColors(topColors, dominantHex);
   const outfitScore = scoredOutfit.outfit_score;
+  const primaryColorIdentity = normalizedColors[0]?.color_identity || null;
 
   return {
     analysis_type: "outfit_score",
@@ -3214,6 +3357,8 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     score_breakdown: scoreBreakdown,
     mode_scores: modeScores,
     detected_palette: detectedPalette,
+    color_identity_summary: buildColorIdentitySummary(primaryColorIdentity),
+    garment_identity: buildGarmentIdentity(normalizedColors[0], normalizedColors.slice(1, 4)),
     color_roles: colorRoles,
     style_identity: styleIdentity,
     why_this_works: buildWhyThisWorks(colorRoles),
@@ -5358,6 +5503,7 @@ async function analyzeGhostColors(ghostUrl) {
         pct,
         lab: profile?.lab || getLab(safe),
         perceptual: profile?.perceptual || getPerceptualTraits(safe),
+        color_identity: profile?.color_identity || buildColorIdentity({ name: getColorName(safe), hex: safe }),
         importance,
       };
     })
