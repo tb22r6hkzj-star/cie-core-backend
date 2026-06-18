@@ -407,6 +407,76 @@ function buildColorProfile(hex, pct = 0) {
   };
 }
 
+function isGarmentZoneKey(zoneKey) {
+  return ["upper_garment", "lower_garment", "outerwear", "body_garment"].includes(zoneKey);
+}
+
+function compactColorRead(color) {
+  const safe = safeHex(color?.hex || color?.base);
+  if (!safe) return null;
+  return {
+    hex: safe,
+    name: color?.name || getColorName(safe),
+    pct: round2(color?.pct || 0),
+  };
+}
+
+function joinHumanList(values = []) {
+  const clean = values.map((v) => String(v || "").trim()).filter(Boolean);
+  if (clean.length <= 1) return clean[0] || "";
+  if (clean.length === 2) return `${clean[0]} and ${clean[1]}`;
+  return `${clean.slice(0, -1).join(", ")}, and ${clean[clean.length - 1]}`;
+}
+
+function colorIsSoftNeutral(color) {
+  const hex = safeHex(color?.hex || color?.base);
+  if (!hex) return false;
+  const classification = classifyColorV2(hex);
+  const traits = getPerceptualTraits(hex);
+  return classification.family === "neutral" || Number(traits.chroma_magnitude || 0) < 22;
+}
+
+function buildColorStory(primaryColor, secondaryColors = [], accentColors = []) {
+  if (!primaryColor?.name) return null;
+
+  const secondaryNames = secondaryColors.map((c) => c.name).filter(Boolean);
+  const accentNames = accentColors.map((c) => c.name).filter(Boolean);
+  const mainNames = [primaryColor.name, ...secondaryNames].filter(Boolean);
+
+  if (!secondaryNames.length && !accentNames.length) {
+    return `This garment is primarily ${primaryColor.name}.`;
+  }
+
+  const mainPhrase = joinHumanList(mainNames);
+  if (!accentNames.length) {
+    return `This garment combines ${mainPhrase}.`;
+  }
+
+  const allAccentsAreNeutral = accentColors.length > 0 && accentColors.every(colorIsSoftNeutral);
+  const accentPhrase = allAccentsAreNeutral
+    ? "soft neutral accents"
+    : `${joinHumanList(accentNames)} accents`;
+
+  return `This garment combines ${mainPhrase} with ${accentPhrase}.`;
+}
+
+function buildGarmentColorProfile({ zoneKey, mode, dominantColor, supportColors = [], accentColors = [] }) {
+  if (!isGarmentZoneKey(zoneKey) || mode !== "multicolor") return {};
+
+  const primaryColor = compactColorRead(dominantColor);
+  if (!primaryColor) return {};
+
+  const secondaryColors = (supportColors || []).map(compactColorRead).filter(Boolean);
+  const accents = (accentColors || []).map(compactColorRead).filter(Boolean);
+
+  return {
+    primary_color: primaryColor,
+    secondary_colors: secondaryColors,
+    accent_colors: accents,
+    color_story: buildColorStory(primaryColor, secondaryColors, accents),
+  };
+}
+
 /* =========================
    VISUAL IMPORTANCE LAYER
 ========================= */
@@ -1119,6 +1189,21 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   const dominantReadCluster = mode === "multicolor"
     ? colorReadClusters[0] || { base: dominant.base, pct: dominant.pct }
     : { base: dominant.base, pct: dominant.pct };
+  const dominantColor = {
+    hex: dominantReadCluster.base,
+    name: getColorName(dominantReadCluster.base),
+    pct: round2(dominantReadCluster.pct),
+  };
+  const supportColors = colorReadClusters.slice(1, 3).map((c) => ({
+    hex: c.base,
+    name: getColorName(c.base),
+    pct: round2(c.pct),
+  }));
+  const accentColors = colorReadClusters.slice(3, 5).map((c) => ({
+    hex: c.base,
+    name: getColorName(c.base),
+    pct: round2(c.pct),
+  }));
 
   return {
     mode,
@@ -1127,21 +1212,16 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     interpretation,
     display_label: displayLabel,
     confidence: zoneConfidence,
-    dominant_color: {
-      hex: dominantReadCluster.base,
-      name: getColorName(dominantReadCluster.base),
-      pct: round2(dominantReadCluster.pct),
-    },
-    support_colors: colorReadClusters.slice(1, 3).map((c) => ({
-      hex: c.base,
-      name: getColorName(c.base),
-      pct: round2(c.pct),
-    })),
-    accent_colors: colorReadClusters.slice(3, 5).map((c) => ({
-      hex: c.base,
-      name: getColorName(c.base),
-      pct: round2(c.pct),
-    })),
+    dominant_color: dominantColor,
+    support_colors: supportColors,
+    accent_colors: accentColors,
+    ...buildGarmentColorProfile({
+      zoneKey,
+      mode,
+      dominantColor,
+      supportColors,
+      accentColors,
+    }),
     _debug: debugContext,
   };
 }
@@ -1910,6 +1990,23 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
       }
     }
 
+    const dominantColor = {
+      hex: dominant.base,
+      name: getColorName(dominant.base),
+      pct: round2(dominant.pct),
+    };
+    const supportColors = clusters.slice(1, 3).map((c) => ({
+      hex: c.base,
+      name: getColorName(c.base),
+      pct: round2(c.pct),
+    }));
+    const accentColors = clusters.slice(3, 5).map((c) => ({
+      hex: c.base,
+      name: getColorName(c.base),
+      pct: round2(c.pct),
+    }));
+    const itemMode = zoneData.mode || zoneData.read_mode || (isMultiColor(clusters) ? "multicolor" : "single_color");
+
     return {
       type,
       confidence: zoneData.score || 60,
@@ -1917,16 +2014,16 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
       material_confidence: materialConfidence,
       cluster_count: clusters.length,
       display_label: displayLabel,
-      dominant_color: {
-        hex: dominant.base,
-        name: getColorName(dominant.base),
-        pct: round2(dominant.pct),
-      },
-      support_colors: clusters.slice(1, 3).map((c) => ({
-        hex: c.base,
-        name: getColorName(c.base),
-        pct: round2(c.pct),
-      })),
+      dominant_color: dominantColor,
+      support_colors: supportColors,
+      accent_colors: accentColors,
+      ...buildGarmentColorProfile({
+        zoneKey: type,
+        mode: itemMode,
+        dominantColor,
+        supportColors,
+        accentColors,
+      }),
     };
   }
 
