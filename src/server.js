@@ -2470,11 +2470,22 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
       }
     }
 
-    const dominantColor = {
-      hex: dominant.base,
-      name: getColorName(dominant.base),
-      pct: round2(dominant.pct),
-    };
+    const zoneDominantColor = compactColorRead(zoneData?.dominant_color);
+    const shouldKeepZoneDominantIdentity =
+      ["accessory_jewelry", "bag", "eyewear", "headwear"].includes(type) &&
+      !!zoneDominantColor?.name &&
+      safeHex(zoneDominantColor.hex) === safeHex(dominant.base) &&
+      shouldPreserveDominantAccessoryColor(type, clusters);
+    const dominantColor = shouldKeepZoneDominantIdentity
+      ? zoneDominantColor
+      : withColorIdentity({
+          hex: dominant.base,
+          name: getColorName(dominant.base),
+          pct: round2(dominant.pct),
+        });
+    if (shouldKeepZoneDominantIdentity) {
+      displayLabel = zoneDominantColor.name;
+    }
     const supportColors = clusters.slice(1, 3).map((c) => ({
       hex: c.base,
       name: getColorName(c.base),
@@ -2498,6 +2509,8 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
       accessory_type: zoneData.accessory_type || null,
       object_type: zoneData.object_type || null,
       dominant_color: dominantColor,
+      primary_color: compactColorRead(dominantColor),
+      color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
       support_colors: supportColors,
       accent_colors: accentColors,
       ...buildGarmentColorProfile({
