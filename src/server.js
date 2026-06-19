@@ -1201,6 +1201,33 @@ function getBlackNuanceLabel(hex) {
   return "Graphite Black";
 }
 
+
+function buildConfidenceBreakdown({
+  sourceConfidence = 0,
+  regionCoverage = 0,
+  weightedRegionConfidence = 0,
+  colorCount = 0,
+  dominantPct = 0,
+  clusterCount = 0,
+  multicolorDetected = false,
+  suppressionGates = {},
+  computedScore = 0,
+  finalConfidence = 0,
+} = {}) {
+  return {
+    source_confidence: Math.round(clamp100(Number(sourceConfidence || 0))),
+    region_coverage: round2(Number(regionCoverage || 0)),
+    weighted_region_confidence: round2(Number(weightedRegionConfidence || 0)),
+    color_count: Number(colorCount || 0),
+    dominant_pct: round2(Number(dominantPct || 0)),
+    cluster_count: Number(clusterCount || 0),
+    multicolor_detected: Boolean(multicolorDetected),
+    suppression_gates: suppressionGates || {},
+    computed_score: Math.round(clamp100(Number(computedScore || 0))),
+    final_confidence: Math.round(clamp100(Number(finalConfidence || 0))),
+  };
+}
+
 function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColors = [], useRegionOnly = false, context = {}) {
   const fallbackName = zoneData?.name || titleCase(String(zoneKey || "unknown").replace(/_/g, " "));
   const debugContext = {
@@ -1227,6 +1254,9 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     filtered_cluster_count: 0,
     accessory_jewelry_identity_trace: null,
   };
+  const contextEvidence = context?.evidence || {};
+  const sourceConfidence = Number(zoneData?.confidence || 0);
+  const computedScoreForBreakdown = Number(zoneData?.score || 0);
 
   if (!zoneData?.hex) {
     debugContext.unknown_reason = "zone_data_missing_hex";
@@ -1244,6 +1274,15 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       region_colors: [],
       evidence_summary: "No reliable color evidence for this zone.",
       confidence: 0,
+      confidence_breakdown: buildConfidenceBreakdown({
+        sourceConfidence,
+        regionCoverage: contextEvidence.coverage,
+        weightedRegionConfidence: contextEvidence.weighted_confidence,
+        colorCount: contextEvidence.color_count || regionColors.length,
+        computedScore: computedScoreForBreakdown,
+        finalConfidence: 0,
+        suppressionGates: debugContext.suppression_gates,
+      }),
       _debug: debugContext,
     };
   }
@@ -1263,6 +1302,15 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       region_colors: [],
       evidence_summary: "No reliable color evidence for this zone.",
       confidence: 0,
+      confidence_breakdown: buildConfidenceBreakdown({
+        sourceConfidence,
+        regionCoverage: contextEvidence.coverage,
+        weightedRegionConfidence: contextEvidence.weighted_confidence,
+        colorCount: contextEvidence.color_count || regionColors.length,
+        computedScore: computedScoreForBreakdown,
+        finalConfidence: 0,
+        suppressionGates: debugContext.suppression_gates,
+      }),
       _debug: debugContext,
     };
   }
@@ -1409,6 +1457,18 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       region_colors: clusters.map((c) => compactRegionColor({ hex: c.base, pct: c.pct })).filter(Boolean),
       evidence_summary: buildEvidenceSummary("single_color", clusters, debugContext.zone_color_source),
       confidence: Math.round(clamp100(Number(zoneData?.score || 0) * 0.4)),
+      confidence_breakdown: buildConfidenceBreakdown({
+        sourceConfidence,
+        regionCoverage: contextEvidence.coverage || regionCoverage,
+        weightedRegionConfidence: contextEvidence.weighted_confidence,
+        colorCount: contextEvidence.color_count || regionColors.length,
+        dominantPct: dominant?.pct,
+        clusterCount: clusters.length,
+        multicolorDetected: debugContext.multicolor_detected,
+        suppressionGates: debugContext.suppression_gates,
+        computedScore: computedScoreForBreakdown,
+        finalConfidence: Math.round(clamp100(Number(zoneData?.score || 0) * 0.4)),
+      }),
       _debug: debugContext,
     };
   }
@@ -1659,6 +1719,18 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     interpretation,
     display_label: displayLabel,
     confidence: zoneConfidence,
+    confidence_breakdown: buildConfidenceBreakdown({
+      sourceConfidence,
+      regionCoverage: contextEvidence.coverage || regionCoverage,
+      weightedRegionConfidence: contextEvidence.weighted_confidence,
+      colorCount: contextEvidence.color_count || regionColors.length,
+      dominantPct: dominant?.pct,
+      clusterCount: clusters.length,
+      multicolorDetected: debugContext.multicolor_detected,
+      suppressionGates: debugContext.suppression_gates,
+      computedScore: computedScoreForBreakdown,
+      finalConfidence: zoneConfidence,
+    }),
     dominant_color: dominantColor,
     color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
     garment_identity: isGarmentZoneKey(zoneKey) ? buildGarmentIdentity(dominantColor, supportColors) : undefined,
@@ -1856,6 +1928,17 @@ function areLikelyOnePiece(zones = {}, segmentedByZone = {}) {
   };
 }
 
+
+function withConfidenceBreakdownFinalConfidence(zone = {}, finalConfidence = 0) {
+  return {
+    ...zone,
+    confidence_breakdown: {
+      ...(zone?.confidence_breakdown || buildConfidenceBreakdown()),
+      final_confidence: Math.round(clamp100(Number(finalConfidence || 0))),
+    },
+  };
+}
+
 function dedupeDarkNeutralZoneReuse(zones = {}) {
   const slots = ["upper_garment", "lower_garment", "outerwear"];
   const candidates = slots
@@ -1897,17 +1980,18 @@ function dedupeDarkNeutralZoneReuse(zones = {}) {
   for (const r of removals) {
     const current = deduped[r.slot];
     if (!current?.hex) continue;
-    deduped[r.slot] = {
+    const dedupedConfidence = Math.min(Number(current?.confidence || 0), 42);
+    deduped[r.slot] = withConfidenceBreakdownFinalConfidence({
       ...current,
       hex: null,
       interpretation: "unknown",
       display_label: titleCase(String(r.slot).replace(/_/g, " ")),
-      confidence: Math.min(Number(current?.confidence || 0), 42),
+      confidence: dedupedConfidence,
       dominant_color: null,
       support_colors: [],
       accent_colors: [],
       dedupe_reason: r.reason,
-    };
+    }, dedupedConfidence);
   }
 
   return { zones: deduped, removals };
@@ -2112,6 +2196,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         preservedDinoHex: preserveDinoZoneColor ? dinoPrimaryHex : null,
         preserveDinoZoneColor,
         zoneColorSource: preserveDinoZoneColor ? "dino_primary" : consensusCluster?.base ? "cluster" : "fallback",
+        evidence,
       }
     );
     if (["eyewear", "outerwear", "fur_trim"].includes(zoneKey)) {
@@ -2243,21 +2328,26 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       zone: "one_piece",
       interpretation: "one_piece",
       confidence: onePieceDecision.confidence,
+      confidence_breakdown: buildConfidenceBreakdown({
+        computedScore: onePieceDecision.confidence,
+        finalConfidence: onePieceDecision.confidence,
+      }),
       evidence: onePieceDecision.reason,
       lab_distance: onePieceDecision.lab_distance,
     };
 
     if (zones.lower_garment) {
-      zones.lower_garment = {
+      const lowerSuppressedConfidence = Math.min(Number(zones.lower_garment?.confidence || 0), 45);
+      zones.lower_garment = withConfidenceBreakdownFinalConfidence({
         ...zones.lower_garment,
         hex: null,
         interpretation: "unknown",
-        confidence: Math.min(Number(zones.lower_garment?.confidence || 0), 45),
+        confidence: lowerSuppressedConfidence,
         dominant_color: null,
         support_colors: [],
         accent_colors: [],
         one_piece_suppressed: true,
-      };
+      }, lowerSuppressedConfidence);
     }
   }
 
@@ -2292,6 +2382,9 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     version: "garment_zone_v3",
     segmented_regions: segmentedRegions,
     zones: finalZones,
+    confidence_breakdown: Object.fromEntries(
+      Object.entries(finalZones).map(([key, value]) => [key, value?.confidence_breakdown || null])
+    ),
     region_color_analysis: regionColorAnalysis,
     generic_mask_debug: genericMaskDebug,
     removed_non_garment_zones: garmentZoneFilterResult.removed_non_garment_zones,
@@ -3548,6 +3641,7 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
         Object.entries(garmentZones?.zones || {}).map(([k, v]) => [k, Number(v?.confidence || v?.score || 0)])
       ),
     },
+    confidence_breakdown: garmentZones?.confidence_breakdown || {},
     material_analysis: garmentAnalysis,
     pipeline: pipeline ? { ...pipeline, garment_zone_source: garmentZoneSource } : {
       sam_enabled: false,
