@@ -9,13 +9,13 @@ assert.deepEqual(inferAccessoryDisplayMetadata(['hat']), {
 });
 assert.deepEqual(inferAccessoryDisplayMetadata(['baseball cap']), {
   display_zone_label: 'Headwear',
-  accessory_type: 'hat',
-  object_type: 'hat',
+  accessory_type: 'cap',
+  object_type: 'cap',
 });
 assert.deepEqual(inferAccessoryDisplayMetadata(['gold chain']), {
   display_zone_label: 'Jewelry',
-  accessory_type: 'necklace',
-  object_type: 'necklace',
+  accessory_type: 'chain',
+  object_type: 'chain',
 });
 assert.deepEqual(inferAccessoryDisplayMetadata(['watch']), {
   display_zone_label: 'Watch',
@@ -23,18 +23,18 @@ assert.deepEqual(inferAccessoryDisplayMetadata(['watch']), {
   object_type: 'watch',
 });
 assert.deepEqual(inferAccessoryDisplayMetadata(['ring']), {
-  display_zone_label: 'Ring',
+  display_zone_label: 'Jewelry',
   accessory_type: 'ring',
   object_type: 'ring',
 });
 assert.deepEqual(inferAccessoryDisplayMetadata(['bracelet']), {
-  display_zone_label: 'Bracelet',
+  display_zone_label: 'Jewelry',
   accessory_type: 'bracelet',
   object_type: 'bracelet',
 });
 assert.deepEqual(inferAccessoryDisplayMetadata(['accessory']), {
   display_zone_label: 'Accessory',
-  accessory_type: null,
+  accessory_type: 'accessory',
   object_type: 'accessory',
 });
 

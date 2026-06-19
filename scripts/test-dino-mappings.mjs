@@ -12,6 +12,8 @@ assert.ok(DINO_LABEL_MAPPINGS.length > 0, 'DINO_LABEL_MAPPINGS should not be emp
 assert.equal(getDinoMapping('hoodie')?.category, 'hoodie');
 assert.equal(getDinoMapping('hoodie')?.zone, 'upper_garment');
 assert.equal(getDinoMapping('hat')?.zone, 'accessory_jewelry');
+assert.equal(getDinoMapping('hat')?.display_zone_label, 'Headwear');
+assert.equal(getDinoMapping('hat')?.accessory_type, 'hat');
 assert.equal(getDinoMapping('sweater')?.zone, 'upper_garment');
 
 assert.equal(getDinoMapping('sneakers')?.category, 'sneakers');
@@ -24,6 +26,8 @@ assert.equal(getDinoMapping('unknown object'), null);
 
 assert.equal(mapDinoLabel('watch').category, 'accessory');
 assert.equal(mapDinoLabel('watch').zone, 'accessory_jewelry');
+assert.equal(mapDinoLabel('watch').display_zone_label, 'Watch');
+assert.equal(mapDinoLabel('watch').accessory_type, 'watch');
 
 assert.equal(mapDinoLabel('unknown object').category, 'piece');
 assert.equal(mapDinoLabel('unknown object').zone, 'unknown');
