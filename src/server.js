@@ -636,6 +636,60 @@ function compactRegionColor(color) {
   });
 }
 
+
+function getColorSummaryName(color = {}) {
+  const hex = safeHex(color?.hex || color?.base);
+  return String(color?.name || (hex ? getColorName(hex) : "Unknown")).trim();
+}
+
+function mergeColorSummaryFamilies(colors = []) {
+  const groups = new Map();
+  for (const color of colors || []) {
+    const compact = compactRegionColor(color);
+    if (!compact?.name) continue;
+    const key = compact.name.toLowerCase();
+    const existing = groups.get(key);
+    const pct = normalizeColorPct(compact.pct);
+    if (existing) {
+      existing.pct = round2(normalizeColorPct(existing.pct) + pct);
+      existing.percentage = formatColorPct(existing.pct);
+      if (pct > Number(existing._topPct || 0)) {
+        existing.hex = compact.hex;
+        existing.color_identity = compact.color_identity;
+        existing._topPct = pct;
+      }
+    } else {
+      groups.set(key, { ...compact, pct, percentage: formatColorPct(pct), _topPct: pct });
+    }
+  }
+  return Array.from(groups.values())
+    .map(({ _topPct, ...color }) => withColorIdentity(color))
+    .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
+}
+
+function mergeColorReadSummaryFamilies(colors = []) {
+  return mergeColorSummaryFamilies(colors).map(compactColorRead).filter(Boolean);
+}
+
+function mergeClusterSummaryFamilies(clusters = []) {
+  return mergeColorSummaryFamilies((clusters || []).map((c) => ({
+    hex: c?.base || c?.hex,
+    name: c?.name || getColorSummaryName(c),
+    pct: c?.pct,
+  })));
+}
+
+function shouldPreserveDominantAccessoryColor(zoneKey, clusters = []) {
+  if (!["accessory_jewelry", "bag", "eyewear", "headwear"].includes(zoneKey)) return false;
+  const sorted = (clusters || [])
+    .filter((c) => safeHex(c?.base || c?.hex))
+    .map((c) => ({ ...c, pct: normalizeColorPct(c?.pct) }))
+    .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
+  const topPct = Number(sorted?.[0]?.pct || 0);
+  const secondPct = Number(sorted?.[1]?.pct || 0);
+  return topPct >= 0.75 && topPct >= secondPct * 2;
+}
+
 function getZoneColorMode(clusters = []) {
   const sorted = (clusters || [])
     .filter((c) => safeHex(c?.base || c?.hex))
@@ -661,14 +715,16 @@ function getZoneColorMode(clusters = []) {
 }
 
 function buildEvidenceSummary(colorMode, clusters = [], source = null) {
-  const primary = clusters?.[0] ? compactRegionColor({ hex: clusters[0].base || clusters[0].hex, pct: clusters[0].pct }) : null;
-  const secondary = (clusters || []).slice(1, 4).map((c) => compactRegionColor({ hex: c.base || c.hex, pct: c.pct })).filter(Boolean);
+  const summaryColors = mergeClusterSummaryFamilies(clusters);
+  const primary = summaryColors?.[0] || null;
+  const secondary = summaryColors.slice(1, 4);
   if (!primary) return "No reliable color evidence for this zone.";
+  const sourcePhrase = source ? ` from ${source}` : "";
   if (colorMode === "multi_color") {
-    const names = secondary.map((c) => `${c.name} ${c.percentage}`);
-    return `Multicolor evidence: primary ${primary.name} ${primary.percentage}${names.length ? ` with secondary ${joinHumanList(names)}` : ""}${source ? ` from ${source}` : ""}.`;
+    const support = secondary.map((c) => `${c.name} (${c.percentage})`);
+    return `Primary ${primary.name} (${primary.percentage})${support.length ? ` supported by ${joinHumanList(support)}` : ""}${sourcePhrase}.`;
   }
-  return `Single-color evidence: ${primary.name} ${primary.percentage} is the dominant zone read${source ? ` from ${source}` : ""}.`;
+  return `Primary ${primary.name} (${primary.percentage}) is the dominant zone read${sourcePhrase}.`;
 }
 
 function buildRawDinoColorClusters(regionColors = []) {
@@ -1331,8 +1387,10 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   const generalMulticolorSignal = meaningfulClusters.length >= 3 && meaningfulThreshold === 0.08;
   const zoneColorModeRead = getZoneColorMode(pctSortedClusters);
   const balancedTwoPlusSignal = topPct < 0.55 || secondPct >= 0.18;
-  const multicolorReason = zoneColorModeRead.reason;
+  const preserveDominantAccessoryIdentity = shouldPreserveDominantAccessoryColor(zoneKey, pctSortedClusters);
+  const multicolorReason = preserveDominantAccessoryIdentity ? null : zoneColorModeRead.reason;
   const multicolorDetected = !!multicolorReason;
+  debugContext.preserve_dominant_accessory_identity = preserveDominantAccessoryIdentity;
   debugContext.multicolor_detected = multicolorDetected;
   debugContext.multicolor_reason = multicolorReason;
   debugContext.meaningful_color_count = meaningfulClusters.length;
@@ -1464,7 +1522,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   const zoneConfidence = Math.round(
     clamp100(Number(zoneData?.score || 0) * 0.55 + Number(zoneData?.confidence || 0) * 0.45)
   );
-  const useRawDinoMulticolorRead = mode === "multicolor" && rawDinoMulticolorDetected && rawDinoMeaningfulClusters.length;
+  const useRawDinoMulticolorRead = !preserveDominantAccessoryIdentity && mode === "multicolor" && rawDinoMulticolorDetected && rawDinoMeaningfulClusters.length;
   const colorReadClusters = useRawDinoMulticolorRead
     ? rawDinoMeaningfulClusters
     : mode === "multicolor" && meaningfulClusters.length
@@ -1472,22 +1530,32 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       : clusters;
   const dominantReadCluster = mode === "multicolor" && !useRawDinoMulticolorRead
     ? colorReadClusters[0] || { base: dominant.base, pct: dominant.pct }
-    : { base: dominant.base, pct: dominant.pct };
+    : preserveDominantAccessoryIdentity
+      ? pctSortedClusters[0] || { base: dominant.base, pct: dominant.pct }
+      : { base: dominant.base, pct: dominant.pct };
   const dominantColor = withColorIdentity({
     hex: dominantReadCluster.base,
     name: getColorName(dominantReadCluster.base),
     pct: round2(dominantReadCluster.pct),
   });
-  const supportColors = colorReadClusters.slice(1, 4).map((c) => withColorIdentity({
-    hex: c.base,
-    name: getColorName(c.base),
+  const summaryColorReadClusters = mergeClusterSummaryFamilies(colorReadClusters);
+  const supportColors = summaryColorReadClusters.slice(1, 4).map((c) => withColorIdentity({
+    hex: c.hex,
+    name: c.name,
     pct: round2(c.pct),
   }));
-  const accentColors = colorReadClusters.slice(4, 6).map((c) => withColorIdentity({
-    hex: c.base,
-    name: getColorName(c.base),
+  const accentColors = summaryColorReadClusters.slice(4, 6).map((c) => withColorIdentity({
+    hex: c.hex,
+    name: c.name,
     pct: round2(c.pct),
   }));
+  const summaryPrimaryColor = summaryColorReadClusters[0]
+    ? withColorIdentity({
+        hex: summaryColorReadClusters[0].hex,
+        name: summaryColorReadClusters[0].name,
+        pct: round2(summaryColorReadClusters[0].pct),
+      })
+    : dominantColor;
   const rawDinoPrimaryColor = useRawDinoMulticolorRead
     ? withColorIdentity({
         hex: colorReadClusters[0].base,
@@ -1521,16 +1589,16 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     dominant_color: dominantColor,
     color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
     garment_identity: isGarmentZoneKey(zoneKey) ? buildGarmentIdentity(dominantColor, supportColors) : undefined,
-    primary_color: compactColorRead(dominantColor),
+    primary_color: compactColorRead(summaryPrimaryColor),
     support_colors: supportColors,
-    secondary_colors: supportColors.map(compactColorRead).filter(Boolean),
-    accent_colors: accentColors,
-    region_colors: colorReadClusters.map((c) => compactRegionColor({ hex: c.base, pct: c.pct })).filter(Boolean),
+    secondary_colors: mergeColorReadSummaryFamilies(supportColors),
+    accent_colors: mergeColorReadSummaryFamilies(accentColors),
+    region_colors: summaryColorReadClusters,
     evidence_summary: buildEvidenceSummary(mode === "multicolor" ? "multi_color" : "single_color", colorReadClusters, useRawDinoMulticolorRead ? "raw DINO region colors" : debugContext.zone_color_source),
     ...(
       useRawDinoMulticolorRead && isGarmentZoneKey(zoneKey)
         ? {
-            primary_color: compactColorRead(rawDinoPrimaryColor),
+            primary_color: compactColorRead(mergeClusterSummaryFamilies(colorReadClusters)[0] || rawDinoPrimaryColor),
             secondary_colors: rawDinoSecondaryColors.map(compactColorRead).filter(Boolean),
             accent_colors: rawDinoAccentColors.map(compactColorRead).filter(Boolean),
             color_identity_summary: buildColorIdentitySummary(rawDinoPrimaryColor?.color_identity),
