@@ -674,7 +674,7 @@ function mergeColorReadSummaryFamilies(colors = []) {
 function mergeClusterSummaryFamilies(clusters = []) {
   return mergeColorSummaryFamilies((clusters || []).map((c) => ({
     hex: c?.base || c?.hex,
-    name: c?.name || getColorSummaryName(c),
+    name: c?.name || getDominantClusterInputName(c) || getColorSummaryName(c),
     pct: c?.pct,
   })));
 }
@@ -688,6 +688,29 @@ function shouldPreserveDominantAccessoryColor(zoneKey, clusters = []) {
   const topPct = Number(sorted?.[0]?.pct || 0);
   const secondPct = Number(sorted?.[1]?.pct || 0);
   return topPct >= 0.75 && topPct >= secondPct * 2;
+}
+
+function getDominantClusterInputName(cluster) {
+  const colors = Array.isArray(cluster?.colors) ? cluster.colors : [];
+  let best = null;
+  for (const color of colors) {
+    const name = typeof color?.name === "string" ? color.name.trim() : "";
+    if (!name) continue;
+    const pct = normalizeColorPct(color?.pct);
+    if (!best || pct > best.pct) best = { name, pct };
+  }
+  return best?.name || null;
+}
+
+function buildPreservedAccessoryColor(cluster, fallback = {}) {
+  const hex = safeHex(cluster?.base || fallback?.hex || fallback?.base);
+  if (!hex) return null;
+  const name = getDominantClusterInputName(cluster) || fallback?.name || getColorName(hex);
+  return withColorIdentity({
+    hex,
+    name,
+    pct: round2(cluster?.pct ?? fallback?.pct ?? 0),
+  });
 }
 
 function getZoneColorMode(clusters = []) {
@@ -1185,6 +1208,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     raw_dino_meaningful_color_count: 0,
     raw_dino_multicolor_reason: null,
     filtered_cluster_count: 0,
+    accessory_jewelry_identity_trace: null,
   };
 
   if (!zoneData?.hex) {
@@ -1533,7 +1557,17 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     : preserveDominantAccessoryIdentity
       ? pctSortedClusters[0] || { base: dominant.base, pct: dominant.pct }
       : { base: dominant.base, pct: dominant.pct };
-  const dominantColor = withColorIdentity({
+  const preservedAccessoryColor = preserveDominantAccessoryIdentity
+    ? buildPreservedAccessoryColor(dominantReadCluster, {
+        base: dominant.base,
+        name: displayLabel,
+        pct: dominant.pct,
+      })
+    : null;
+  if (preservedAccessoryColor) {
+    displayLabel = preservedAccessoryColor.name;
+  }
+  const dominantColor = preservedAccessoryColor || withColorIdentity({
     hex: dominantReadCluster.base,
     name: getColorName(dominantReadCluster.base),
     pct: round2(dominantReadCluster.pct),
@@ -1549,13 +1583,13 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     name: c.name,
     pct: round2(c.pct),
   }));
-  const summaryPrimaryColor = summaryColorReadClusters[0]
+  const summaryPrimaryColor = preservedAccessoryColor || (summaryColorReadClusters[0]
     ? withColorIdentity({
         hex: summaryColorReadClusters[0].hex,
         name: summaryColorReadClusters[0].name,
         pct: round2(summaryColorReadClusters[0].pct),
       })
-    : dominantColor;
+    : dominantColor);
   const rawDinoPrimaryColor = useRawDinoMulticolorRead
     ? withColorIdentity({
         hex: colorReadClusters[0].base,
@@ -1578,6 +1612,28 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       }))
     : [];
 
+  const primaryColorRead = compactColorRead(summaryPrimaryColor);
+  if (zoneKey === "accessory_jewelry") {
+    debugContext.accessory_jewelry_identity_trace = {
+      preserveDominantAccessoryIdentity,
+      dominant_color: {
+        name: dominantColor?.name || null,
+        color_identity_name: dominantColor?.color_identity?.name || null,
+        translation: dominantColor?.color_identity?.translation || null,
+      },
+      primary_color: {
+        name: primaryColorRead?.name || null,
+        color_identity_name: primaryColorRead?.color_identity?.name || null,
+        translation: primaryColorRead?.color_identity?.translation || null,
+      },
+      display_label: displayLabel,
+      color_identity: {
+        name: dominantColor?.color_identity?.name || null,
+        translation: dominantColor?.color_identity?.translation || null,
+      },
+    };
+  }
+
   return {
     mode,
     read_mode: mode,
@@ -1589,7 +1645,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     dominant_color: dominantColor,
     color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
     garment_identity: isGarmentZoneKey(zoneKey) ? buildGarmentIdentity(dominantColor, supportColors) : undefined,
-    primary_color: compactColorRead(summaryPrimaryColor),
+    primary_color: primaryColorRead,
     support_colors: supportColors,
     secondary_colors: mergeColorReadSummaryFamilies(supportColors),
     accent_colors: mergeColorReadSummaryFamilies(accentColors),
