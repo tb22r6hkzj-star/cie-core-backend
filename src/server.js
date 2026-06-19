@@ -54,6 +54,7 @@ import {
 import {
   deriveStyleIdentity as deriveStyleIdentityFromStyleIdentity,
 } from "./engines/styleIdentity/index.js";
+import { inferAccessoryDisplayMetadata } from "./ui/accessoryDisplay.js";
 import {
   CATEGORY_COMPATIBILITY,
   CATEGORY_SEARCH_KEYWORDS,
@@ -2169,9 +2170,20 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       preserved_dino_hex: zoneRead?._debug?.preserved_dino_hex || null,
     });
 
+    const accessoryDisplayMetadata = zoneKey === "accessory_jewelry"
+      ? inferAccessoryDisplayMetadata(
+          zoneRegions.flatMap((region) => [
+            region?.segment_label,
+            region?.label,
+            region?.category,
+          ])
+        )
+      : {};
+
     zones[zoneKey] = {
       ...(zoneData || {}),
       ...zoneRead,
+      ...accessoryDisplayMetadata,
     };
 
     const dominantObj = buildSegmentedColorObject({
@@ -2482,6 +2494,9 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
       material_confidence: materialConfidence,
       cluster_count: clusters.length,
       display_label: displayLabel,
+      display_zone_label: zoneData.display_zone_label || null,
+      accessory_type: zoneData.accessory_type || null,
+      object_type: zoneData.object_type || null,
       dominant_color: dominantColor,
       support_colors: supportColors,
       accent_colors: accentColors,
