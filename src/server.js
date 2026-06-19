@@ -5048,6 +5048,51 @@ function extractDinoBboxRegionColors(baseImage, bbox, limit = 6, context = {}) {
   };
 }
 
+function chooseDinoBboxDominantHex(region = {}, sampledRegionColors = []) {
+  const existingDominantHex = safeHex(region?.dominant_hex || "");
+  const existingTopColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
+  const existingTopPct = Number(existingTopColor?.pct || 0);
+  const sampledTopColor = Array.isArray(sampledRegionColors) ? sampledRegionColors[0] : null;
+  const sampledTopHex = safeHex(sampledTopColor?.hex || "");
+  const sampledTopPct = Number(sampledTopColor?.pct || 0);
+
+  let dominantHex = sampledTopHex || existingDominantHex || null;
+  let preservedExisting = false;
+  let reason = sampledTopHex ? "sampled_top_default" : "existing_only_or_no_sample";
+
+  if (existingDominantHex && existingTopPct >= 0.75) {
+    dominantHex = existingDominantHex;
+    preservedExisting = true;
+    reason = "existing_top_pct_strong_ge_0_75";
+  } else if (!existingDominantHex) {
+    dominantHex = sampledTopHex || null;
+    reason = "existing_dominant_missing";
+  } else if (existingTopPct < 0.55) {
+    dominantHex = sampledTopHex || existingDominantHex;
+    preservedExisting = !sampledTopHex;
+    reason = sampledTopHex ? "existing_top_pct_weak_lt_0_55" : "existing_top_pct_weak_but_sample_missing";
+  } else if (sampledTopHex && sampledTopPct >= existingTopPct + 0.10) {
+    dominantHex = sampledTopHex;
+    reason = "sampled_top_pct_clearly_stronger_than_existing_by_0_10";
+  } else {
+    dominantHex = existingDominantHex;
+    preservedExisting = true;
+    reason = "existing_top_pct_not_weaker_than_sampled";
+  }
+
+  return {
+    dominantHex,
+    debug: {
+      existing_dominant_hex: existingDominantHex || null,
+      existing_top_pct: Number.isFinite(existingTopPct) ? round2(existingTopPct) : 0,
+      sampled_top_hex: sampledTopHex || null,
+      sampled_top_pct: Number.isFinite(sampledTopPct) ? round2(sampledTopPct) : 0,
+      preserved_existing: preservedExisting,
+      reason,
+    },
+  };
+}
+
 function extractColorsFromDinoBboxes(imageBuffer, dinoRegions = []) {
   if (!imageBuffer || !Array.isArray(dinoRegions) || !dinoRegions.length) return dinoRegions || [];
   let baseImage;
@@ -5066,14 +5111,17 @@ function extractColorsFromDinoBboxes(imageBuffer, dinoRegions = []) {
     });
     const regionColors = extraction.colors || [];
     if (!regionColors.length) return region;
-    const dominantHex = safeHex(regionColors[0]?.hex || region?.dominant_hex || "");
+    const { dominantHex, debug: dominantHexPreservation } = chooseDinoBboxDominantHex(region, regionColors);
     return {
       ...region,
-      dominant_hex: dominantHex || region?.dominant_hex || null,
+      dominant_hex: dominantHex || null,
       region_colors: regionColors,
       color_debug: {
         ...(region?.color_debug || {}),
-        dino_bbox_sampling: extraction.debug,
+        dino_bbox_sampling: {
+          ...extraction.debug,
+          dominant_hex_preservation: dominantHexPreservation,
+        },
       },
       coverage: round2(Math.max(Number(region?.coverage || 0), getDinoBboxArea(region.bbox))),
       mask_geometry: region?.mask_geometry || { bbox: region.bbox, coverage: getDinoBboxArea(region.bbox) },
