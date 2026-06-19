@@ -30,8 +30,50 @@ export function buildColorDisplayLabel(color) {
   };
 }
 
-export function buildGarmentColorDisplayRows(colors = [], role = null) {
-  return (Array.isArray(colors) ? colors : [colors])
+function readColorRatio(color = {}) {
+  const value = color?.display_pct ?? color?.pct ?? color?.ratio ?? color?.percentage;
+  if (value === null || value === undefined || value === "") return 0;
+
+  const numeric = Number.parseFloat(String(value).replace("%", ""));
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+  return numeric > 1 ? numeric / 100 : numeric;
+}
+
+function mergeDisplayColorFamilies(rows = []) {
+  const groups = new Map();
+  for (const row of rows) {
+    const key = String(row.primaryLabel || row.hex || "unknown").trim().toLowerCase();
+    const ratio = readColorRatio(row.rawColor);
+    const existing = groups.get(key);
+    if (existing) {
+      existing._displayRatio += ratio;
+      if (ratio > existing._topRatio) {
+        existing.hex = row.hex;
+        existing.translation = row.translation;
+        existing.rawColor = row.rawColor;
+        existing._topRatio = ratio;
+      }
+      continue;
+    }
+    groups.set(key, { ...row, _displayRatio: ratio, _topRatio: ratio });
+  }
+  return Array.from(groups.values());
+}
+
+function normalizeDisplayPaletteRows(rows = []) {
+  const mergedRows = mergeDisplayColorFamilies(rows);
+  const totalRatio = mergedRows.reduce((sum, row) => sum + Number(row._displayRatio || 0), 0);
+  return mergedRows
+    .map(({ _displayRatio, _topRatio, ...row }) => ({
+      ...row,
+      percentage: totalRatio > 0 ? normalizeColorPercentage(_displayRatio / totalRatio) : null,
+      display_pct: totalRatio > 0 ? _displayRatio / totalRatio : null,
+    }))
+    .sort((a, b) => Number(b.display_pct || 0) - Number(a.display_pct || 0));
+}
+
+export function buildGarmentColorDisplayRows(colors = [], role = null, { normalize = false } = {}) {
+  const rows = (Array.isArray(colors) ? colors : [colors])
     .filter(Boolean)
     .map((color) => ({
       role,
@@ -40,6 +82,7 @@ export function buildGarmentColorDisplayRows(colors = [], role = null) {
       percentage: normalizeColorPercentage(color.percentage ?? color.pct ?? color.ratio),
       rawColor: color,
     }));
+  return normalize ? normalizeDisplayPaletteRows(rows) : rows;
 }
 
 export function buildSingleColorZoneDisplay(color, colorMode = "single_color") {
@@ -56,15 +99,15 @@ export function buildMulticolorZoneDisplay({ dominant_color, primary_color, seco
   const primary = primary_color || dominant_color;
   const secondary = Array.isArray(secondary_colors) && secondary_colors.length ? secondary_colors : support_colors;
 
-  return [
+  return normalizeDisplayPaletteRows([
     ...buildGarmentColorDisplayRows(primary, "Primary"),
     ...buildGarmentColorDisplayRows(secondary, "Secondary"),
     ...buildGarmentColorDisplayRows(accent_colors, "Accent"),
-  ];
+  ]);
 }
 
 export function buildRegionPaletteDisplay(region_colors = []) {
-  return buildGarmentColorDisplayRows(region_colors, null);
+  return buildGarmentColorDisplayRows(region_colors, null, { normalize: true });
 }
 export function buildGarmentZoneColorDisplay(zone = {}) {
   const colorMode = zone.color_mode || zone.colorMode || null;

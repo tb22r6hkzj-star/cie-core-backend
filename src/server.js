@@ -551,11 +551,18 @@ function isGarmentZoneKey(zoneKey) {
 function compactColorRead(color) {
   const safe = safeHex(color?.hex || color?.base);
   if (!safe) return null;
-  return withColorIdentity({
+  const read = {
     hex: safe,
     name: color?.name || getColorName(safe),
     pct: round2(color?.pct || 0),
-  });
+  };
+  if (color?.display_pct !== undefined) {
+    read.display_pct = round2(normalizeColorPct(color.display_pct));
+    read.percentage = formatColorPct(read.display_pct);
+  } else if (color?.percentage !== undefined) {
+    read.percentage = color.percentage;
+  }
+  return withColorIdentity(read);
 }
 
 function joinHumanList(values = []) {
@@ -662,8 +669,17 @@ function mergeColorSummaryFamilies(colors = []) {
       groups.set(key, { ...compact, pct, percentage: formatColorPct(pct), _topPct: pct });
     }
   }
-  return Array.from(groups.values())
-    .map(({ _topPct, ...color }) => withColorIdentity(color))
+  const mergedColors = Array.from(groups.values());
+  const totalPct = mergedColors.reduce((sum, color) => sum + normalizeColorPct(color?.pct), 0);
+  return mergedColors
+    .map(({ _topPct, ...color }) => {
+      const displayPct = totalPct > 0 ? normalizeColorPct(color.pct) / totalPct : 0;
+      return withColorIdentity({
+        ...color,
+        display_pct: round2(displayPct),
+        percentage: formatColorPct(displayPct),
+      });
+    })
     .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
 }
 
