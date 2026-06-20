@@ -1253,6 +1253,12 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     raw_dino_multicolor_reason: null,
     filtered_cluster_count: 0,
     accessory_jewelry_identity_trace: null,
+    dominant_color_selection: {
+      preserved_dino_hex: null,
+      selected_cluster_hex: null,
+      matched_preserved_cluster: false,
+      reason: null,
+    },
   };
   const contextEvidence = context?.evidence || {};
   const sourceConfidence = Number(zoneData?.confidence || 0);
@@ -1629,11 +1635,33 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     : mode === "multicolor" && meaningfulClusters.length
       ? meaningfulClusters
       : clusters;
+  const shouldPreferPreservedDinoAccessoryCluster =
+    context?.preserveDinoZoneColor === true &&
+    !!preservedDinoHex &&
+    preserveDominantAccessoryIdentity &&
+    zoneKey !== "bag";
+  const preservedDinoAccessoryCluster = shouldPreferPreservedDinoAccessoryCluster
+    ? pctSortedClusters.find((c) => colorDistanceLab(c?.base || c?.hex, preservedDinoHex) < 3)
+    : null;
   const dominantReadCluster = mode === "multicolor" && !useRawDinoMulticolorRead
     ? colorReadClusters[0] || { base: dominant.base, pct: dominant.pct }
     : preserveDominantAccessoryIdentity
-      ? pctSortedClusters[0] || { base: dominant.base, pct: dominant.pct }
+      ? preservedDinoAccessoryCluster || pctSortedClusters[0] || { base: dominant.base, pct: dominant.pct }
       : { base: dominant.base, pct: dominant.pct };
+  debugContext.dominant_color_selection = {
+    preserved_dino_hex: preservedDinoHex || null,
+    selected_cluster_hex: safeHex(dominantReadCluster?.base || dominantReadCluster?.hex || "") || null,
+    matched_preserved_cluster: Boolean(preservedDinoAccessoryCluster),
+    reason: shouldPreferPreservedDinoAccessoryCluster
+      ? preservedDinoAccessoryCluster
+        ? "preserved_dino_cluster_match"
+        : "preserved_dino_cluster_missing_fallback_pct_top"
+      : preserveDominantAccessoryIdentity
+        ? "preserve_dominant_accessory_identity_pct_top"
+        : mode === "multicolor" && !useRawDinoMulticolorRead
+          ? "multicolor_primary_cluster"
+          : "dominant_color_read",
+  };
   const preservedAccessoryColor = preserveDominantAccessoryIdentity
     ? buildPreservedAccessoryColor(dominantReadCluster, {
         base: dominant.base,
