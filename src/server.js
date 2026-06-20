@@ -1253,6 +1253,13 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     raw_dino_multicolor_reason: null,
     filtered_cluster_count: 0,
     accessory_jewelry_identity_trace: null,
+    preserveDinoZoneColor: Boolean(context?.preserveDinoZoneColor),
+    preservedDinoHex: safeHex(context?.preservedDinoHex || "") || null,
+    dominant: { base: null },
+    dominantCluster: { base: null },
+    dominantReadCluster: { base: null },
+    dominantColor: { hex: null },
+    primaryColor: { hex: null },
     dominant_color_selection: {
       preserved_dino_hex: null,
       selected_cluster_hex: null,
@@ -1388,6 +1395,8 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   const preservedDinoCluster = preservedDinoHex
     ? clusters.find((c) => colorDistanceLab(c.base, preservedDinoHex) < 3)
     : null;
+  debugContext.preservedDinoHex = preservedDinoHex || null;
+  debugContext.dominantCluster = { base: dominantCluster?.base || null };
   const dominant = {
     base: preservedDinoHex || dominantCluster?.base || baseHex,
     pct: round2(
@@ -1396,6 +1405,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
         : (Number(dominantCluster?.weight || 0) || 1) / clustersTotalWeight
     ),
   };
+  debugContext.dominant = { base: dominant?.base || null };
   const dominantTraits = getPerceptualTraits(dominant.base);
   const isWeakDominantEvidence = Number(dominant?.pct || 0) < 0.25;
   const isNeutralContamination =
@@ -1651,6 +1661,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     : preserveDominantAccessoryIdentity
       ? preservedDinoAccessoryCluster || preservedDinoDominantBaseFallback || pctSortedClusters[0] || { base: dominant.base, pct: dominant.pct }
       : { base: dominant.base, pct: dominant.pct };
+  debugContext.dominantReadCluster = { base: dominantReadCluster?.base || dominantReadCluster?.hex || null };
   debugContext.dominant_color_selection = {
     preserved_dino_hex: preservedDinoHex || null,
     selected_cluster_hex: safeHex(dominantReadCluster?.base || dominantReadCluster?.hex || "") || null,
@@ -1723,6 +1734,8 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     : [];
 
   const primaryColorRead = compactColorRead(summaryPrimaryColor);
+  debugContext.dominantColor = { hex: dominantColor?.hex || null };
+  debugContext.primaryColor = { hex: primaryColorRead?.hex || null };
   if (zoneKey === "accessory_jewelry") {
     debugContext.accessory_jewelry_identity_trace = {
       preserveDominantAccessoryIdentity,
@@ -1799,6 +1812,29 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   };
 }
 
+
+function buildHeadwearDebugValues(zoneData = {}) {
+  if (zoneData?.display_zone_label !== "Headwear") return null;
+  const debug = zoneData?._debug || {};
+  const values = {
+    preserveDinoZoneColor: Boolean(debug?.preserveDinoZoneColor),
+    preservedDinoHex: debug?.preservedDinoHex || debug?.preserved_dino_hex || null,
+    "dominant.base": debug?.dominant?.base || null,
+    "dominantCluster.base": debug?.dominantCluster?.base || null,
+    "dominantReadCluster.base": debug?.dominantReadCluster?.base || null,
+    "dominantColor.hex": debug?.dominantColor?.hex || zoneData?.dominant_color?.hex || null,
+    "primaryColor.hex": debug?.primaryColor?.hex || zoneData?.primary_color?.hex || null,
+    "dominant_color_selection.reason": debug?.dominant_color_selection?.reason || null,
+  };
+
+  return {
+    ...values,
+    ui_rows: Object.entries(values).map(([label, value]) => ({
+      label,
+      value: value === undefined ? null : value,
+    })),
+  };
+}
 
 function getZoneRegionEvidence(zoneRegions = []) {
   const coverage = (zoneRegions || []).reduce((sum, r) => sum + Number(r?.coverage || r?.confidence || 0), 0);
@@ -2304,6 +2340,11 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       ...accessoryDisplayMetadata,
     };
 
+    const headwearDebugValues = buildHeadwearDebugValues(zones[zoneKey]);
+    if (headwearDebugValues) {
+      zones[zoneKey].headwear_debug_values = headwearDebugValues;
+    }
+
     const dominantObj = buildSegmentedColorObject({
       color: { hex: zoneRead?.dominant_color?.hex, pct: zoneRead?.dominant_color?.pct },
       zone: zoneKey,
@@ -2634,6 +2675,7 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
       display_zone_label: zoneData.display_zone_label || null,
       accessory_type: zoneData.accessory_type || null,
       object_type: zoneData.object_type || null,
+      headwear_debug_values: buildHeadwearDebugValues(zoneData),
       dominant_color: dominantColor,
       primary_color: compactColorRead(dominantColor),
       color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
