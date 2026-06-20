@@ -1643,10 +1643,13 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   const preservedDinoAccessoryCluster = shouldPreferPreservedDinoAccessoryCluster
     ? pctSortedClusters.find((c) => colorDistanceLab(c?.base || c?.hex, preservedDinoHex) < 3)
     : null;
+  const preservedDinoDominantBaseFallback = shouldPreferPreservedDinoAccessoryCluster && !preservedDinoAccessoryCluster
+    ? { base: dominant.base, pct: dominant.pct }
+    : null;
   const dominantReadCluster = mode === "multicolor" && !useRawDinoMulticolorRead
     ? colorReadClusters[0] || { base: dominant.base, pct: dominant.pct }
     : preserveDominantAccessoryIdentity
-      ? preservedDinoAccessoryCluster || pctSortedClusters[0] || { base: dominant.base, pct: dominant.pct }
+      ? preservedDinoAccessoryCluster || preservedDinoDominantBaseFallback || pctSortedClusters[0] || { base: dominant.base, pct: dominant.pct }
       : { base: dominant.base, pct: dominant.pct };
   debugContext.dominant_color_selection = {
     preserved_dino_hex: preservedDinoHex || null,
@@ -1655,7 +1658,9 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     reason: shouldPreferPreservedDinoAccessoryCluster
       ? preservedDinoAccessoryCluster
         ? "preserved_dino_cluster_match"
-        : "preserved_dino_cluster_missing_fallback_pct_top"
+        : preservedDinoDominantBaseFallback
+          ? "preserved_dino_fallback_to_dominant_base"
+          : "preserved_dino_cluster_missing_fallback_pct_top"
       : preserveDominantAccessoryIdentity
         ? "preserve_dominant_accessory_identity_pct_top"
         : mode === "multicolor" && !useRawDinoMulticolorRead
