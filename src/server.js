@@ -2090,6 +2090,68 @@ const GARMENT_ZONE_OUTPUT_WHITELIST = new Set([
   "fur_trim",
 ]);
 
+
+const dinoTraceObjectIds = new WeakMap();
+let dinoTraceObjectIdCounter = 0;
+
+function getDinoTraceObjectId(value) {
+  if (!value || typeof value !== "object") return null;
+  if (!dinoTraceObjectIds.has(value)) {
+    dinoTraceObjectIdCounter += 1;
+    dinoTraceObjectIds.set(value, `obj_${dinoTraceObjectIdCounter}`);
+  }
+  return dinoTraceObjectIds.get(value);
+}
+
+function summarizeDinoRegionForTrace(region) {
+  if (!region) return null;
+  const topColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
+  return {
+    object_ref: getDinoTraceObjectId(region),
+    id: region?.id || region?.region_id || region?.detection_id || null,
+    dominant_hex: safeHex(region?.dominant_hex || "") || region?.dominant_hex || null,
+    region_colors_0_hex: safeHex(topColor?.hex || "") || topColor?.hex || null,
+    region_colors_0_pct: topColor?.pct ?? null,
+  };
+}
+
+function findDinoRegionForTrace(regions = [], id = "dino_4") {
+  return Array.isArray(regions) ? regions.find((region) => region?.id === id) || null : null;
+}
+
+function summarizeDinoStageForTrace(stage, regions = [], id = "dino_4") {
+  const region = findDinoRegionForTrace(regions, id);
+  return {
+    stage,
+    found: !!region,
+    ...summarizeDinoRegionForTrace(region),
+  };
+}
+
+function buildDinoLifecycleChangeSummary(stages = []) {
+  const foundStages = (Array.isArray(stages) ? stages : []).filter((stage) => stage?.found);
+  for (let idx = 1; idx < foundStages.length; idx += 1) {
+    const previous = foundStages[idx - 1];
+    const current = foundStages[idx];
+    if ((previous?.dominant_hex || null) !== (current?.dominant_hex || null)) {
+      return {
+        changed_between: [previous.stage, current.stage],
+        from_dominant_hex: previous?.dominant_hex || null,
+        to_dominant_hex: current?.dominant_hex || null,
+        same_object_ref: !!previous?.object_ref && previous.object_ref === current.object_ref,
+      };
+    }
+  }
+  return {
+    changed_between: null,
+    from_dominant_hex: foundStages[0]?.dominant_hex || null,
+    to_dominant_hex: foundStages[foundStages.length - 1]?.dominant_hex || null,
+    same_object_ref: foundStages.length > 1
+      ? foundStages.every((stage) => stage?.object_ref && stage.object_ref === foundStages[0].object_ref)
+      : null,
+  };
+}
+
 function filterGarmentZoneOutput(zones = {}) {
   const filteredZones = {};
   const removedNonGarmentZones = [];
@@ -2201,10 +2263,17 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
   const regionColorAnalysis = [];
   const regionSummary = [];
   const zoneCandidateSummary = [];
+  const dinoLifecycleTrace = [
+    summarizeDinoStageForTrace("garmentEvidenceRegions", segmentedRegions),
+    summarizeDinoStageForTrace("segmentedByZone.accessory_jewelry", segmentedByZone.accessory_jewelry || []),
+  ];
   const missedZoneDebug = [];
 
   for (const [zoneKey, fallbackColor] of Object.entries(zoneMap)) {
     const zoneRegions = segmentedByZone[zoneKey] || [];
+    if (zoneKey === "accessory_jewelry") {
+      dinoLifecycleTrace.push(summarizeDinoStageForTrace("zoneRegions", zoneRegions));
+    }
     const regionColors = zoneRegions
       .flatMap((r) => {
         const local = Array.isArray(r?.region_colors) ? r.region_colors : [];
@@ -2615,6 +2684,10 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     "[INTERPRET DEBUG] final selected zones with confidence",
     Object.fromEntries(Object.entries(finalZones).map(([k, v]) => [k, Number(v?.confidence || v?.score || 0)]))
   );
+  console.info("[DINO TRACE] dino_4 inferGarmentZones lifecycle", {
+    stages: dinoLifecycleTrace,
+    change_summary: buildDinoLifecycleChangeSummary(dinoLifecycleTrace),
+  });
 
   return {
     version: "garment_zone_v3",
@@ -2624,6 +2697,11 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       Object.entries(finalZones).map(([key, value]) => [key, value?.confidence_breakdown || null])
     ),
     region_color_analysis: regionColorAnalysis,
+    dino_lifecycle_trace: {
+      target_id: "dino_4",
+      stages: dinoLifecycleTrace,
+      change_summary: buildDinoLifecycleChangeSummary(dinoLifecycleTrace),
+    },
     generic_mask_debug: genericMaskDebug,
     removed_non_garment_zones: garmentZoneFilterResult.removed_non_garment_zones,
   };
@@ -3826,6 +3904,12 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     : dinoRegions;
   const garmentEvidenceRegions = samRegions.length ? samRegions.concat(dedupedDinoRegions) : dinoRegions;
   const garmentZoneSource = getGarmentZoneSource(samRegions, dedupedDinoRegions);
+  const dinoLifecycleTrace = [
+    summarizeDinoStageForTrace("analysis.dinoGarmentRegions", dinoGarmentRegions),
+    summarizeDinoStageForTrace("inputDinoRegions", inputDinoRegions),
+    summarizeDinoStageForTrace("dedupedDinoRegions", dedupedDinoRegions),
+    summarizeDinoStageForTrace("garmentEvidenceRegions", garmentEvidenceRegions),
+  ];
 
   const garmentZones = inferGarmentZones(
     normalizedColors,
@@ -3833,6 +3917,16 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     visualIntelligence,
     garmentEvidenceRegions
   );
+  const fullDinoLifecycleTrace = [
+    ...dinoLifecycleTrace,
+    ...((garmentZones?.dino_lifecycle_trace?.stages || []).filter((stage) =>
+      !dinoLifecycleTrace.some((existing) => existing.stage === stage.stage)
+    )),
+  ];
+  console.info("[DINO TRACE] dino_4 buildOutfitAnalysis lifecycle", {
+    stages: fullDinoLifecycleTrace,
+    change_summary: buildDinoLifecycleChangeSummary(fullDinoLifecycleTrace),
+  });
 
   const garmentAnalysis = inferGarmentAndMaterial({
     zones: garmentZones?.zones,
@@ -3867,6 +3961,11 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     visual_intelligence: visualIntelligence,
     visual_intelligence_layer: visualIntelligence,
     garment_zones: garmentZones,
+    dino_lifecycle_trace: {
+      target_id: "dino_4",
+      stages: fullDinoLifecycleTrace,
+      change_summary: buildDinoLifecycleChangeSummary(fullDinoLifecycleTrace),
+    },
     segmented_regions: garmentZones.segmented_regions || garmentEvidenceRegions,
     region_color_analysis: garmentZones.region_color_analysis || [],
     detail_colors: visualIntelligence?.body_vs_detail?.detail_colors || [],
@@ -6168,6 +6267,7 @@ async function analyzeGhostColors(ghostUrl) {
     dino_color_enrichment_reason: dinoColorEnrichmentReason,
     detections: dinoDetections,
     garment_regions: dinoGarmentRegions,
+    dino_4_lifecycle_stage: summarizeDinoStageForTrace("debug.dino.garment_regions", dinoGarmentRegions),
   };
   console.info("[GDINO DEBUG] Temporary detection validation", {
     enabled: !!groundingDino?.enabled,
@@ -6297,6 +6397,17 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       outfit_analysis: outfitAnalysis,
       debug: {
         dino: analysis.dino_debug,
+        dino_lifecycle_trace: {
+          target_id: "dino_4",
+          stages: [
+            analysis?.dino_debug?.dino_4_lifecycle_stage,
+            ...((outfitAnalysis?.dino_lifecycle_trace?.stages || []).filter((stage) => stage?.stage !== "debug.dino.garment_regions")),
+          ].filter(Boolean),
+          change_summary: buildDinoLifecycleChangeSummary([
+            analysis?.dino_debug?.dino_4_lifecycle_stage,
+            ...((outfitAnalysis?.dino_lifecycle_trace?.stages || []).filter((stage) => stage?.stage !== "debug.dino.garment_regions")),
+          ].filter(Boolean)),
+        },
         pipeline: {
           ...analysis.pipeline,
           lower_sampling_version: LOWER_SAMPLING_VERSION,
