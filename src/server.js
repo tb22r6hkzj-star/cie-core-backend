@@ -5087,6 +5087,84 @@ function sortLowerGarmentColors(colorRows = []) {
   });
 }
 
+function isHeadwearDinoContext(context = {}) {
+  const values = [
+    context?.zone,
+    context?.category,
+    context?.label,
+    context?.object_type,
+    context?.accessory_type,
+  ].map(normalizeText);
+  return values.some((value) => /\b(hat|cap|beanie|headwear)\b/.test(value));
+}
+
+function getHeadwearColorBiasScore(cluster = {}) {
+  const hex = safeHex(cluster?.base || cluster?.hex || "");
+  if (!hex) return 0;
+  const hue = getHue(hex);
+  const sat = getSat(hex);
+  const light = getLight(hex);
+  const [, chromaValue] = chroma(hex).lch();
+  const pct = Number(cluster?.pct || 0);
+  const strongObjectColor = sat >= 0.48 && chromaValue >= 34 && light >= 0.18 && light <= 0.78;
+  const saturatedFabricHue =
+    (hue >= 345 || hue <= 25) || // red / rose
+    (hue >= 185 && hue <= 260) || // blue
+    (hue >= 35 && hue <= 175) || // yellow / green
+    (hue >= 275 && hue <= 335); // purple / magenta
+  if (!strongObjectColor || !saturatedFabricHue || pct < 0.06) return 0;
+  return pct * (1 + sat) * (1 + Math.min(chromaValue, 80) / 80);
+}
+
+function isMutedSkinLikeHeadwearCluster(cluster = {}) {
+  const hex = safeHex(cluster?.base || cluster?.hex || "");
+  if (!hex) return false;
+  const hue = getHue(hex);
+  const sat = getSat(hex);
+  const light = getLight(hex);
+  const [, chromaValue] = chroma(hex).lch();
+  return hue >= 335 || hue <= 55
+    ? sat <= 0.34 && chromaValue <= 32 && light >= 0.34 && light <= 0.68
+    : false;
+}
+
+function applyHeadwearDinoColorBias(clusters = [], context = {}) {
+  const preBiasTopHex = safeHex(clusters?.[0]?.base || clusters?.[0]?.hex || "");
+  const debug = {
+    headwear_color_bias_applied: false,
+    pre_bias_top_hex: preBiasTopHex || null,
+    post_bias_top_hex: preBiasTopHex || null,
+    reason: isHeadwearDinoContext(context) ? "no_meaningful_saturated_headwear_cluster" : "not_headwear_context",
+  };
+  if (!isHeadwearDinoContext(context) || clusters.length < 2) return { clusters, debug };
+
+  const top = clusters[0];
+  const topPct = Number(top?.pct || 0);
+  const topIsMutedSkinLike = isMutedSkinLikeHeadwearCluster(top);
+  const candidate = clusters
+    .slice(1)
+    .map((cluster) => ({ cluster, score: getHeadwearColorBiasScore(cluster) }))
+    .filter((row) => row.score > 0 && Number(row.cluster?.pct || 0) >= Math.max(0.06, topPct * (topIsMutedSkinLike ? 0.22 : 0.34)))
+    .sort((a, b) => b.score - a.score)[0]?.cluster;
+
+  if (!candidate) return { clusters, debug };
+  const candidateHex = safeHex(candidate?.base || candidate?.hex || "");
+  if (!candidateHex || candidateHex === preBiasTopHex) return { clusters, debug };
+
+  const biasedClusters = [candidate, ...clusters.filter((cluster) => cluster !== candidate)];
+  return {
+    clusters: biasedClusters,
+    debug: {
+      headwear_color_bias_applied: true,
+      pre_bias_top_hex: preBiasTopHex || null,
+      post_bias_top_hex: candidateHex,
+      reason: topIsMutedSkinLike
+        ? "promoted_saturated_headwear_cluster_over_muted_skin_like_top"
+        : "promoted_meaningful_saturated_headwear_cluster",
+    },
+  };
+}
+
 function getDinoZoneColorWeight(sample, zone = "") {
   const zoneKey = normalizeText(zone);
   const { hue, saturation, lightness } = sample;
@@ -5189,7 +5267,8 @@ function extractDinoBboxRegionColors(baseImage, bbox, limit = 6, context = {}) {
 
   const rankedColorRows = zoneKey === "lower_garment" ? sortLowerGarmentColors(colorRows) : colorRows;
   const clusters = buildColorClusters(rankedColorRows);
-  const rankedClusters = zoneKey === "lower_garment" ? sortLowerGarmentColors(clusters.map((cluster) => ({ ...cluster, hex: cluster.base }))) : clusters;
+  const rankedClustersBeforeHeadwearBias = zoneKey === "lower_garment" ? sortLowerGarmentColors(clusters.map((cluster) => ({ ...cluster, hex: cluster.base }))) : clusters;
+  const { clusters: rankedClusters, debug: headwearColorBiasDebug } = applyHeadwearDinoColorBias(rankedClustersBeforeHeadwearBias, context);
   const colors = rankedClusters.slice(0, limit).map((cluster) => ({
     hex: safeHex(cluster.base),
     pct: round2(cluster.pct),
@@ -5207,6 +5286,7 @@ function extractDinoBboxRegionColors(baseImage, bbox, limit = 6, context = {}) {
       filtered_sample_count: usableSamples.length,
       dominant_hex_before_cluster: colorRows[0]?.hex || null,
       expected_dominant_color: zoneKey === "lower_garment" ? (colors[0]?.hex || null) : null,
+      ...headwearColorBiasDebug,
     },
   };
 }
@@ -5271,6 +5351,8 @@ function extractColorsFromDinoBboxes(imageBuffer, dinoRegions = []) {
       zone: region?.zone,
       category: region?.category,
       label: region?.label || region?.segment_label,
+      object_type: region?.object_type,
+      accessory_type: region?.accessory_type,
     });
     const regionColors = extraction.colors || [];
     if (!regionColors.length) return region;
