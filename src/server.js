@@ -1266,6 +1266,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
       matched_preserved_cluster: false,
       reason: null,
     },
+    dino_primary_region_selection: context?.dinoPrimaryRegionSelection || null,
   };
   const contextEvidence = context?.evidence || {};
   const sourceConfidence = Number(zoneData?.confidence || 0);
@@ -2210,10 +2211,96 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       .filter((c) => !!c.hex);
     const evidence = getZoneRegionEvidence(zoneRegions);
     const isDinoSourceType = (sourceType) => sourceType === "grounding_dino" || sourceType === "dino_detection";
+    const hasHeadwearDinoPrimarySignal = (region) => {
+      const fields = [
+        region?.display_zone_label,
+        region?.accessory_type,
+        region?.object_type,
+        region?.label,
+        region?.category,
+        region?.segment_label,
+      ];
+      return fields.some((value) => /headwear|\bhat\b|\bcap\b|beanie/i.test(String(value || "")));
+    };
+    const selectBestDinoPrimaryRegion = (currentZoneKey, currentZoneRegions = []) => {
+      const candidates = currentZoneRegions.filter((region) => isDinoSourceType(region?.source_type));
+      const fallbackRegion = candidates[0] || null;
+      const fallbackScore = { total: -Infinity };
+      if (!fallbackRegion) {
+        return {
+          region: null,
+          debug: {
+            selected_id: null,
+            selected_label: null,
+            selected_display_zone_label: null,
+            selected_accessory_type: null,
+            selected_dominant_hex: null,
+            selected_top_region_hex: null,
+            selected_top_pct: null,
+            candidate_count: 0,
+            reason: "no_dino_candidates",
+          },
+        };
+      }
+
+      const scoreRegion = (region) => {
+        const topColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
+        const topPct = Number(topColor?.pct || 0);
+        const confidence = Number(region?.confidence || 0);
+        const coverage = Number(region?.coverage || region?.mask_geometry?.coverage || 0);
+        const hasDominantHex = !!safeHex(region?.dominant_hex || "");
+        const hasHeadwearSignal = currentZoneKey === "accessory_jewelry" && hasHeadwearDinoPrimarySignal(region);
+        return {
+          topPct,
+          confidence,
+          coverage,
+          hasDominantHex,
+          hasHeadwearSignal,
+          total:
+            (hasHeadwearSignal ? 1000 : 0) +
+            (topPct * 100) +
+            (confidence * 10) +
+            (coverage * 10) +
+            (hasDominantHex ? 1 : 0),
+        };
+      };
+
+      let bestRegion = fallbackRegion;
+      let bestScore = scoreRegion(fallbackRegion) || fallbackScore;
+      for (const candidate of candidates.slice(1)) {
+        const candidateScore = scoreRegion(candidate);
+        if (candidateScore.total > bestScore.total) {
+          bestRegion = candidate;
+          bestScore = candidateScore;
+        }
+      }
+
+      const fallbackWasSelected = bestRegion === fallbackRegion;
+      const topColor = Array.isArray(bestRegion?.region_colors) ? bestRegion.region_colors[0] : null;
+      return {
+        region: bestRegion,
+        debug: {
+          selected_id: bestRegion?.id || bestRegion?.region_id || bestRegion?.detection_id || null,
+          selected_label: bestRegion?.label || bestRegion?.segment_label || null,
+          selected_display_zone_label: bestRegion?.display_zone_label || null,
+          selected_accessory_type: bestRegion?.accessory_type || null,
+          selected_dominant_hex: safeHex(bestRegion?.dominant_hex || "") || null,
+          selected_top_region_hex: safeHex(topColor?.hex || "") || null,
+          selected_top_pct: topColor?.pct ?? null,
+          candidate_count: candidates.length,
+          reason: fallbackWasSelected
+            ? "fallback_first_dino_candidate_retained"
+            : bestScore.hasHeadwearSignal
+              ? "selected_highest_scoring_headwear_dino_candidate"
+              : "selected_highest_scoring_dino_candidate",
+        },
+      };
+    };
     const dinoOnlyZone =
       zoneRegions.length > 0 &&
       zoneRegions.every((region) => isDinoSourceType(region?.source_type));
-    const dinoPrimaryRegion = dinoOnlyZone ? zoneRegions.find((region) => isDinoSourceType(region?.source_type)) : null;
+    const dinoPrimarySelection = dinoOnlyZone ? selectBestDinoPrimaryRegion(zoneKey, zoneRegions) : { region: null, debug: null };
+    const dinoPrimaryRegion = dinoPrimarySelection.region;
     const dinoPrimaryHex = dinoOnlyZone
       ? safeHex(dinoPrimaryRegion?.dominant_hex || dinoPrimaryRegion?.region_colors?.[0]?.hex || "")
       : null;
@@ -2265,6 +2352,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         preservedDinoHex: preserveDinoZoneColor ? dinoPrimaryHex : null,
         preserveDinoZoneColor,
         zoneColorSource: preserveDinoZoneColor ? "dino_primary" : consensusCluster?.base ? "cluster" : "fallback",
+        dinoPrimaryRegionSelection: dinoPrimarySelection.debug,
         evidence,
       }
     );
