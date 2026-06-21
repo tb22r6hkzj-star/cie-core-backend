@@ -1817,6 +1817,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
 function buildHeadwearDebugValues(zoneData = {}) {
   if (zoneData?.display_zone_label !== "Headwear") return null;
   const debug = zoneData?._debug || {};
+  const dinoPrimaryRegionSelection = debug?.dino_primary_region_selection || null;
   const values = {
     preserveDinoZoneColor: Boolean(debug?.preserveDinoZoneColor),
     preservedDinoHex: debug?.preservedDinoHex || debug?.preserved_dino_hex || null,
@@ -1830,6 +1831,10 @@ function buildHeadwearDebugValues(zoneData = {}) {
 
   return {
     ...values,
+    dino_primary_region_selection: dinoPrimaryRegionSelection,
+    dino_primary_region_selection_json: dinoPrimaryRegionSelection
+      ? JSON.stringify(dinoPrimaryRegionSelection, null, 2)
+      : null,
     ui_rows: Object.entries(values).map(([label, value]) => ({
       label,
       value: value === undefined ? null : value,
