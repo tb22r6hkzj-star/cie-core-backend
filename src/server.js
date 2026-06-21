@@ -2243,25 +2243,77 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         };
       }
 
+      const isSaturatedObjectColor = (hex, topPct) => {
+        const safe = safeHex(hex || "");
+        if (!safe) return false;
+        const saturation = getSat(safe);
+        const lightness = getLight(safe);
+        return saturation >= 0.55 && lightness >= 0.25 && lightness <= 0.7 && Number(topPct || 0) >= 0.45;
+      };
+      const isMutedSkinLikeDustyRose = (hex) => {
+        const safe = safeHex(hex || "");
+        if (!safe) return false;
+        const hue = getHue(safe);
+        const saturation = getSat(safe);
+        const lightness = getLight(safe);
+        const isRoseHue = hue >= 330 || hue <= 25;
+        return isRoseHue && saturation >= 0.08 && saturation <= 0.42 && lightness >= 0.35 && lightness <= 0.68;
+      };
+      const hasSaturatedHeadwearColor = currentZoneKey === "accessory_jewelry" && candidates.some((region) => {
+        if (!hasHeadwearDinoPrimarySignal(region)) return false;
+        const topColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
+        const topPct = Number(topColor?.pct || 0);
+        const colorHex = safeHex(region?.dominant_hex || "") || safeHex(topColor?.hex || "");
+        return isSaturatedObjectColor(colorHex, topPct);
+      });
+
       const scoreRegion = (region) => {
         const topColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
         const topPct = Number(topColor?.pct || 0);
         const confidence = Number(region?.confidence || 0);
         const coverage = Number(region?.coverage || region?.mask_geometry?.coverage || 0);
-        const hasDominantHex = !!safeHex(region?.dominant_hex || "");
+        const dominantHex = safeHex(region?.dominant_hex || "");
+        const topHex = safeHex(topColor?.hex || "");
+        const evidenceHex = dominantHex || topHex;
+        const hasDominantHex = !!dominantHex;
         const hasHeadwearSignal = currentZoneKey === "accessory_jewelry" && hasHeadwearDinoPrimarySignal(region);
+        const saturatedObjectScore =
+          currentZoneKey === "accessory_jewelry" && isSaturatedObjectColor(evidenceHex, topPct)
+            ? 180 + (topPct * 120) + (getSat(evidenceHex) * 80)
+            : 0;
+        const mutedPenalty =
+          currentZoneKey === "accessory_jewelry" &&
+          hasSaturatedHeadwearColor &&
+          hasHeadwearSignal &&
+          isMutedSkinLikeDustyRose(evidenceHex)
+            ? 220
+            : 0;
+        const total = currentZoneKey === "accessory_jewelry"
+          ? (
+            (hasHeadwearSignal ? 150 : 0) +
+            (hasDominantHex ? 60 : 0) +
+            (topPct * 500) +
+            (confidence * 120) +
+            (coverage * 100) +
+            saturatedObjectScore -
+            mutedPenalty
+          )
+          : (
+            (hasHeadwearSignal ? 1000 : 0) +
+            (topPct * 100) +
+            (confidence * 10) +
+            (coverage * 10) +
+            (hasDominantHex ? 1 : 0)
+          );
         return {
           topPct,
           confidence,
           coverage,
           hasDominantHex,
           hasHeadwearSignal,
-          total:
-            (hasHeadwearSignal ? 1000 : 0) +
-            (topPct * 100) +
-            (confidence * 10) +
-            (coverage * 10) +
-            (hasDominantHex ? 1 : 0),
+          saturatedObjectScore,
+          mutedPenalty,
+          total,
         };
       };
 
@@ -2288,6 +2340,25 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
           selected_top_region_hex: safeHex(topColor?.hex || "") || null,
           selected_top_pct: topColor?.pct ?? null,
           candidate_count: candidates.length,
+          candidate_scores: currentZoneKey === "accessory_jewelry"
+            ? candidates.map((candidate) => {
+              const candidateTopColor = Array.isArray(candidate?.region_colors) ? candidate.region_colors[0] : null;
+              const candidateScore = scoreRegion(candidate);
+              return {
+                id: candidate?.id || candidate?.region_id || candidate?.detection_id || null,
+                label: candidate?.label || candidate?.segment_label || null,
+                dominant_hex: safeHex(candidate?.dominant_hex || "") || null,
+                top_hex: safeHex(candidateTopColor?.hex || "") || null,
+                top_pct: candidateTopColor?.pct ?? null,
+                confidence: candidateScore.confidence,
+                coverage: candidateScore.coverage,
+                headwear_signal: candidateScore.hasHeadwearSignal,
+                saturated_object_score: round2(candidateScore.saturatedObjectScore),
+                muted_penalty: round2(candidateScore.mutedPenalty),
+                total: round2(candidateScore.total),
+              };
+            })
+            : undefined,
           reason: fallbackWasSelected
             ? "fallback_first_dino_candidate_retained"
             : bestScore.hasHeadwearSignal
