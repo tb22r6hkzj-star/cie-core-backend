@@ -4860,6 +4860,39 @@ function mergeRegionColors(...colorLists) {
     .filter(Boolean);
 }
 
+function isHeadwearAccessoryDinoRegion(region = {}) {
+  if (region?.zone !== "accessory_jewelry") return false;
+  const text = [
+    region?.label,
+    region?.category,
+    region?.accessory,
+    region?.display_label,
+    region?.segment_label,
+    region?.name,
+  ].map(normalizeText).filter(Boolean).join(" ");
+  return /\b(hat|cap|beanie|headwear|head\s*wear|beret|visor|helmet|bonnet|fedora|bucket\s*hat|baseball\s*cap|skullcap|toque)\b/.test(text);
+}
+
+function getStrongDominantDinoRegionColor(region = {}) {
+  const dominantHex = safeHex(region?.dominant_hex);
+  const topColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
+  const topHex = safeHex(topColor?.hex);
+  const topPct = normalizeColorPct(topColor?.pct);
+  if (!dominantHex || !topHex || topPct < 0.65) return null;
+  const closeToDominant = topHex === dominantHex || colorDistanceLab(topHex, dominantHex) <= 10;
+  if (!closeToDominant) return null;
+  return compactRegionColor({ ...topColor, hex: dominantHex, pct: topPct });
+}
+
+function preferPreservedRegionColorFirst(regionColors = [], preservedColor = null) {
+  const compactPreserved = compactRegionColor(preservedColor);
+  if (!compactPreserved?.hex) return regionColors;
+  return [
+    compactPreserved,
+    ...(regionColors || []).filter((color) => safeHex(color?.hex) !== compactPreserved.hex),
+  ];
+}
+
 function dedupeDinoRegionsByZoneAndOverlap(regions = [], overlapThreshold = 0.72) {
   const merged = [];
   for (const region of regions || []) {
@@ -4877,21 +4910,37 @@ function dedupeDinoRegionsByZoneAndOverlap(regions = [], overlapThreshold = 0.72
     const current = merged[matchIndex];
     const best = Number(region?.confidence || 0) > Number(current?.confidence || 0) ? region : current;
     const other = best === region ? current : region;
+    const mergedShape = { ...other, ...best };
     const regionColors = mergeRegionColors(current?.region_colors || [], region?.region_colors || []);
-    const dominant = regionColors[0]?.hex || safeHex(best?.dominant_hex || other?.dominant_hex || "") || null;
+    const strongDominantCandidates = [current, region]
+      .map((candidate) => ({
+        region: candidate,
+        color: getStrongDominantDinoRegionColor(candidate),
+      }))
+      .filter((candidate) => candidate.color?.hex)
+      .sort((a, b) => normalizeColorPct(b.color?.pct) - normalizeColorPct(a.color?.pct));
+    const preservedDominant = isHeadwearAccessoryDinoRegion({ ...mergedShape, zone })
+      ? strongDominantCandidates[0] || null
+      : null;
+    const mergedRegionColors = preferPreservedRegionColorFirst(regionColors, preservedDominant?.color);
+    const dominant = preservedDominant?.color?.hex || mergedRegionColors[0]?.hex || safeHex(best?.dominant_hex || other?.dominant_hex || "") || null;
 
     merged[matchIndex] = {
-      ...other,
-      ...best,
+      ...mergedShape,
       confidence: Math.max(Number(current?.confidence || 0), Number(region?.confidence || 0)),
       coverage: round2(Math.max(Number(current?.coverage || 0), Number(region?.coverage || 0))),
       dominant_hex: dominant,
-      region_colors: regionColors,
+      region_colors: mergedRegionColors,
       mask_geometry: best?.mask_geometry || other?.mask_geometry || null,
       duplicate_detection_ids: [
         ...(Array.isArray(current?.duplicate_detection_ids) ? current.duplicate_detection_ids : [current?.id].filter(Boolean)),
         region?.id,
       ].filter(Boolean),
+      ...(preservedDominant?.color?.hex ? {
+        dedupe_preserved_dominant_hex: preservedDominant.color.hex,
+        dedupe_preserved_from_id: preservedDominant.region?.id || null,
+        dedupe_preservation_reason: "headwear_accessory_confident_top_color",
+      } : {}),
     };
   }
   return merged;
