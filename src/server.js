@@ -644,6 +644,86 @@ function compactRegionColor(color) {
   });
 }
 
+function deriveSignatureColorDisplayRead(zoneRead = {}, zoneKey = "") {
+  const displayWorthyPct = ["bag", "footwear", "accessory_jewelry", "eyewear"].includes(zoneKey) ? 0.1 : 0.12;
+  const distinctDistance = 14;
+  const dominantHex = safeHex(zoneRead?.dominant_color?.hex || "");
+  const primaryHex = safeHex(zoneRead?.primary_color?.hex || "");
+  const anchorHex = primaryHex || dominantHex;
+  const regionColors = Array.isArray(zoneRead?.region_colors)
+    ? zoneRead.region_colors.map(compactRegionColor).filter(Boolean)
+    : [];
+  const isDistinctFromAnchor = (color) => {
+    const hex = safeHex(color?.hex || "");
+    if (!hex || !anchorHex) return false;
+    if (hex === anchorHex) return false;
+    return colorDistanceLab(hex, anchorHex) >= distinctDistance;
+  };
+  const toSignatureColor = (color, source, reason) => {
+    const hex = safeHex(color?.hex || "");
+    if (!hex) return null;
+    return {
+      hex,
+      name: color?.name || getColorName(hex),
+      reason,
+      source,
+      display_only: true,
+    };
+  };
+
+  const secondaryRegionColor = regionColors
+    .slice(1)
+    .find((color) => normalizeColorPct(color?.pct) >= displayWorthyPct && isDistinctFromAnchor(color));
+  if (secondaryRegionColor) {
+    return toSignatureColor(
+      secondaryRegionColor,
+      "region_colors",
+      "Meaningful secondary color from finalized region_colors."
+    );
+  }
+
+  const topRegionColor = regionColors[0];
+  if (
+    topRegionColor &&
+    normalizeColorPct(topRegionColor?.pct) >= displayWorthyPct &&
+    primaryHex &&
+    dominantHex &&
+    primaryHex !== dominantHex &&
+    safeHex(topRegionColor.hex) !== primaryHex &&
+    colorDistanceLab(topRegionColor.hex, primaryHex) >= distinctDistance
+  ) {
+    return toSignatureColor(
+      topRegionColor,
+      "region_colors",
+      "Distinct finalized region color provides display-only style identity."
+    );
+  }
+
+  if (dominantHex && primaryHex && dominantHex !== primaryHex && colorDistanceLab(dominantHex, primaryHex) >= distinctDistance) {
+    return toSignatureColor(
+      zoneRead.dominant_color,
+      "dominant_color",
+      "Dominant color differs from finalized primary color and is useful as display-only context."
+    );
+  }
+
+  const identity = zoneRead?.dominant_color?.color_identity || zoneRead?.primary_color?.color_identity || null;
+  const identityName = String(identity?.name || "").trim();
+  const identityHex = safeHex(identity?.hex || dominantHex || primaryHex || "");
+  const readName = String(zoneRead?.dominant_color?.name || zoneRead?.primary_color?.name || "").trim();
+  if (identityHex && identityName && readName && identityName.toLowerCase() !== readName.toLowerCase()) {
+    return {
+      hex: identityHex,
+      name: identityName,
+      reason: "Finalized color_identity adds display-only style context.",
+      source: "color_identity",
+      display_only: true,
+    };
+  }
+
+  return null;
+}
+
 
 function getColorSummaryName(color = {}) {
   const hex = safeHex(color?.hex || color?.base);
@@ -2557,6 +2637,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       preserved_dino_hex: zoneRead?._debug?.preserved_dino_hex || null,
     });
 
+    const signatureColor = deriveSignatureColorDisplayRead(zoneRead, zoneKey);
     const accessoryDisplayMetadata = zoneKey === "accessory_jewelry"
       ? inferAccessoryDisplayMetadata(
           zoneRegions.flatMap((region) => [
@@ -2570,6 +2651,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     zones[zoneKey] = {
       ...(zoneData || {}),
       ...zoneRead,
+      signature_color: signatureColor,
       ...accessoryDisplayMetadata,
     };
 
