@@ -2789,13 +2789,20 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
   };
 }
 
-function buildColorClusters(colors = []) {
+function colorClusterWeight(color = {}) {
+  if (color?.pct === undefined || color?.pct === null) return 1;
+  const weight = Number(color.pct);
+  return Number.isFinite(weight) ? weight : 1;
+}
+
+export function buildColorClusters(colors = []) {
 
   const clusters = [];
 
   for (const c of colors || []) {
     const hex = safeHex(c?.hex);
     if (!hex) continue;
+    const weight = colorClusterWeight(c);
 
     let placed = false;
 
@@ -2803,7 +2810,7 @@ function buildColorClusters(colors = []) {
       const dist = colorDistanceLab(hex, cluster.base);
       if (dist < 20) {
         cluster.colors.push(c);
-        cluster.weight += Number(c?.pct || 1);
+        cluster.weight += weight;
         placed = true;
         break;
       }
@@ -2813,14 +2820,15 @@ function buildColorClusters(colors = []) {
       clusters.push({
         base: hex,
         colors: [c],
-        weight: Number(c?.pct || 1),
+        weight,
       });
     }
   }
 
-  const total = clusters.reduce((sum, c) => sum + Number(c.weight || 0), 0) || 1;
+  const weightedClusters = clusters.filter((c) => Number(c.weight || 0) > 0);
+  const total = weightedClusters.reduce((sum, c) => sum + Number(c.weight || 0), 0) || 1;
 
-  return clusters
+  return weightedClusters
     .map((c) => ({
       ...c,
       pct: c.weight / total,
@@ -6797,6 +6805,8 @@ app.use((err, _req, res, _next) => {
 /* =========================
    START
 ========================= */
-app.listen(PORT, () => {
-  console.log(`✅ CIE Core backend running on port ${PORT}`);
-});
+if (process.env.NODE_ENV !== "test") {
+  app.listen(PORT, () => {
+    console.log(`✅ CIE Core backend running on port ${PORT}`);
+  });
+}
