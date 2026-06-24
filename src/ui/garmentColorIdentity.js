@@ -6,15 +6,16 @@
  * secondary display value without using it for any decision logic.
  */
 
-export function normalizeColorPercentage(value) {
+export function normalizeColorPercentage(value, { traceZero = false } = {}) {
   if (value === null || value === undefined || value === "") return null;
 
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return null;
+  if (traceZero && numeric <= 0) return "Trace";
 
   const ratio = numeric > 1 ? numeric / 100 : numeric;
   const percent = Math.max(0, Math.min(100, Math.round(ratio * 100)));
-  return `${percent}%`;
+  return traceZero && percent === 0 ? "Trace" : `${percent}%`;
 }
 
 export function getColorIdentityTranslation(color) {
@@ -72,14 +73,14 @@ function normalizeDisplayPaletteRows(rows = []) {
     .sort((a, b) => Number(b.display_pct || 0) - Number(a.display_pct || 0));
 }
 
-export function buildGarmentColorDisplayRows(colors = [], role = null, { normalize = false } = {}) {
+export function buildGarmentColorDisplayRows(colors = [], role = null, { normalize = false, traceZero = false } = {}) {
   const rows = (Array.isArray(colors) ? colors : [colors])
     .filter(Boolean)
     .map((color) => ({
       role,
       ...buildColorDisplayLabel(color),
       hex: color.hex || null,
-      percentage: normalizeColorPercentage(color.percentage ?? color.pct ?? color.ratio),
+      percentage: normalizeColorPercentage(color.percentage ?? color.pct ?? color.ratio, { traceZero }),
       rawColor: color,
     }));
   return normalize ? normalizeDisplayPaletteRows(rows) : rows;
@@ -109,6 +110,31 @@ export function buildMulticolorZoneDisplay({ dominant_color, primary_color, seco
 export function buildRegionPaletteDisplay(region_colors = []) {
   return buildGarmentColorDisplayRows(region_colors, null, { normalize: true });
 }
+
+function collectDetectedRegionColors(zone = {}) {
+  if (Array.isArray(zone.region_colors) && zone.region_colors.length) return zone.region_colors;
+
+  const regions = Array.isArray(zone.segmented_regions) ? zone.segmented_regions : [];
+  const zoneKey = zone.zone || zone.zone_key || zone.segment_label || zone.category || null;
+  const matchingRegion = regions.find((region) => {
+    if (!Array.isArray(region?.region_colors) || !region.region_colors.length) return false;
+    if (!zoneKey) return true;
+    return [region.zone, region.zone_key, region.segment_label, region.category, region.label]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase() === String(zoneKey).toLowerCase());
+  }) || regions.find((region) => Array.isArray(region?.region_colors) && region.region_colors.length);
+
+  return Array.isArray(matchingRegion?.region_colors) ? matchingRegion.region_colors : [];
+}
+
+export function buildDetectedPaletteDisplay(zone = {}) {
+  const regionColors = collectDetectedRegionColors(zone);
+  return {
+    title: "Detected Palette",
+    colors: buildGarmentColorDisplayRows(regionColors, null, { traceZero: true }),
+    source: regionColors.length ? "region_colors" : null,
+  };
+}
 export function buildGarmentZoneColorDisplay(zone = {}) {
   const colorMode = zone.color_mode || zone.colorMode || null;
 
@@ -117,6 +143,7 @@ export function buildGarmentZoneColorDisplay(zone = {}) {
       mode: "single_color",
       colors: [buildSingleColorZoneDisplay(zone.primary_color || zone.dominant_color, colorMode)].filter(Boolean),
       palette: buildRegionPaletteDisplay(zone.region_colors),
+      detectedPalette: buildDetectedPaletteDisplay(zone),
     };
   }
 
@@ -124,5 +151,6 @@ export function buildGarmentZoneColorDisplay(zone = {}) {
     mode: colorMode || "multicolor",
     colors: buildMulticolorZoneDisplay(zone),
     palette: buildRegionPaletteDisplay(zone.region_colors),
+    detectedPalette: buildDetectedPaletteDisplay(zone),
   };
 }
