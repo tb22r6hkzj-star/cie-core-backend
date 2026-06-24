@@ -17,15 +17,24 @@ export function normalizeColorPercentage(value) {
   return `${percent}%`;
 }
 
+export function traceZero(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "string" && value.trim().toLowerCase() === "trace") return "Trace";
+
+  const numeric = Number.parseFloat(String(value).replace("%", ""));
+  if (!Number.isFinite(numeric)) return null;
+  return numeric === 0 ? "Trace" : null;
+}
+
 export function formatDetectedColorPercentage(color = {}) {
   const rawValue = color?.percentage ?? color?.display_pct ?? color?.pct ?? color?.ratio;
   if (rawValue === null || rawValue === undefined || rawValue === "") return null;
 
-  if (typeof rawValue === "string" && rawValue.trim().toLowerCase() === "trace") return "Trace";
+  const trace = traceZero(rawValue);
+  if (trace) return trace;
 
   const numeric = Number.parseFloat(String(rawValue).replace("%", ""));
   if (!Number.isFinite(numeric)) return null;
-  if (numeric === 0) return "Trace";
 
   if (typeof rawValue === "string" && rawValue.includes("%")) return rawValue.trim();
   return normalizeColorPercentage(numeric);
@@ -124,25 +133,48 @@ export function buildRegionPaletteDisplay(region_colors = []) {
   return buildGarmentColorDisplayRows(region_colors, null, { normalize: true });
 }
 
+function collectNestedRegionColors(regions = []) {
+  return regions.flatMap((region) => {
+    if (Array.isArray(region?.region_colors)) return region.region_colors;
+    if (Array.isArray(region?.colors)) return region.colors;
+    if (Array.isArray(region?.colorBreakdown)) return region.colorBreakdown;
+    if (Array.isArray(region?.colorBreakdown?.colors)) return region.colorBreakdown.colors;
+    if (Array.isArray(region?.colorBreakdown?.region_colors)) return region.colorBreakdown.region_colors;
+    return [];
+  });
+}
+
 function readDetectedColorSource(zone = {}) {
+  if (Array.isArray(zone?.detectedPalette) && zone.detectedPalette.length) return zone.detectedPalette;
+  if (Array.isArray(zone?.detected_palette) && zone.detected_palette.length) return zone.detected_palette;
   if (Array.isArray(zone?.region_colors) && zone.region_colors.length) return zone.region_colors;
   if (Array.isArray(zone?.colorBreakdown)) return zone.colorBreakdown;
   if (Array.isArray(zone?.colorBreakdown?.colors)) return zone.colorBreakdown.colors;
   if (Array.isArray(zone?.colorBreakdown?.region_colors)) return zone.colorBreakdown.region_colors;
+
+  const segmentedRegionColors = collectNestedRegionColors(zone?.segmented_regions || zone?.regions || []);
+  if (segmentedRegionColors.length) return segmentedRegionColors;
+
   return [];
 }
 
+export function collectDetectedRegionColors(zone = {}) {
+  return readDetectedColorSource(zone).filter(Boolean);
+}
+
+export function buildDetectedPaletteDisplay(zone = {}) {
+  return collectDetectedRegionColors(zone).map((color) => ({
+    ...buildColorDisplayLabel(color),
+    hex: color.hex || color.base || null,
+    percentage: formatDetectedColorPercentage(color),
+    compact: true,
+    muted: true,
+    rawColor: color,
+  }));
+}
+
 export function buildDetectedColorDisplayRows(zone = {}) {
-  return readDetectedColorSource(zone)
-    .filter(Boolean)
-    .map((color) => ({
-      ...buildColorDisplayLabel(color),
-      hex: color.hex || color.base || null,
-      percentage: formatDetectedColorPercentage(color),
-      compact: true,
-      muted: true,
-      rawColor: color,
-    }));
+  return buildDetectedPaletteDisplay(zone);
 }
 
 function buildColorCardSwatch(color, role = null) {
@@ -199,7 +231,7 @@ export function buildVisionCoreColorCardSections(zone = {}) {
 
   const detected = buildDetectedColorDisplayRows(zone);
   if (detected.length) {
-    sections.push({ key: "detected_colors", hierarchy: 6, title: "Detected Colors", variant: "evidence", muted: true, compact: true, rows: detected });
+    sections.push({ key: "detected_colors", hierarchy: 6, title: "Detected Palette", variant: "evidence", muted: true, compact: true, rows: detected });
   }
 
   return sections;
@@ -213,6 +245,7 @@ export function buildGarmentZoneColorDisplay(zone = {}) {
       colors: [buildSingleColorZoneDisplay(zone.primary_color || zone.dominant_color, colorMode)].filter(Boolean),
       palette: buildRegionPaletteDisplay(zone.region_colors),
       detected_colors: buildDetectedColorDisplayRows(zone),
+      detectedPalette: buildDetectedPaletteDisplay(zone),
       card_sections: buildVisionCoreColorCardSections(zone),
     };
   }
@@ -222,6 +255,7 @@ export function buildGarmentZoneColorDisplay(zone = {}) {
     colors: buildMulticolorZoneDisplay(zone),
     palette: buildRegionPaletteDisplay(zone.region_colors),
     detected_colors: buildDetectedColorDisplayRows(zone),
+    detectedPalette: buildDetectedPaletteDisplay(zone),
     card_sections: buildVisionCoreColorCardSections(zone),
   };
 }
