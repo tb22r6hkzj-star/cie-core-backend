@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   buildDetectedColorDisplayRows,
+  buildDetectedPaletteDisplay,
+  collectDetectedRegionColors,
   buildGarmentZoneColorDisplay,
   buildVisionCoreColorCardSections,
 } from "../src/ui/garmentColorIdentity.js";
@@ -73,4 +75,41 @@ test("accessory-style displays include card sections and detected colors", () =>
   assert.deepEqual(display.detected_colors.map((row) => row.percentage), ["85%", "14%", "Trace"]);
   assert.ok(display.card_sections.some((section) => section.key === "signature_color"));
   assert.ok(display.card_sections.some((section) => section.key === "detected_colors"));
+});
+
+test("eyewear detected palette displays raw DINO region colors", () => {
+  const eyewearZone = {
+    color_mode: "single_color",
+    primary_color: { hex: "#403D40", name: "Charcoal" },
+    segmented_regions: [
+      {
+        source_type: "grounding_dino",
+        label: "eyewear",
+        region_colors: [
+          { hex: "#403D40", name: "Charcoal", pct: 0.85 },
+          { hex: "#8A8580", name: "Stone Gray", pct: 0.14 },
+          { hex: "#3C2111", name: "Rich Brown", pct: 0 },
+          { hex: "#B98C90", name: "Dusty Rose", percentage: 0 },
+        ],
+      },
+    ],
+  };
+
+  assert.deepEqual(
+    collectDetectedRegionColors(eyewearZone).map((color) => color.name),
+    ["Charcoal", "Stone Gray", "Rich Brown", "Dusty Rose"]
+  );
+  assert.deepEqual(
+    buildDetectedPaletteDisplay(eyewearZone).map((row) => `${row.primaryLabel} ${row.percentage}`),
+    ["Charcoal 85%", "Stone Gray 14%", "Rich Brown Trace", "Dusty Rose Trace"]
+  );
+
+  const display = buildGarmentZoneColorDisplay(eyewearZone);
+  const detectedPaletteSection = display.card_sections.find((section) => section.key === "detected_colors");
+
+  assert.equal(detectedPaletteSection.title, "Detected Palette");
+  assert.deepEqual(
+    display.detectedPalette.map((row) => `${row.primaryLabel} ${row.percentage}`),
+    ["Charcoal 85%", "Stone Gray 14%", "Rich Brown Trace", "Dusty Rose Trace"]
+  );
 });
