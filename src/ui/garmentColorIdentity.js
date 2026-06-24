@@ -106,6 +106,74 @@ export function buildMulticolorZoneDisplay({ dominant_color, primary_color, seco
   ]);
 }
 
+function normalizeHexKey(hex) {
+  return typeof hex === "string" && hex.trim() ? hex.trim().toUpperCase() : null;
+}
+
+function getBreakdownDisplayPercentage(color = {}) {
+  const pctValue = color?.pct ?? color?.display_pct ?? color?.ratio;
+  if (pctValue !== null && pctValue !== undefined && pctValue !== "") {
+    const numeric = Number(pctValue);
+    if (Number.isFinite(numeric) && numeric === 0) return "trace";
+    const normalized = normalizeColorPercentage(numeric);
+    if (normalized) return normalized;
+  }
+
+  if (typeof color?.percentage === "string" && color.percentage.trim()) {
+    return color.percentage.trim() === "0%" ? "trace" : color.percentage.trim();
+  }
+
+  return null;
+}
+
+function buildColorBreakdownRow(color, source) {
+  const hex = color?.hex || null;
+  if (!hex) return null;
+
+  return {
+    source,
+    ...buildColorDisplayLabel(color),
+    hex,
+    pct: color?.pct ?? null,
+    display_pct: color?.display_pct ?? null,
+    percentage: color?.percentage ?? null,
+    displayPercentage: getBreakdownDisplayPercentage(color),
+    rawColor: color,
+  };
+}
+
+function appendUniqueBreakdownRows(rows, colors, source, seenHexes) {
+  for (const color of Array.isArray(colors) ? colors : [colors]) {
+    const key = normalizeHexKey(color?.hex);
+    if (!key || seenHexes.has(key)) continue;
+
+    const row = buildColorBreakdownRow(color, source);
+    if (!row) continue;
+
+    seenHexes.add(key);
+    rows.push(row);
+  }
+}
+
+export function buildZoneColorBreakdownDisplay(zone = {}) {
+  const rows = [];
+  const seenHexes = new Set();
+
+  appendUniqueBreakdownRows(rows, zone.region_colors, "region_colors", seenHexes);
+  appendUniqueBreakdownRows(rows, zone.support_colors, "support_colors", seenHexes);
+  appendUniqueBreakdownRows(rows, zone.secondary_colors, "secondary_colors", seenHexes);
+  appendUniqueBreakdownRows(rows, zone.accent_colors, "accent_colors", seenHexes);
+  appendUniqueBreakdownRows(rows, zone.dominant_color, "dominant_color", seenHexes);
+  appendUniqueBreakdownRows(rows, zone.primary_color, "primary_color", seenHexes);
+
+  return {
+    title: "Detected Colors",
+    muted: true,
+    compact: true,
+    colors: rows,
+  };
+}
+
 export function buildRegionPaletteDisplay(region_colors = []) {
   return buildGarmentColorDisplayRows(region_colors, null, { normalize: true });
 }
@@ -117,6 +185,7 @@ export function buildGarmentZoneColorDisplay(zone = {}) {
       mode: "single_color",
       colors: [buildSingleColorZoneDisplay(zone.primary_color || zone.dominant_color, colorMode)].filter(Boolean),
       palette: buildRegionPaletteDisplay(zone.region_colors),
+      colorBreakdown: buildZoneColorBreakdownDisplay(zone),
     };
   }
 
@@ -124,5 +193,6 @@ export function buildGarmentZoneColorDisplay(zone = {}) {
     mode: colorMode || "multicolor",
     colors: buildMulticolorZoneDisplay(zone),
     palette: buildRegionPaletteDisplay(zone.region_colors),
+    colorBreakdown: buildZoneColorBreakdownDisplay(zone),
   };
 }
