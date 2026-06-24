@@ -17,6 +17,20 @@ export function normalizeColorPercentage(value) {
   return `${percent}%`;
 }
 
+export function formatDetectedColorPercentage(color = {}) {
+  const rawValue = color?.percentage ?? color?.display_pct ?? color?.pct ?? color?.ratio;
+  if (rawValue === null || rawValue === undefined || rawValue === "") return null;
+
+  if (typeof rawValue === "string" && rawValue.trim().toLowerCase() === "trace") return "Trace";
+
+  const numeric = Number.parseFloat(String(rawValue).replace("%", ""));
+  if (!Number.isFinite(numeric)) return null;
+  if (numeric === 0) return "Trace";
+
+  if (typeof rawValue === "string" && rawValue.includes("%")) return rawValue.trim();
+  return normalizeColorPercentage(numeric);
+}
+
 export function getColorIdentityTranslation(color) {
   const translation = color?.color_identity?.translation;
   return typeof translation === "string" && translation.trim() ? translation.trim() : null;
@@ -109,6 +123,87 @@ export function buildMulticolorZoneDisplay({ dominant_color, primary_color, seco
 export function buildRegionPaletteDisplay(region_colors = []) {
   return buildGarmentColorDisplayRows(region_colors, null, { normalize: true });
 }
+
+function readDetectedColorSource(zone = {}) {
+  if (Array.isArray(zone?.region_colors) && zone.region_colors.length) return zone.region_colors;
+  if (Array.isArray(zone?.colorBreakdown)) return zone.colorBreakdown;
+  if (Array.isArray(zone?.colorBreakdown?.colors)) return zone.colorBreakdown.colors;
+  if (Array.isArray(zone?.colorBreakdown?.region_colors)) return zone.colorBreakdown.region_colors;
+  return [];
+}
+
+export function buildDetectedColorDisplayRows(zone = {}) {
+  return readDetectedColorSource(zone)
+    .filter(Boolean)
+    .map((color) => ({
+      ...buildColorDisplayLabel(color),
+      hex: color.hex || color.base || null,
+      percentage: formatDetectedColorPercentage(color),
+      compact: true,
+      muted: true,
+      rawColor: color,
+    }));
+}
+
+function buildColorCardSwatch(color, role = null) {
+  if (!color) return null;
+  return {
+    role,
+    ...buildColorDisplayLabel(color),
+    hex: color.hex || color.base || null,
+    percentage: formatDetectedColorPercentage(color),
+    reason: typeof color.reason === "string" && color.reason.trim() ? color.reason.trim() : null,
+    rawColor: color,
+  };
+}
+
+export function buildVisionCoreColorCardSections(zone = {}) {
+  const sections = [];
+  const dominant = buildColorCardSwatch(zone.dominant_color, "Dominant");
+  const primary = buildColorCardSwatch(zone.primary_color, "Primary");
+
+  if (dominant || primary) {
+    sections.push({
+      key: "identity",
+      hierarchy: 1,
+      title: "Color Identity",
+      variant: "primary",
+      rows: [
+        dominant && { label: "Dominant Color", hierarchy: 1, ...dominant },
+        primary && { label: "Primary Color", hierarchy: 2, ...primary },
+      ].filter(Boolean),
+    });
+  }
+
+  const signature = buildColorCardSwatch(zone.signature_color, "Signature");
+  if (signature) {
+    sections.push({
+      key: "signature_color",
+      hierarchy: 3,
+      title: "Signature Color",
+      variant: "interpretation",
+      rows: [signature],
+      reason: signature.reason,
+    });
+  }
+
+  const secondary = buildGarmentColorDisplayRows(zone.secondary_colors, "Secondary");
+  if (secondary.length) {
+    sections.push({ key: "secondary_colors", hierarchy: 4, title: "Secondary Colors", variant: "interpretation", rows: secondary });
+  }
+
+  const accents = buildGarmentColorDisplayRows(zone.accent_colors, "Accent");
+  if (accents.length) {
+    sections.push({ key: "accent_colors", hierarchy: 5, title: "Accent Colors", variant: "interpretation", rows: accents });
+  }
+
+  const detected = buildDetectedColorDisplayRows(zone);
+  if (detected.length) {
+    sections.push({ key: "detected_colors", hierarchy: 6, title: "Detected Colors", variant: "evidence", muted: true, compact: true, rows: detected });
+  }
+
+  return sections;
+}
 export function buildGarmentZoneColorDisplay(zone = {}) {
   const colorMode = zone.color_mode || zone.colorMode || null;
 
@@ -117,6 +212,8 @@ export function buildGarmentZoneColorDisplay(zone = {}) {
       mode: "single_color",
       colors: [buildSingleColorZoneDisplay(zone.primary_color || zone.dominant_color, colorMode)].filter(Boolean),
       palette: buildRegionPaletteDisplay(zone.region_colors),
+      detected_colors: buildDetectedColorDisplayRows(zone),
+      card_sections: buildVisionCoreColorCardSections(zone),
     };
   }
 
@@ -124,5 +221,7 @@ export function buildGarmentZoneColorDisplay(zone = {}) {
     mode: colorMode || "multicolor",
     colors: buildMulticolorZoneDisplay(zone),
     palette: buildRegionPaletteDisplay(zone.region_colors),
+    detected_colors: buildDetectedColorDisplayRows(zone),
+    card_sections: buildVisionCoreColorCardSections(zone),
   };
 }
