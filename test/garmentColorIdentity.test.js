@@ -113,3 +113,41 @@ test("eyewear detected palette displays raw DINO region colors", () => {
     ["Charcoal 85%", "Stone Gray 14%", "Rich Brown Trace", "Dusty Rose Trace"]
   );
 });
+
+test("eyewear detected palette preserves raw DINO evidence without changing final primary", () => {
+  const eyewearZone = {
+    color_mode: "single_color",
+    dominant_color: { hex: "#403D40", name: "Charcoal", pct: 0.85 },
+    primary_color: { hex: "#403D40", name: "Charcoal", pct: 0.85 },
+    region_colors: [{ hex: "#403D40", name: "Charcoal", pct: 1 }],
+    segmented_regions: [
+      {
+        source_type: "grounding_dino",
+        label: "eyewear",
+        region_colors: [
+          { hex: "#403D40", name: "Charcoal", pct: 0.85 },
+          { hex: "#141013", name: "Stone Gray", pct: 0.14 },
+          { hex: "#3C2111", name: "Rich Brown", pct: 0 },
+          { hex: "#7B655F", name: "Dusty Rose", pct: 0 },
+        ],
+      },
+    ],
+  };
+
+  const display = buildGarmentZoneColorDisplay(eyewearZone);
+  const detectedPaletteSection = display.card_sections.find((section) => section.key === "detected_colors");
+
+  assert.equal(display.colors[0].hex, "#403D40");
+  assert.equal(eyewearZone.dominant_color.hex, "#403D40");
+  assert.equal(eyewearZone.primary_color.hex, "#403D40");
+  assert.equal(detectedPaletteSection.title, "Detected Palette");
+  assert.deepEqual(
+    detectedPaletteSection.rows.map((row) => [row.hex, row.primaryLabel, row.percentage]),
+    [
+      ["#403D40", "Charcoal", "85%"],
+      ["#141013", "Stone Gray", "14%"],
+      ["#3C2111", "Rich Brown", "Trace"],
+      ["#7B655F", "Dusty Rose", "Trace"],
+    ]
+  );
+});
