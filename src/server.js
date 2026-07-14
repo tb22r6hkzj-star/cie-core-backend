@@ -847,6 +847,42 @@ function buildEvidenceSummary(colorMode, clusters = [], source = null) {
   return `Primary ${primary.name} (${primary.percentage}) is the dominant zone read${sourcePhrase}.`;
 }
 
+function isAccessoryDinoPaletteZone(zoneKey) {
+  return ["accessory_jewelry", "bag", "belt", "eyewear", "headwear", "scarf", "scarves"].includes(zoneKey);
+}
+
+function getAccessoryDetectedColorName(color = {}) {
+  const hex = safeHex(color?.hex || color?.base);
+  if (!hex) return color?.name || "Unknown";
+  const traits = getPerceptualTraits(hex);
+  if (
+    !isNavyCandidate(hex) &&
+    getLight(hex) < 0.24 &&
+    Number(traits?.chroma_magnitude || 0) < 22
+  ) {
+    return getBlackNuanceLabel(hex);
+  }
+  return color?.name || getColorName(hex);
+}
+
+function buildAccessoryDinoDetectedPalette(regionColors = []) {
+  return (Array.isArray(regionColors) ? regionColors : [])
+    .map((color) => compactRegionColor({
+      ...color,
+      name: getAccessoryDetectedColorName(color),
+    }))
+    .filter(Boolean);
+}
+
+function splitAccessoryDetectedPaletteRoles(detectedPalette = []) {
+  const rows = Array.isArray(detectedPalette) ? detectedPalette : [];
+  return {
+    primary: rows[0] ? compactColorRead(rows[0]) : null,
+    secondary: rows.slice(1).filter((color) => normalizeColorPct(color?.pct) > 0).map(compactColorRead).filter(Boolean),
+    accent: rows.slice(1).filter((color) => normalizeColorPct(color?.pct) <= 0).map(compactColorRead).filter(Boolean),
+  };
+}
+
 function buildRawDinoColorClusters(regionColors = []) {
   const clusters = [];
 
@@ -1409,6 +1445,12 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     };
   }
 
+  const accessoryDinoRegionColors = isAccessoryDinoPaletteZone(zoneKey) && Array.isArray(context?.selectedDinoRegionColors)
+    ? context.selectedDinoRegionColors
+    : [];
+  const accessoryDinoDetectedPalette = accessoryDinoRegionColors.length
+    ? buildAccessoryDinoDetectedPalette(accessoryDinoRegionColors)
+    : [];
   const baseHex = safeHex(zoneData.hex) || zoneData.hex;
   const candidateColors = regionColors.length ? regionColors : useRegionOnly ? [] : normalizedColors;
   const zoneColors = candidateColors.filter((c) => {
@@ -1596,7 +1638,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     context?.zoneColorSource === "dino_primary" ||
     !!safeHex(context?.preservedDinoHex || "") ||
     context?.preserveDinoZoneColor === true;
-  const rawDinoClusters = isDinoPreservedZone ? buildRawDinoColorClusters(regionColors) : [];
+  const rawDinoClusters = isDinoPreservedZone ? buildRawDinoColorClusters(accessoryDinoRegionColors.length ? accessoryDinoRegionColors : regionColors) : [];
   const rawDinoMeaningfulThreshold = 0.08;
   const rawDinoMeaningfulClusters = rawDinoClusters.filter((c) => Number(c?.pct || 0) >= rawDinoMeaningfulThreshold);
   const rawDinoColorModeRead = getZoneColorMode(rawDinoClusters);
@@ -1815,6 +1857,9 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     : [];
 
   const primaryColorRead = compactColorRead(summaryPrimaryColor);
+  const accessoryDetectedRoles = accessoryDinoDetectedPalette.length
+    ? splitAccessoryDetectedPaletteRoles(accessoryDinoDetectedPalette)
+    : null;
   debugContext.dominantColor = { hex: dominantColor?.hex || null };
   debugContext.primaryColor = { hex: primaryColorRead?.hex || null };
   if (zoneKey === "accessory_jewelry") {
@@ -1861,11 +1906,12 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     dominant_color: dominantColor,
     color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
     garment_identity: isGarmentZoneKey(zoneKey) ? buildGarmentIdentity(dominantColor, supportColors) : undefined,
-    primary_color: primaryColorRead,
+    primary_color: accessoryDetectedRoles?.primary || primaryColorRead,
     support_colors: supportColors,
-    secondary_colors: mergeColorReadSummaryFamilies(supportColors),
-    accent_colors: mergeColorReadSummaryFamilies(accentColors),
-    region_colors: summaryColorReadClusters,
+    secondary_colors: accessoryDetectedRoles ? accessoryDetectedRoles.secondary : mergeColorReadSummaryFamilies(supportColors),
+    accent_colors: accessoryDetectedRoles ? accessoryDetectedRoles.accent : mergeColorReadSummaryFamilies(accentColors),
+    detected_colors: accessoryDinoDetectedPalette.length ? accessoryDinoDetectedPalette : summaryColorReadClusters,
+    region_colors: accessoryDinoDetectedPalette.length ? accessoryDinoDetectedPalette : summaryColorReadClusters,
     evidence_summary: buildEvidenceSummary(mode === "multicolor" ? "multi_color" : "single_color", colorReadClusters, useRawDinoMulticolorRead ? "raw DINO region colors" : debugContext.zone_color_source),
     ...(
       useRawDinoMulticolorRead && isGarmentZoneKey(zoneKey)
@@ -2530,7 +2576,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       ? safeHex(dinoPrimaryRegion?.dominant_hex || dinoPrimaryRegion?.region_colors?.[0]?.hex || "")
       : null;
     const preserveDinoZoneColor =
-      ["accessory_jewelry", "bag", "footwear", "lower_garment", "upper_garment"].includes(zoneKey) &&
+      ["accessory_jewelry", "bag", "eyewear", "footwear", "lower_garment", "upper_garment"].includes(zoneKey) &&
       dinoOnlyZone &&
       !!dinoPrimaryHex;
 
@@ -2554,7 +2600,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     const strongOuterwearSignal = zoneKey === "outerwear" ? hasStrongOuterwearRegionSignal(zoneRegions, evidence) : false;
     const strongSignalHelper = zoneKey === "eyewear" ? strongEyewearSignal : zoneKey === "outerwear" ? strongOuterwearSignal : false;
     const allowZoneFromRegionOnly = ["bag", "accessory_jewelry", "footwear", "logo_text_detail", "fur_trim", "outerwear"].includes(zoneKey);
-    const useRegionCandidate = hasExplicitEvidence && zoneRegions.length > 0;
+    const useRegionCandidate = (hasExplicitEvidence || preserveDinoZoneColor) && zoneRegions.length > 0;
     const zoneData = useRegionCandidate
       ? buildZoneCandidate(chosenColor, zoneKey, computedScore)
       : promoteFallback && !allowZoneFromRegionOnly
@@ -2578,6 +2624,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         preserveDinoZoneColor,
         zoneColorSource: preserveDinoZoneColor ? "dino_primary" : consensusCluster?.base ? "cluster" : "fallback",
         dinoPrimaryRegionSelection: dinoPrimarySelection.debug,
+        selectedDinoRegionColors: Array.isArray(dinoPrimaryRegion?.region_colors) ? dinoPrimaryRegion.region_colors : [],
         evidence,
       }
     );
@@ -6810,3 +6857,6 @@ if (process.env.NODE_ENV !== "test") {
     console.log(`✅ CIE Core backend running on port ${PORT}`);
   });
 }
+
+
+export { buildOutfitAnalysis, inferZoneColorRead, inferGarmentZones };
