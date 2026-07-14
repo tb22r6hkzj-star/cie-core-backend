@@ -37,7 +37,9 @@ export function formatDetectedColorPercentage(color = {}) {
   if (!Number.isFinite(numeric)) return null;
 
   if (typeof rawValue === "string" && rawValue.includes("%")) return rawValue.trim();
-  return normalizeColorPercentage(numeric);
+
+  const normalized = normalizeColorPercentage(numeric);
+  return numeric > 0 && normalized === "0%" ? "Trace" : normalized;
 }
 
 export function getColorIdentityTranslation(color) {
@@ -147,13 +149,14 @@ function collectNestedRegionColors(regions = []) {
 function readDetectedColorSource(zone = {}) {
   if (Array.isArray(zone?.detectedPalette) && zone.detectedPalette.length) return zone.detectedPalette;
   if (Array.isArray(zone?.detected_palette) && zone.detected_palette.length) return zone.detected_palette;
+
+  const segmentedRegionColors = collectNestedRegionColors(zone?.segmented_regions || zone?.regions || []);
+  if (segmentedRegionColors.length) return segmentedRegionColors;
+
   if (Array.isArray(zone?.region_colors) && zone.region_colors.length) return zone.region_colors;
   if (Array.isArray(zone?.colorBreakdown)) return zone.colorBreakdown;
   if (Array.isArray(zone?.colorBreakdown?.colors)) return zone.colorBreakdown.colors;
   if (Array.isArray(zone?.colorBreakdown?.region_colors)) return zone.colorBreakdown.region_colors;
-
-  const segmentedRegionColors = collectNestedRegionColors(zone?.segmented_regions || zone?.regions || []);
-  if (segmentedRegionColors.length) return segmentedRegionColors;
 
   return [];
 }
