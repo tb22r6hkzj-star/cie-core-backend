@@ -147,13 +147,18 @@ function collectNestedRegionColors(regions = []) {
 function readDetectedColorSource(zone = {}) {
   if (Array.isArray(zone?.detectedPalette) && zone.detectedPalette.length) return zone.detectedPalette;
   if (Array.isArray(zone?.detected_palette) && zone.detected_palette.length) return zone.detected_palette;
+
+  // Detected Palette is supporting evidence, not the finalized/collapsed color
+  // interpretation. Prefer raw segmented/DINO region colors whenever present so
+  // accessories, eyewear, headwear, upper garments, and patterned shirts can
+  // expose trace colors even when the final color mode is single_color.
+  const segmentedRegionColors = collectNestedRegionColors(zone?.segmented_regions || zone?.regions || []);
+  if (segmentedRegionColors.length) return segmentedRegionColors;
+
   if (Array.isArray(zone?.region_colors) && zone.region_colors.length) return zone.region_colors;
   if (Array.isArray(zone?.colorBreakdown)) return zone.colorBreakdown;
   if (Array.isArray(zone?.colorBreakdown?.colors)) return zone.colorBreakdown.colors;
   if (Array.isArray(zone?.colorBreakdown?.region_colors)) return zone.colorBreakdown.region_colors;
-
-  const segmentedRegionColors = collectNestedRegionColors(zone?.segmented_regions || zone?.regions || []);
-  if (segmentedRegionColors.length) return segmentedRegionColors;
 
   return [];
 }
