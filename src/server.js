@@ -4014,7 +4014,7 @@ function buildSuggestedAdjustment(scoreBreakdown, colorRoles, bestMode) {
   return `Refining the relationship between ${anchorName}, ${supportName}, and ${accentName} would improve the overall outfit score.`;
 }
 
-function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], dinoGarmentRegions = [], pipeline = null }) {
+function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], dinoGarmentRegions = [], pipeline = null, decodedImage = null, perception_v6_mode = null, v6_mode = null }) {
   const normalizedColors = normalizeDetectedColors(topColors, dominantHex);
   const baseRoles = assignColorRoles(normalizedColors);
   const colorRoles = enforceStructuralPreservation(baseRoles, normalizedColors);
@@ -4057,7 +4057,35 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     garmentEvidenceRegions
   );
   const perceptionV5 = analyzePerceptionV5({ regions: garmentEvidenceRegions, pipeline });
-  const perceptionV6 = analyzePerceptionV6({ perceptionV5, regions: garmentEvidenceRegions });
+  const perceptionV6 = analyzePerceptionV6({ perceptionV5, regions: garmentEvidenceRegions, decodedImage });
+  const requestedV6Mode = String(perception_v6_mode || v6_mode || pipeline?.perception_v6_mode || pipeline?.v6_mode || "shadow").toLowerCase();
+  const perceptionV6Mode = ["shadow", "assist", "authoritative"].includes(requestedV6Mode) ? requestedV6Mode : "shadow";
+  const legacyZones = garmentZones?.zones || {};
+  if (perceptionV6Mode === "authoritative") {
+    garmentZones.zones = perceptionV6.publication_gating.allowed
+      ? Object.fromEntries(perceptionV6.zone_reconciliation.map((decision) => {
+          const legacy = legacyZones[decision.zone] || null;
+          const dominantObjectColor = decision.object_local_colors?.[0] || null;
+          return [decision.zone, {
+            ...(legacy || {}),
+            name: decision.selected_label,
+            label: decision.selected_label,
+            hex: dominantObjectColor?.hex || legacy?.hex || null,
+            object_local_colors: decision.object_local_colors,
+            evidence_ids: decision.selected_evidence_ids,
+            validation_decision: decision.validation_decision,
+            publication_decision: decision.publication_decision,
+            reconciliation_result: decision.resolution,
+            legacy_diagnostic: legacy,
+            perception_source: "v6_reconciliation",
+          }];
+        }))
+      : {};
+  } else if (perceptionV6Mode === "assist") {
+    const evidenceZones = new Set(perceptionV6.evidence_ledger.map((entry) => entry.zone));
+    const safeZones = new Set(perceptionV6.zone_reconciliation.map((entry) => entry.zone));
+    garmentZones.zones = Object.fromEntries(Object.entries(legacyZones).filter(([zone]) => !evidenceZones.has(zone) || safeZones.has(zone)));
+  }
   const fullDinoLifecycleTrace = [
     ...dinoLifecycleTrace,
     ...((garmentZones?.dino_lifecycle_trace?.stages || []).filter((stage) =>
@@ -4104,6 +4132,7 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     garment_zones: garmentZones,
     perception_v5: perceptionV5,
     perception_v6: perceptionV6,
+    perception_v6_mode: perceptionV6Mode,
     dino_lifecycle_trace: {
       target_id: "dino_4",
       stages: fullDinoLifecycleTrace,
