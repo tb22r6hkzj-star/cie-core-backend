@@ -42,6 +42,8 @@ import { v2 as cloudinary } from "cloudinary";
 import chroma from "chroma-js";
 import jpeg from "jpeg-js";
 import { PNG } from "pngjs";
+import { analyzePerceptionV5 } from "./intelligence/perceptionV5/index.js";
+import { analyzePerceptionV6 } from "./intelligence/perceptionV6/index.js";
 import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
 import { mapDinoLabel } from "./engines/ontology/dinoMappings.js";
 import {
@@ -4054,6 +4056,8 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     visualIntelligence,
     garmentEvidenceRegions
   );
+  const perceptionV5 = analyzePerceptionV5({ regions: garmentEvidenceRegions, pipeline });
+  const perceptionV6 = analyzePerceptionV6({ perceptionV5, regions: garmentEvidenceRegions });
   const fullDinoLifecycleTrace = [
     ...dinoLifecycleTrace,
     ...((garmentZones?.dino_lifecycle_trace?.stages || []).filter((stage) =>
@@ -4098,6 +4102,8 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     visual_intelligence: visualIntelligence,
     visual_intelligence_layer: visualIntelligence,
     garment_zones: garmentZones,
+    perception_v5: perceptionV5,
+    perception_v6: perceptionV6,
     dino_lifecycle_trace: {
       target_id: "dino_4",
       stages: fullDinoLifecycleTrace,
