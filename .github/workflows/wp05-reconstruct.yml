@@ -1,0 +1,27 @@
+name: WP-05 reconstruction
+on:
+  push:
+    branches:
+      - visioncore-rc1-wp05-explainability
+permissions:
+  contents: write
+jobs:
+  reconstruct:
+    if: github.event.head_commit.message != 'Apply WP-05 perception explainability reconstruction'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: visioncore-rc1-wp05-explainability
+      - name: Apply WP-05 patch
+        run: python scripts/wp05-explainability-patch.py
+      - name: Verify syntax
+        run: node --check src/server.js
+      - name: Commit reconstruction
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/server.js
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Apply WP-05 perception explainability reconstruction"
+          git push origin HEAD:visioncore-rc1-wp05-explainability
