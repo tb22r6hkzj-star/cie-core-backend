@@ -2,8 +2,6 @@ name: Object presence v1 verification
 on:
   push:
     branches: [visioncore-object-presence-v1]
-permissions:
-  contents: write
 jobs:
   test:
     if: github.actor != 'github-actions[bot]'
@@ -14,8 +12,6 @@ jobs:
         with:
           node-version: 20
       - run: npm install
-      - name: Apply geometry patch
-        run: python scripts/object-presence-v1-geometry.py
       - run: node --check src/intelligence/perceptionV6/index.js
       - name: Positive object-presence regressions
         run: NODE_ENV=test node --test test/objectPresenceV1.test.js
@@ -23,10 +19,3 @@ jobs:
         run: NODE_ENV=test node --test test/marketHardening02.test.js test/perceptionV6Pixel.test.js test/perceptionV6Hardening.test.js test/accessoryPalettePreservation.test.js
       - name: Full suite
         run: npm test
-      - name: Persist validated object-presence layer
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/intelligence/perceptionV6/index.js test/objectPresenceV1.test.js
-          git commit -m 'Require positive structural evidence for headwear publication' || exit 0
-          git push
