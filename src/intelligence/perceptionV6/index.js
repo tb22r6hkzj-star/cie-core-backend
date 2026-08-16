@@ -49,7 +49,18 @@ function inspectPixels(region, decodedImage) {
   });
   const ratios = Object.fromEntries(Object.entries(counts).map(([k,v]) => [k, v/samples.length]));
   const contrast = surrounding.length ? distance(mean(samples), mean(surrounding)) : 0;
-  return { available: true, valid: true, reason: "pixels_sampled", crop: { x: x1, y: y1, width: x2-x1, height: y2-y1 }, sample_count: samples.length, surrounding_sample_count: surrounding.length, ratios, contrast, object_local_colors: localColors };
+  const upperY2 = Math.min(y2, y1 + Math.max(1, Math.floor((y2 - y1) * .65)));
+  let upperEdgeComparisons = 0, upperStrongEdges = 0;
+  for (let y = y1; y < upperY2; y += stride) for (let x = x1; x + stride < x2; x += stride) {
+    const i=(y*image.width+x)*image.channels, j=(y*image.width+x+stride)*image.channels;
+    if (image.channels===4 && (image.data[i+3]<=15 || image.data[j+3]<=15)) continue;
+    const a=[image.data[i],image.data[i+1],image.data[i+2]], b=[image.data[j],image.data[j+1],image.data[j+2]];
+    if (pixelKind(a)==="skin" || pixelKind(b)==="skin") continue;
+    upperEdgeComparisons += 1;
+    if (distance(a,b) >= .055) upperStrongEdges += 1;
+  }
+  const spatial_structure={ upper_internal_edge_density: upperEdgeComparisons ? upperStrongEdges/upperEdgeComparisons : 0, upper_edge_comparisons: upperEdgeComparisons };
+  return { available: true, valid: true, reason: "pixels_sampled", crop: { x: x1, y: y1, width: x2-x1, height: y2-y1 }, sample_count: samples.length, surrounding_sample_count: surrounding.length, ratios, contrast, spatial_structure, object_local_colors: localColors };
 }
 
 function evaluatePositiveObjectPresence(entry, pixels) {
@@ -64,9 +75,10 @@ function evaluatePositiveObjectPresence(entry, pixels) {
   if (entry.confidence >= .62) evidence.push("detector_support");
   if (objectShare >= .38 && (r.skin || 0) < .50 && (r.highlight || 0) < .50) evidence.push("crop_occupancy");
 
+  if (Number(pixels.spatial_structure?.upper_internal_edge_density || 0) >= .08) evidence.push("upper_internal_edge_structure");
   const isHeadwear = /hat|cap|beanie|headwear/.test(label);
   const requiredEvidence = isHeadwear ? 3 : 2;
-  const structuralSignals = ["boundary_separation", "object_pixel_mass", "structured_dark_mass"];
+  const structuralSignals = ["upper_internal_edge_structure", "object_pixel_mass"];
   const structuralEvidence = evidence.filter((item) => structuralSignals.includes(item));
   const supported = evidence.length >= requiredEvidence && (!isHeadwear || structuralEvidence.length > 0);
   return {
