@@ -5986,14 +5986,16 @@ function isNeutralDarkColor(color) {
   return lightness <= 0.30 && (!Number.isFinite(hue) || saturation <= 0.18 || chromaValue < 8);
 }
 
-function sortLowerGarmentColors(colorRows = []) {
+function sortLowerGarmentColors(colorRows = [], context = {}) {
+  const repeatedGreenSupport = Number(context?.greenWindowSupport || 0) >= 2;
+  const greenMultiplier = repeatedGreenSupport ? 2.15 : 1.55;
   return [...colorRows].sort((a, b) => {
     const aGreen = isChromaticGreenOrOlive(a);
     const bGreen = isChromaticGreenOrOlive(b);
     const aNeutralDark = isNeutralDarkColor(a);
     const bNeutralDark = isNeutralDarkColor(b);
-    const aScore = a.pct * (aGreen ? 1.55 : 1) * (aNeutralDark ? 0.72 : 1);
-    const bScore = b.pct * (bGreen ? 1.55 : 1) * (bNeutralDark ? 0.72 : 1);
+    const aScore = a.pct * (aGreen ? greenMultiplier : 1) * (aNeutralDark ? 0.72 : 1);
+    const bScore = b.pct * (bGreen ? greenMultiplier : 1) * (bNeutralDark ? 0.72 : 1);
     return bScore - aScore;
   });
 }
@@ -6105,10 +6107,12 @@ function extractDinoBboxRegionColors(baseImage, bbox, limit = 6, context = {}) {
     : getDinoSamplePixelBbox(pixelBbox, zone, context?.category || context?.label || "");
   const sampleBboxes = getDinoSamplePixelBboxes(pixelBbox, zone, context?.category || context?.label || "");
   const samples = [];
+  const lowerWindowStats = [];
   let backgroundLike = 0;
 
   for (const sampleBbox of sampleBboxes) {
     const stride = Math.max(1, Math.floor(Math.sqrt((sampleBbox.width * sampleBbox.height) / 3000)));
+    const windowSamples = [];
     for (let y = sampleBbox.y1; y < sampleBbox.y2; y += stride) {
       for (let x = sampleBbox.x1; x < sampleBbox.x2; x += stride) {
         const idx = (y * baseW + x) * 4;
@@ -6121,10 +6125,24 @@ function extractDinoBboxRegionColors(baseImage, bbox, limit = 6, context = {}) {
         const bg = isNearWhiteOrBlackPixel(r, g, b);
         const skin = isSkinLikePixel(r, g, b);
         if (bg) backgroundLike += 1;
-        samples.push({ r, g, b, bg, skin, ...traits });
+        const sample = { r, g, b, bg, skin, ...traits };
+        samples.push(sample);
+        windowSamples.push(sample);
       }
     }
+    if (zoneKey === "lower_garment") {
+      const usableWindow = windowSamples.filter((sample) => !sample.bg && !sample.skin);
+      const greenCount = usableWindow.filter((sample) =>
+        sample.hue >= 65 && sample.hue <= 165 && sample.saturation >= 0.18 && sample.lightness <= 0.55
+      ).length;
+      lowerWindowStats.push({
+        label: sampleBbox.label || null,
+        sample_count: usableWindow.length,
+        green_share: usableWindow.length ? round2(greenCount / usableWindow.length) : 0,
+      });
+    }
   }
+  const greenWindowSupport = lowerWindowStats.filter((row) => row.sample_count >= 8 && row.green_share >= 0.12).length;
 
   if (!samples.length) {
     return {
@@ -6176,9 +6194,9 @@ function extractDinoBboxRegionColors(baseImage, bbox, limit = 6, context = {}) {
     .filter((row) => !!row.hex)
     .sort((a, b) => b.pct - a.pct);
 
-  const rankedColorRows = zoneKey === "lower_garment" ? sortLowerGarmentColors(colorRows) : colorRows;
+  const rankedColorRows = zoneKey === "lower_garment" ? sortLowerGarmentColors(colorRows, { greenWindowSupport }) : colorRows;
   const clusters = buildColorClusters(rankedColorRows);
-  const rankedClustersBeforeHeadwearBias = zoneKey === "lower_garment" ? sortLowerGarmentColors(clusters.map((cluster) => ({ ...cluster, hex: cluster.base }))) : clusters;
+  const rankedClustersBeforeHeadwearBias = zoneKey === "lower_garment" ? sortLowerGarmentColors(clusters.map((cluster) => ({ ...cluster, hex: cluster.base })), { greenWindowSupport }) : clusters;
   const { clusters: rankedClusters, debug: headwearColorBiasDebug } = applyHeadwearDinoColorBias(rankedClustersBeforeHeadwearBias, context);
   const colors = rankedClusters.slice(0, limit).map((cluster) => ({
     hex: safeHex(cluster.base),
@@ -6193,6 +6211,8 @@ function extractDinoBboxRegionColors(baseImage, bbox, limit = 6, context = {}) {
       sample_windows_before: zoneKey === "lower_garment" ? [previousSampleBbox] : null,
       sample_windows_after: zoneKey === "lower_garment" ? sampleBboxes : null,
       previous_color_sample_bbox: zoneKey === "lower_garment" ? previousSampleBbox : null,
+      lower_window_stats: zoneKey === "lower_garment" ? lowerWindowStats : null,
+      green_window_support: zoneKey === "lower_garment" ? greenWindowSupport : 0,
       sample_count: samples.length,
       filtered_sample_count: usableSamples.length,
       dominant_hex_before_cluster: colorRows[0]?.hex || null,
@@ -7425,4 +7445,4 @@ if (process.env.NODE_ENV !== "test") {
 }
 
 
-export { buildOutfitAnalysis, inferZoneColorRead, inferGarmentZones, MARKET_PERCEPTION_V6_MODE };
+export { buildOutfitAnalysis, inferZoneColorRead, inferGarmentZones, MARKET_PERCEPTION_V6_MODE, extractDinoBboxRegionColors };
