@@ -68,6 +68,8 @@ function validateObject(entry, pixels) {
   if (/hat|cap|beanie|headwear/.test(label)) {
     if (r.dark > .72 && pixels.contrast < .06) contamination.push("hair_like_dark_region");
     if (r.skin > .55) contamination.push("skin_dominance");
+    const hairFaceBoundaryPattern = r.dark > .52 && r.skin >= .10 && r.object < .30;
+    if (hairFaceBoundaryPattern) contamination.push("hair_face_boundary_pattern");
     const supported = contamination.length === 0 && pixels.contrast >= .045 && r.highlight < .55;
     return { supported, accepted: supported && entry.confidence >= .35, reason: supported ? "object_local_headwear_structure" : contamination[0] || "insufficient_headwear_pixel_contrast", contamination };
   }
