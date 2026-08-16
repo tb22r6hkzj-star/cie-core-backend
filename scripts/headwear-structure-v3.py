@@ -16,8 +16,10 @@ new = '''  if (Number(pixels.spatial_structure?.upper_internal_edge_density || 0
   const requiredEvidence = isHeadwear ? 3 : 2;
   const structuralSignals = ["upper_internal_edge_structure", "object_dominant_crop"];
   const structuralEvidence = evidence.filter((item) => structuralSignals.includes(item));
-  const headwearBoundaryEvidence = evidence.includes("boundary_separation");
-  const supported = evidence.length >= requiredEvidence && (!isHeadwear || (headwearBoundaryEvidence && structuralEvidence.length > 0));
+  const hasInternalObjectStructure = evidence.includes("upper_internal_edge_structure");
+  const hasDominantBoundaryObject = evidence.includes("object_dominant_crop") && evidence.includes("boundary_separation");
+  const headwearStructureSupported = hasInternalObjectStructure || hasDominantBoundaryObject;
+  const supported = evidence.length >= requiredEvidence && (!isHeadwear || headwearStructureSupported);
 '''
 if old not in s:
     raise SystemExit('Headwear structural evidence block not found')
