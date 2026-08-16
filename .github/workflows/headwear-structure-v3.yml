@@ -1,0 +1,32 @@
+name: Headwear structure v3 verification
+on:
+  push:
+    branches: [visioncore-headwear-structure-v3]
+permissions:
+  contents: write
+jobs:
+  test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - name: Apply headwear structure patch
+        run: python scripts/headwear-structure-v3.py
+      - run: node --check src/intelligence/perceptionV6/index.js
+      - name: Headwear Structure V3 regression
+        run: NODE_ENV=test node --test test/headwearStructureV3.test.js
+      - name: Existing object presence regressions
+        run: NODE_ENV=test node --test test/objectPresenceV1.test.js test/objectPresenceV2Publication.test.js test/perceptionV6Pixel.test.js test/perceptionV6Hardening.test.js
+      - name: Full suite
+        run: npm test
+      - name: Persist validated headwear structure
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/intelligence/perceptionV6/index.js
+          git commit -m 'Require independent headwear structure before publication' || exit 0
+          git push
