@@ -1,0 +1,32 @@
+name: Color identity v2 verification
+on:
+  push:
+    branches: [visioncore-color-identity-v2]
+permissions:
+  contents: write
+jobs:
+  test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - name: Apply directional chromaticity patch
+        run: python scripts/color-identity-v2-directional-chroma.py
+      - run: node --check src/engines/labelMapper/index.js
+      - name: Color Identity V2 regressions
+        run: NODE_ENV=test node --test test/colorIdentityV2.test.js
+      - name: Existing color and market regressions
+        run: NODE_ENV=test node --test test/marketHardening02.test.js test/perceptionV6Pixel.test.js test/perceptionV6Hardening.test.js test/accessoryPalettePreservation.test.js
+      - name: Full suite
+        run: npm test
+      - name: Persist validated directional chromaticity
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/engines/labelMapper/index.js
+          git commit -m 'Preserve directional chromaticity in muted color identity' || exit 0
+          git push
