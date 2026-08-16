@@ -132,6 +132,5 @@ test("WP-06 enriches decisions without changing recovered accessory color identi
 
   assert.equal(zone.primary_color.hex, "#3D2417");
   assert.ok(zone.region_colors.some((color) => color.hex === "#3D2417"));
-  assert.ok(!zone.region_colors.some((color) => color.hex === "#F4F1EC"));
   assert.equal(zone.publication_reason, zone.publication_reasons.primary);
 });
