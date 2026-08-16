@@ -4451,9 +4451,20 @@ function buildWhyThisWorks(colorRoles) {
   const stabilizerTraits = stabilizer?.perceptual || {};
 
   const anchorDescriptor = `${anchorTraits.depth || "mid"} ${anchorTraits.temperature || "balanced"} ${anchor?.name || anchor?.hex || "anchor tone"}`;
-  const supportDescriptor = `${supportTraits.intensity || "balanced"} ${support?.name || support?.hex || "support tone"}`;
-  const stabilizerDescriptor = `${stabilizerTraits.intensity || "balanced"} ${stabilizer?.name || stabilizer?.hex || "stabilizer tone"}`;
-  const accentDescriptor = `${accentTraits.intensity || "balanced"} ${accent?.name || accent?.hex || "accent tone"}`;
+  const buildRoleDescriptor = (descriptor, colorName, fallbackName) => {
+    const prefix = String(descriptor || "").trim();
+    const name = String(colorName || fallbackName || "tone").trim();
+    if (!prefix) return name;
+    const normalizedPrefix = prefix.toLowerCase();
+    const normalizedName = name.toLowerCase();
+    return normalizedName === normalizedPrefix || normalizedName.startsWith(`${normalizedPrefix} `)
+      ? name
+      : `${prefix} ${name}`;
+  };
+
+  const supportDescriptor = buildRoleDescriptor(supportTraits.intensity || "balanced", support?.name || support?.hex, "support tone");
+  const stabilizerDescriptor = buildRoleDescriptor(stabilizerTraits.intensity || "balanced", stabilizer?.name || stabilizer?.hex, "stabilizer tone");
+  const accentDescriptor = buildRoleDescriptor(accentTraits.intensity || "balanced", accent?.name || accent?.hex, "accent tone");
 
   return `The ${anchorDescriptor} anchor establishes the visual center, while ${supportDescriptor} extends the palette with compatible support. ${stabilizerDescriptor} adds grounding stability, and ${accentDescriptor} introduces controlled emphasis without overwhelming the overall structure.`;
 }
