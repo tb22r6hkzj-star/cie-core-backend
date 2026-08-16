@@ -67,26 +67,51 @@ function evaluatePositiveObjectPresence(entry, pixels) {
   const label = `${entry.label} ${entry.zone}`.toLowerCase();
   const r = pixels.ratios || {};
   const evidence = [];
+  const diagnosticEvidence = [];
   const objectShare = (r.object || 0) + (r.dark || 0);
+  const edgeDensity = Number(pixels.spatial_structure?.upper_internal_edge_density || 0);
+  const isHeadwear = /hat|cap|beanie|headwear/.test(label);
+
   if (pixels.contrast >= .055) evidence.push("boundary_separation");
   if ((r.object || 0) >= .22) evidence.push("object_pixel_mass");
   if ((r.dark || 0) >= .12 && pixels.contrast >= .075) evidence.push("structured_dark_mass");
   if ((pixels.object_local_colors || []).some((color) => Number(color.pct || 0) >= .12)) evidence.push("coherent_object_color");
-  if (entry.confidence >= .62) evidence.push("detector_support");
+  if (entry.confidence >= .62) diagnosticEvidence.push("detector_support");
   if (objectShare >= .38 && (r.skin || 0) < .50 && (r.highlight || 0) < .50) evidence.push("crop_occupancy");
+  if (edgeDensity >= .08) evidence.push("upper_internal_edge_structure");
 
-  if (Number(pixels.spatial_structure?.upper_internal_edge_density || 0) >= .08) evidence.push("upper_internal_edge_structure");
-  const isHeadwear = /hat|cap|beanie|headwear/.test(label);
-  const requiredEvidence = isHeadwear ? 3 : 2;
+  if (!isHeadwear) {
+    const requiredEvidence = 2;
+    return {
+      supported: evidence.length >= requiredEvidence,
+      score: clamp(evidence.length / 4),
+      evidence: [...evidence, ...diagnosticEvidence],
+      qualifying_evidence: evidence,
+      diagnostic_evidence: diagnosticEvidence,
+      structural_evidence: evidence.filter((item) => ["upper_internal_edge_structure", "object_pixel_mass"].includes(item)),
+      required_evidence: requiredEvidence,
+      skin_dominant_head_crop: false,
+    };
+  }
+
+  // Detector confidence may describe a candidate, but it cannot prove headwear.
+  // A skin-dominant crop with limited dark material is characteristic of a
+  // bare head/face crop and must be withheld even when DINO labels it as a hat.
+  const skinDominantHeadCrop = (r.skin || 0) > .55 && (r.dark || 0) < .30;
   const structuralSignals = ["upper_internal_edge_structure", "object_pixel_mass"];
   const structuralEvidence = evidence.filter((item) => structuralSignals.includes(item));
-  const supported = evidence.length >= requiredEvidence && (!isHeadwear || structuralEvidence.length > 0);
+  const requiredEvidence = 2;
+  const supported = !skinDominantHeadCrop && evidence.length >= requiredEvidence && structuralEvidence.length > 0;
+
   return {
     supported,
-    score: clamp(evidence.length / Math.max(requiredEvidence + 1, 4)),
-    evidence,
+    score: clamp(evidence.length / 4),
+    evidence: [...evidence, ...diagnosticEvidence],
+    qualifying_evidence: evidence,
+    diagnostic_evidence: diagnosticEvidence,
     structural_evidence: structuralEvidence,
     required_evidence: requiredEvidence,
+    skin_dominant_head_crop: skinDominantHeadCrop,
   };
 }
 
@@ -110,9 +135,12 @@ function validateObject(entry, pixels) {
       reason: supported ? "positive_headwear_object_presence" : contamination[0] || "insufficient_positive_headwear_evidence",
       contamination,
       positive_evidence: presence.evidence,
+      qualifying_evidence: presence.qualifying_evidence || [],
+      diagnostic_evidence: presence.diagnostic_evidence || [],
       structural_evidence: presence.structural_evidence,
       object_presence_score: presence.score,
       required_positive_evidence: presence.required_evidence,
+      skin_dominant_head_crop: !!presence.skin_dominant_head_crop,
     };
   }
   const supported = r.highlight < .72 && (pixels.contrast >= .025 || r.object + r.dark >= .25);
