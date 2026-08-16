@@ -35,7 +35,7 @@ test("high-contrast bare-head candidate is withheld when positive headwear evide
   const validation = result.evidence_ledger[0].validation;
   assert.equal(result.evidence_ledger[0].accepted, false);
   assert.equal(validation.reason, "insufficient_positive_headwear_evidence");
-  assert.equal(validation.structural_evidence, false);
+  assert.deepEqual(validation.structural_evidence, []);
   assert.equal(result.object_presence.accessory_jewelry.present, false);
 });
 
