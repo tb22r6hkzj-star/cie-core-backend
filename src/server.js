@@ -4014,7 +4014,11 @@ function buildSuggestedAdjustment(scoreBreakdown, colorRoles, bestMode) {
   return `Refining the relationship between ${anchorName}, ${supportName}, and ${accentName} would improve the overall outfit score.`;
 }
 
-function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], dinoGarmentRegions = [], pipeline = null, decodedImage = null, perception_v6_mode = null, v6_mode = null }) {
+function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], dinoGarmentRegions = [], pipeline = null, decodedImage = null, perception_v6_mode, v6_mode }) {
+  const requestedV6Mode = perception_v6_mode ?? v6_mode ?? "shadow";
+  const perceptionV6Mode = ["shadow", "assist", "authoritative"].includes(requestedV6Mode)
+    ? requestedV6Mode
+    : "shadow";
   const normalizedColors = normalizeDetectedColors(topColors, dominantHex);
   const baseRoles = assignColorRoles(normalizedColors);
   const colorRoles = enforceStructuralPreservation(baseRoles, normalizedColors);
@@ -4050,31 +4054,32 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     summarizeDinoStageForTrace("garmentEvidenceRegions", garmentEvidenceRegions),
   ];
 
-  const garmentZones = inferGarmentZones(
+  const legacyGarmentZones = inferGarmentZones(
     normalizedColors,
     colorRoles,
     visualIntelligence,
     garmentEvidenceRegions
   );
   const perceptionV5 = analyzePerceptionV5({ regions: garmentEvidenceRegions, pipeline });
-  const perceptionV6 = analyzePerceptionV6({ perceptionV5, regions: garmentEvidenceRegions, decodedImage });
-  const requestedV6Mode = String(perception_v6_mode || v6_mode || pipeline?.perception_v6_mode || pipeline?.v6_mode || "shadow").toLowerCase();
-  const perceptionV6Mode = ["shadow", "assist", "authoritative"].includes(requestedV6Mode) ? requestedV6Mode : "shadow";
-  const legacyZones = garmentZones?.zones || {};
+  const perceptionV6 = analyzePerceptionV6({ perceptionV5, regions: garmentEvidenceRegions, decodedImage, mode: perceptionV6Mode });
+  const rejectedZones = new Set(perceptionV6.publication_decisions.filter((decision) => !decision.published).map((decision) => decision.zone));
+  const acceptedZones = new Set(perceptionV6.zone_reconciliation.map((decision) => decision.zone));
+  const suppressibleZones = new Set(["eyewear", "accessory_jewelry", "bag", "footwear"]);
+  let publishedZones;
   if (perceptionV6Mode === "authoritative") {
-    garmentZones.zones = perceptionV6.publication_gating.allowed
+    publishedZones = perceptionV6.publication_gating.allowed
       ? Object.fromEntries(perceptionV6.zone_reconciliation.map((decision) => {
-          const legacy = legacyZones[decision.zone] || null;
+          const legacy = legacyGarmentZones.zones?.[decision.zone] || null;
           const dominantObjectColor = decision.object_local_colors?.[0] || null;
           return [decision.zone, {
             ...(legacy || {}),
             name: decision.selected_label,
             label: decision.selected_label,
             hex: dominantObjectColor?.hex || legacy?.hex || null,
-            object_local_colors: decision.object_local_colors,
-            evidence_ids: decision.selected_evidence_ids,
-            validation_decision: decision.validation_decision,
-            publication_decision: decision.publication_decision,
+            object_local_colors: decision.object_local_colors || [],
+            evidence_ids: decision.selected_evidence_ids || [],
+            validation_decision: "accepted",
+            publication_decision: "publish",
             reconciliation_result: decision.resolution,
             legacy_diagnostic: legacy,
             perception_source: "v6_reconciliation",
@@ -4082,15 +4087,28 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
         }))
       : {};
   } else if (perceptionV6Mode === "assist") {
-    const evidenceZones = new Set(perceptionV6.evidence_ledger.map((entry) => entry.zone));
-    const safeZones = new Set(perceptionV6.zone_reconciliation.map((entry) => entry.zone));
-    garmentZones.zones = Object.fromEntries(Object.entries(legacyZones).filter(([zone]) => !evidenceZones.has(zone) || safeZones.has(zone)));
+    publishedZones = Object.fromEntries(Object.entries(legacyGarmentZones.zones || {}).filter(([zone]) =>
+      !(suppressibleZones.has(zone) && rejectedZones.has(zone) && !acceptedZones.has(zone))
+    ));
+  } else {
+    publishedZones = legacyGarmentZones.zones || {};
   }
+  const garmentZones = perceptionV6Mode === "shadow" ? legacyGarmentZones : {
+    ...legacyGarmentZones,
+    zones: publishedZones,
+    publication_mode: perceptionV6Mode,
+    legacy_zones: legacyGarmentZones.zones,
+    v6_publication_diagnostics: perceptionV6.publication_decisions,
+  };
   const fullDinoLifecycleTrace = [
     ...dinoLifecycleTrace,
-    ...((garmentZones?.dino_lifecycle_trace?.stages || []).filter((stage) =>
+    ...((legacyGarmentZones?.dino_lifecycle_trace?.stages || []).filter((stage) =>
       !dinoLifecycleTrace.some((existing) => existing.stage === stage.stage)
     )),
+    ...perceptionV6.lifecycle_trace.map((entry) => ({
+      ...entry,
+      stage: `perception_v6.${entry.stage}`,
+    })),
   ];
   console.info("[DINO TRACE] dino_4 buildOutfitAnalysis lifecycle", {
     stages: fullDinoLifecycleTrace,
@@ -6463,10 +6481,12 @@ async function analyzeGhostColors(ghostUrl) {
   const groundingDino = await runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_QUERY);
   const dinoDetections = Array.isArray(groundingDino?.detections) ? groundingDino.detections : [];
   let dinoGarmentRegions = buildDinoSegmentedRegions(dinoDetections);
+  let decodedImage = null;
   let dinoColorEnrichmentReason = dinoGarmentRegions.length ? "no_bbox_color_enrichment" : "no_dino_garment_regions";
   try {
     if (dinoGarmentRegions.some((region) => !!region?.bbox)) {
       const ghostBuffer = await fetchImageBuffer(ghostUrl);
+      decodedImage = decodeImageRgba(ghostBuffer, ghostUrl);
       dinoGarmentRegions = extractColorsFromDinoBboxes(ghostBuffer, dinoGarmentRegions);
       dinoColorEnrichmentReason = "bbox_color_extraction_complete";
     } else if (dinoGarmentRegions.length) {
@@ -6474,6 +6494,13 @@ async function analyzeGhostColors(ghostUrl) {
     }
   } catch (error) {
     dinoColorEnrichmentReason = error?.message || "bbox_color_extraction_failed";
+  }
+  if (!decodedImage) {
+    try {
+      decodedImage = decodeImageRgba(await fetchImageBuffer(ghostUrl), ghostUrl);
+    } catch (error) {
+      console.warn("[PERCEPTION V6] Decoded-image evidence unavailable", { reason: error?.message || "decode_failed" });
+    }
   }
   const dinoColorEnrichmentCount = dinoGarmentRegions.filter((region) => safeHex(region?.dominant_hex) && Array.isArray(region?.region_colors) && region.region_colors.length > 0).length;
   const dinoColorEnrichmentOk = dinoColorEnrichmentCount > 0;
@@ -6510,6 +6537,7 @@ async function analyzeGhostColors(ghostUrl) {
     dominantHex,
     dominantName: getColorName(dominantHex),
     topColors,
+    decodedImage,
     segmentedRegions: samOk ? samRegions : dinoGarmentRegions,
     dinoGarmentRegions,
     dino_debug: dinoDebug,
@@ -6597,6 +6625,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         dominantHex: analysis.dominantHex,
         topColors: analysis.topColors,
         segmentedRegions,
+        decodedImage: analysis.decodedImage,
         dinoGarmentRegions: analysis.dinoGarmentRegions,
         pipeline: analysis.pipeline,
       });
@@ -6687,6 +6716,7 @@ app.post("/api/recommendations", async (req, res) => {
         segmentedRegions: analysis.segmentedRegions,
         dinoGarmentRegions: analysis.dinoGarmentRegions,
         pipeline: analysis.pipeline,
+        decodedImage: analysis.decodedImage,
       });
     } catch (error) {
       return sendStepError(res, 500, "palette_engine", error);
@@ -6807,6 +6837,7 @@ app.post("/api/retrieval/preview", async (req, res) => {
           dominantHex: analysis.dominantHex,
           topColors: analysis.topColors,
           segmentedRegions: analysis.segmentedRegions,
+          decodedImage: analysis.decodedImage,
           dinoGarmentRegions: analysis.dinoGarmentRegions,
           pipeline: analysis.pipeline,
         });
