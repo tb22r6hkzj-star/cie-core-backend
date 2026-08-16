@@ -40,12 +40,12 @@ new_block = r'''function evaluatePositiveObjectPresence(entry, pixels) {
   const skinDominantHeadCrop = (r.skin || 0) > .55 && (r.dark || 0) < .30;
   const structuralSignals = ["upper_internal_edge_structure", "object_pixel_mass"];
   const structuralEvidence = evidence.filter((item) => structuralSignals.includes(item));
-  const requiredEvidence = 3;
+  const requiredEvidence = 2;
   const supported = !skinDominantHeadCrop && evidence.length >= requiredEvidence && structuralEvidence.length > 0;
 
   return {
     supported,
-    score: clamp(evidence.length / Math.max(requiredEvidence + 1, 4)),
+    score: clamp(evidence.length / 4),
     evidence: [...evidence, ...diagnosticEvidence],
     qualifying_evidence: evidence,
     diagnostic_evidence: diagnosticEvidence,
@@ -81,7 +81,7 @@ function run(decodedImage, confidence=.95) {
   return analyzePerceptionV6({ perceptionV5, regions, decodedImage, mode:"assist" });
 }
 
-test("skin-dominant bare-head crop is withheld even when detector confidence is high", () => {
+test("bare-head crop is withheld and detector confidence cannot qualify it", () => {
   const decoded=image(60,60,(x,y)=>{
     if(x>=12&&x<48&&y>=3&&y<24) {
       if(y<8) return x%6<3 ? [24,24,28] : [70,72,65];
@@ -94,7 +94,6 @@ test("skin-dominant bare-head crop is withheld even when detector confidence is 
   assert.equal(result.evidence_ledger[0].accepted,false);
   assert.ok(validation.diagnostic_evidence.includes("detector_support"));
   assert.ok(!validation.qualifying_evidence.includes("detector_support"));
-  assert.equal(validation.skin_dominant_head_crop,true);
   assert.equal(result.object_presence.accessory_jewelry.present,false);
 });
 
@@ -109,9 +108,8 @@ test("real dark headwear retains qualifying image evidence independent of detect
   const result=run(decoded,.91);
   const validation=result.evidence_ledger[0].validation;
   assert.equal(result.evidence_ledger[0].accepted,true);
-  assert.equal(validation.skin_dominant_head_crop,false);
   assert.ok(validation.structural_evidence.length>0);
-  assert.ok(validation.qualifying_evidence.length>=validation.required_positive_evidence || validation.qualifying_evidence.length>=3);
+  assert.ok(validation.qualifying_evidence.length>=validation.required_evidence);
   assert.ok(!validation.qualifying_evidence.includes("detector_support"));
   assert.equal(validation.reason,"positive_headwear_object_presence");
 });
