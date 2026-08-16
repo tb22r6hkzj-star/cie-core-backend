@@ -64,11 +64,16 @@ function evaluatePositiveObjectPresence(entry, pixels) {
   if (entry.confidence >= .62) evidence.push("detector_support");
   if (objectShare >= .38 && (r.skin || 0) < .50 && (r.highlight || 0) < .50) evidence.push("crop_occupancy");
 
-  const requiredEvidence = /hat|cap|beanie|headwear/.test(label) ? 3 : 2;
+  const isHeadwear = /hat|cap|beanie|headwear/.test(label);
+  const requiredEvidence = isHeadwear ? 3 : 2;
+  const structuralSignals = ["boundary_separation", "object_pixel_mass", "structured_dark_mass"];
+  const structuralEvidence = evidence.filter((item) => structuralSignals.includes(item));
+  const supported = evidence.length >= requiredEvidence && (!isHeadwear || structuralEvidence.length > 0);
   return {
-    supported: evidence.length >= requiredEvidence,
+    supported,
     score: clamp(evidence.length / Math.max(requiredEvidence + 1, 4)),
     evidence,
+    structural_evidence: structuralEvidence,
     required_evidence: requiredEvidence,
   };
 }
@@ -93,6 +98,7 @@ function validateObject(entry, pixels) {
       reason: supported ? "positive_headwear_object_presence" : contamination[0] || "insufficient_positive_headwear_evidence",
       contamination,
       positive_evidence: presence.evidence,
+      structural_evidence: presence.structural_evidence,
       object_presence_score: presence.score,
       required_positive_evidence: presence.required_evidence,
     };
@@ -127,8 +133,8 @@ export function analyzePerceptionV6({ perceptionV5, regions = [], decodedImage =
   const score=clamp((v5.arbitration?.confidence??0)*.65+consensus.ratio*.35), allowed=accepted.length>0&&v5.arbitration?.outcome==="accepted"&&score>=.55&&(contradictionPolicy.count===0||consensus.ratio>=.67);
   const reason=accepted.length===0?"no_accepted_evidence":v5.arbitration?.outcome!=="accepted"?"v5_not_accepted":score<.55?"insufficient_confidence":contradictionPolicy.count&&consensus.ratio<.67?"unresolved_contradiction":"evidence_threshold_met";
   for (const item of reconciliation) item.publication_decision = allowed ? "publish" : "blocked_by_global_gate";
-  const publicationDecisions=evidenceLedger.map(e=>({id:e.id,zone:e.zone,label:e.label,published:e.accepted,reason:e.validation.reason,colors:e.object_local_colors,positive_evidence:e.validation.positive_evidence || []}));
+  const publicationDecisions=evidenceLedger.map(e=>({id:e.id,zone:e.zone,label:e.label,published:e.accepted,reason:e.validation.reason,colors:e.object_local_colors,positive_evidence:e.validation.positive_evidence || [],structural_evidence:e.validation.structural_evidence || []}));
   return {version:"6",mode,decoded_image_valid:!!validImage(decodedImage),evidence_ledger:evidenceLedger,consensus,object_presence:objectPresence,zone_reconciliation:reconciliation,contradiction_policy:contradictionPolicy,publication_gating:{allowed,score,reason},publication_decisions:publicationDecisions,
     decision_trace:[{step:"ingest_v5",hypothesis_count:v5.hypotheses?.length??0,contradiction_count:contradictionPolicy.count},{step:"ledger",evidence_count:evidenceLedger.length,accepted_count:accepted.length},{step:"consensus",zone:consensus.zone,label:consensus.label,ratio:consensus.ratio},{step:"reconcile",zone_count:reconciliation.length},{step:"publication_gate",allowed,score,reason}],
-    lifecycle_trace:[{stage:"candidate_selection",candidate_ids:evidenceLedger.map(e=>e.id)},{stage:"crop_selection",crops:evidenceLedger.map(e=>({id:e.id,crop:e.pixel_evidence.crop}))},{stage:"pixel_validation",results:evidenceLedger.map(e=>({id:e.id,supported:e.validation.supported,reason:e.validation.reason,positive_evidence:e.validation.positive_evidence || []}))},{stage:"object_local_color_preservation",results:evidenceLedger.map(e=>({id:e.id,colors:e.object_local_colors}))},{stage:"publication",mode,decisions:publicationDecisions}]};
+    lifecycle_trace:[{stage:"candidate_selection",candidate_ids:evidenceLedger.map(e=>e.id)},{stage:"crop_selection",crops:evidenceLedger.map(e=>({id:e.id,crop:e.pixel_evidence.crop}))},{stage:"pixel_validation",results:evidenceLedger.map(e=>({id:e.id,supported:e.validation.supported,reason:e.validation.reason,positive_evidence:e.validation.positive_evidence || [],structural_evidence:e.validation.structural_evidence || []}))},{stage:"object_local_color_preservation",results:evidenceLedger.map(e=>({id:e.id,colors:e.object_local_colors}))},{stage:"publication",mode,decisions:publicationDecisions}]};
 }
