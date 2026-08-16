@@ -21,7 +21,21 @@ jobs:
       - name: Syntax check
         run: node --check src/intelligence/perceptionV6/index.js
       - name: Targeted object-presence gate
-        run: NODE_ENV=test node --test test/objectPresenceV3.test.js test/objectPresenceV1.test.js test/objectPresenceV2Publication.test.js test/perceptionV6Pixel.test.js
+        run: |
+          set +e
+          NODE_ENV=test node --test test/objectPresenceV3.test.js test/objectPresenceV1.test.js test/objectPresenceV2Publication.test.js test/perceptionV6Pixel.test.js > v3-gate-output.txt 2>&1
+          status=$?
+          cat v3-gate-output.txt
+          echo "$status" > v3-gate-status.txt
+          exit $status
+      - name: Preserve targeted gate output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: object-presence-v3-gate-output
+          path: |
+            v3-gate-output.txt
+            v3-gate-status.txt
       - name: Full suite
         run: npm test
       - name: Persist validated change
