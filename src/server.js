@@ -81,6 +81,18 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 const PIXELCUT_TIMEOUT_MS = 45000;
 const LOWER_SAMPLING_VERSION = "multi_window_v1";
+const PERCEPTION_V6_MODES = new Set(["shadow", "assist", "authoritative"]);
+
+function normalizePerceptionV6Mode(value, fallback = "shadow") {
+  const requested = String(value || "").trim().toLowerCase();
+  if (PERCEPTION_V6_MODES.has(requested)) return requested;
+  return PERCEPTION_V6_MODES.has(fallback) ? fallback : "shadow";
+}
+
+const MARKET_PERCEPTION_V6_MODE = normalizePerceptionV6Mode(
+  process.env.PERCEPTION_V6_MODE,
+  "assist"
+);
 
 /* =========================
    CORS
@@ -4503,10 +4515,7 @@ function buildSuggestedAdjustment(scoreBreakdown, colorRoles, bestMode) {
 }
 
 function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], dinoGarmentRegions = [], pipeline = null, decodedImage = null, perception_v6_mode, v6_mode }) {
-  const requestedV6Mode = perception_v6_mode ?? v6_mode ?? "shadow";
-  const perceptionV6Mode = ["shadow", "assist", "authoritative"].includes(requestedV6Mode)
-    ? requestedV6Mode
-    : "shadow";
+  const perceptionV6Mode = normalizePerceptionV6Mode(perception_v6_mode ?? v6_mode, "shadow");
   const normalizedColors = normalizeDetectedColors(topColors, dominantHex);
   const baseRoles = assignColorRoles(normalizedColors);
   const colorRoles = enforceStructuralPreservation(baseRoles, normalizedColors);
@@ -7114,6 +7123,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         topColors: analysis.topColors,
         segmentedRegions,
         decodedImage: analysis.decodedImage,
+        perception_v6_mode: MARKET_PERCEPTION_V6_MODE,
         dinoGarmentRegions: analysis.dinoGarmentRegions,
         pipeline: analysis.pipeline,
       });
@@ -7205,6 +7215,7 @@ app.post("/api/recommendations", async (req, res) => {
         dinoGarmentRegions: analysis.dinoGarmentRegions,
         pipeline: analysis.pipeline,
         decodedImage: analysis.decodedImage,
+        perception_v6_mode: MARKET_PERCEPTION_V6_MODE,
       });
     } catch (error) {
       return sendStepError(res, 500, "palette_engine", error);
@@ -7326,6 +7337,7 @@ app.post("/api/retrieval/preview", async (req, res) => {
           topColors: analysis.topColors,
           segmentedRegions: analysis.segmentedRegions,
           decodedImage: analysis.decodedImage,
+        perception_v6_mode: MARKET_PERCEPTION_V6_MODE,
           dinoGarmentRegions: analysis.dinoGarmentRegions,
           pipeline: analysis.pipeline,
         });
@@ -7413,4 +7425,4 @@ if (process.env.NODE_ENV !== "test") {
 }
 
 
-export { buildOutfitAnalysis, inferZoneColorRead, inferGarmentZones };
+export { buildOutfitAnalysis, inferZoneColorRead, inferGarmentZones, MARKET_PERCEPTION_V6_MODE };
