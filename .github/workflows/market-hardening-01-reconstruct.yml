@@ -15,6 +15,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - run: npm install
       - name: Apply patch
         run: python scripts/market-hardening-01-patch.py
       - name: Syntax check
@@ -22,7 +23,7 @@ jobs:
       - name: Targeted market mode tests
         run: NODE_ENV=test node --test test/marketPerceptionMode.test.js test/perceptionV6Pixel.test.js
       - name: Full suite
-        run: npm install && npm test
+        run: npm test
       - name: Persist validated patch
         run: |
           git config user.name 'github-actions[bot]'
