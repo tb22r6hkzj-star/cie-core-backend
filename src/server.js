@@ -81,6 +81,18 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 const PIXELCUT_TIMEOUT_MS = 45000;
 const LOWER_SAMPLING_VERSION = "multi_window_v1";
+const PERCEPTION_V6_MODES = new Set(["shadow", "assist", "authoritative"]);
+
+function normalizePerceptionV6Mode(value, fallback = "shadow") {
+  const requested = String(value || "").trim().toLowerCase();
+  if (PERCEPTION_V6_MODES.has(requested)) return requested;
+  return PERCEPTION_V6_MODES.has(fallback) ? fallback : "shadow";
+}
+
+const MARKET_PERCEPTION_V6_MODE = normalizePerceptionV6Mode(
+  process.env.PERCEPTION_V6_MODE,
+  "assist"
+);
 
 /* =========================
    CORS
@@ -883,6 +895,182 @@ function splitAccessoryDetectedPaletteRoles(detectedPalette = []) {
     secondary: rows.slice(1).filter((color) => normalizeColorPct(color?.pct) > 0).map(compactColorRead).filter(Boolean),
     accent: rows.slice(1).filter((color) => normalizeColorPct(color?.pct) <= 0).map(compactColorRead).filter(Boolean),
   };
+}
+
+function isAccessoryDisplayPaletteZone(zoneKey) {
+  return ["accessory_jewelry", "bag", "belt", "eyewear", "headwear"].includes(zoneKey);
+}
+
+function isBrownFamilyHex(hex) {
+  const safe = safeHex(hex);
+  if (!safe) return false;
+  const hue = getHue(safe);
+  const sat = getSat(safe);
+  const light = getLight(safe);
+  return hue >= 8 && hue <= 55 && sat >= 0.22 && light >= 0.08 && light <= 0.62;
+}
+
+function preserveAccessoryRawPalette(colors = []) {
+  return (Array.isArray(colors) ? colors : [])
+    .map((color) => {
+      const hex = safeHex(color?.hex || color?.base);
+      if (!hex) return null;
+      return {
+        ...color,
+        hex,
+        name: getAccessoryDetectedColorName({ ...color, hex }),
+        pct: color?.pct,
+      };
+    })
+    .filter(Boolean);
+}
+
+function accessoryPaletteContaminationReason(color = {}) {
+  const hex = safeHex(color?.hex || color?.base);
+  if (!hex) return "invalid_hex";
+  const pct = normalizeColorPct(color?.pct);
+  if (pct <= 0) return null;
+  if (isBrownFamilyHex(hex)) return null;
+  const hue = getHue(hex);
+  const sat = getSat(hex);
+  const light = getLight(hex);
+  if (light >= 0.86 && sat <= 0.2) return "highlight_or_glare";
+  if (hue >= 8 && hue <= 55 && sat >= 0.12 && sat <= 0.55 && light >= 0.48 && light <= 0.86) {
+    return "skin_or_beige_contamination";
+  }
+  return null;
+}
+
+function filterAccessoryDisplayPalette(colors = []) {
+  const kept = [];
+  const rejected = [];
+  for (const color of buildAccessoryDinoDetectedPalette(colors)) {
+    const reason = accessoryPaletteContaminationReason(color);
+    if (reason) rejected.push({ hex: color.hex, pct: color.pct, reason });
+    else kept.push(color);
+  }
+  return { kept, rejected };
+}
+
+function selectAccessoryDisplayPalette({ refinedCrop = [], candidateRegion = [], rawDino = [], detector = [], fallback = [] } = {}) {
+  const sources = [
+    ["refined_crop", refinedCrop],
+    ["candidate_region", candidateRegion],
+    ["raw_dino", rawDino],
+    ["detector", detector],
+    ["fallback", fallback],
+  ];
+  const source_trace = [];
+  for (const [source, colors] of sources) {
+    const { kept, rejected } = filterAccessoryDisplayPalette(colors);
+    source_trace.push({ source, input_count: Array.isArray(colors) ? colors.length : 0, surviving_count: kept.length, rejected });
+    if (kept.length) {
+      return {
+        palette: kept,
+        selected_source: source,
+        trace: {
+          selected_source: source,
+          precedence: ["refined_crop", "candidate_region", "raw_dino", "detector", "fallback"],
+          reason_not_replaced: "higher_priority_confirmed_values_are_authoritative",
+          sources: source_trace,
+        },
+      };
+    }
+  }
+  return {
+    palette: [],
+    selected_source: null,
+    trace: {
+      selected_source: null,
+      precedence: ["refined_crop", "candidate_region", "raw_dino", "detector", "fallback"],
+      reason_not_replaced: "no_publishable_accessory_palette_survived",
+      sources: source_trace,
+    },
+  };
+}
+
+
+function normalizeConfidencePercent(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return 0;
+  return n <= 1 ? clamp100(n * 100) : clamp100(n);
+}
+
+function calibrateConfidence(value, { evidenceWeight = 1, floor = 1, ceiling = 99 } = {}) {
+  const normalized = normalizeConfidencePercent(value);
+  const weighted = normalized * clamp01(Number(evidenceWeight || 0));
+  return Math.round(Math.max(floor, Math.min(ceiling, weighted)));
+}
+
+function displayPaletteEvidenceWeight(source) {
+  if (source === "refined_crop") return 1;
+  if (source === "candidate_region") return 0.95;
+  if (source === "raw_dino") return 0.88;
+  if (source === "detector") return 0.8;
+  return 0.7;
+}
+
+function calibrateDisplayColorConfidence({
+  zoneConfidence = 0,
+  colorPct = 0,
+  sourceConfidence = 0,
+  evidenceWeight = 1,
+} = {}) {
+  const zone = normalizeConfidencePercent(zoneConfidence) / 100;
+  const pct = clamp01(normalizeColorPct(colorPct));
+  const source = normalizeConfidencePercent(sourceConfidence) / 100;
+  const combined = (zone * 0.55 + pct * 0.30 + source * 0.15) * 100;
+  return calibrateConfidence(combined, { evidenceWeight, floor: 1, ceiling: 99 });
+}
+
+function withDisplayColorConfidence(color, context = {}) {
+  if (!color) return color;
+  return {
+    ...color,
+    confidence: calibrateDisplayColorConfidence({
+      zoneConfidence: context.zoneConfidence,
+      colorPct: color?.pct,
+      sourceConfidence: context.sourceConfidence,
+      evidenceWeight: context.evidenceWeight,
+    }),
+  };
+}
+
+function buildContaminationEvidenceScore({ dominant = null, regionCoverage = 0, suppressionGates = {} } = {}) {
+  const hex = safeHex(dominant?.base || dominant?.hex || "");
+  const pct = clamp01(normalizeColorPct(dominant?.pct));
+  const hue = hex ? getHue(hex) : 0;
+  const sat = hex ? getSat(hex) : 0;
+  const light = hex ? getLight(hex) : 0;
+  const skinLike = hex && !isBrownFamilyHex(hex) && hue >= 8 && hue <= 55 && sat >= 0.12 && sat <= 0.55 && light >= 0.42 && light <= 0.88 ? 1 : 0;
+  const highlightLike = hex && light >= 0.82 && sat <= 0.22 ? 1 : 0;
+  const neutralWeak = suppressionGates?.isNeutralContamination ? 1 : 0;
+  const lowSignal = suppressionGates?.lowSignalRegion ? 1 : 0;
+  const weakDominant = suppressionGates?.isWeakDominantEvidence ? 1 : 0;
+  const legacySkinGate = suppressionGates?.jewelrySkinContamination ? 1 : 0;
+  const lackOfCoverage = clamp01(1 - Number(regionCoverage || 0));
+  const components = {
+    skin_like: round2(skinLike * 0.34),
+    highlight_like: round2(highlightLike * 0.24),
+    neutral_weak: round2(neutralWeak * 0.12),
+    low_signal: round2(lowSignal * 0.08),
+    weak_dominant: round2(weakDominant * 0.08),
+    legacy_skin_gate: round2(legacySkinGate * 0.08),
+    low_coverage: round2(lackOfCoverage * (1 - pct) * 0.06),
+  };
+  const total = round2(Object.values(components).reduce((sum, value) => sum + Number(value || 0), 0));
+  return { total, components };
+}
+
+function flattenRejectedDisplayAlternatives(trace = null) {
+  return (trace?.sources || []).flatMap((sourceRow) =>
+    (sourceRow?.rejected || []).map((candidate) => ({
+      source: sourceRow.source,
+      hex: candidate.hex || null,
+      pct: candidate.pct ?? null,
+      rejection_reason: candidate.reason || "not_selected",
+    }))
+  );
 }
 
 function buildRawDinoColorClusters(regionColors = []) {
@@ -1859,9 +2047,109 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     : [];
 
   const primaryColorRead = compactColorRead(summaryPrimaryColor);
-  const accessoryDetectedRoles = accessoryDinoDetectedPalette.length
-    ? splitAccessoryDetectedPaletteRoles(accessoryDinoDetectedPalette)
+  const rawDinoPalette = preserveAccessoryRawPalette(context?.rawDinoRegionColors || accessoryDinoRegionColors);
+  const rawDetectorPalette = preserveAccessoryRawPalette(
+    rawDinoPalette.length ? rawDinoPalette : (zoneData?.hex ? [{ hex: zoneData.hex, pct: zoneData.pct, name: zoneData.name }] : [])
+  );
+  const pixelRefinedPalette = preserveAccessoryRawPalette(context?.refinedRegionColors || []);
+  const candidateRegionPalette = preserveAccessoryRawPalette(accessoryDinoRegionColors);
+  const fallbackPalette = preserveAccessoryRawPalette(normalizedColors);
+  const displayPaletteSelection = isAccessoryDisplayPaletteZone(zoneKey)
+    ? selectAccessoryDisplayPalette({
+        refinedCrop: pixelRefinedPalette,
+        candidateRegion: candidateRegionPalette,
+        rawDino: rawDinoPalette,
+        detector: rawDetectorPalette,
+        fallback: fallbackPalette,
+      })
     : null;
+  const displayPalette = displayPaletteSelection?.palette || [];
+  const selectedDisplaySource = displayPaletteSelection?.selected_source || debugContext.zone_color_source || "fallback";
+  const displayEvidenceWeight = displayPaletteEvidenceWeight(selectedDisplaySource);
+  const explainabilitySourceConfidence = Number(contextEvidence?.weighted_confidence || sourceConfidence || zoneConfidence || 0);
+  const calibratedDisplayPalette = displayPalette.map((color) => withDisplayColorConfidence(color, {
+    zoneConfidence,
+    sourceConfidence: explainabilitySourceConfidence,
+    evidenceWeight: displayEvidenceWeight,
+  }));
+  const compactAccessoryDisplayRoles = calibratedDisplayPalette.length
+    ? splitAccessoryDetectedPaletteRoles(calibratedDisplayPalette)
+    : null;
+  const accessoryDisplayRoles = compactAccessoryDisplayRoles
+    ? {
+        primary: withDisplayColorConfidence(compactAccessoryDisplayRoles.primary, {
+          zoneConfidence,
+          sourceConfidence: explainabilitySourceConfidence,
+          evidenceWeight: displayEvidenceWeight,
+        }),
+        secondary: (compactAccessoryDisplayRoles.secondary || []).map((color) => withDisplayColorConfidence(color, {
+          zoneConfidence,
+          sourceConfidence: explainabilitySourceConfidence,
+          evidenceWeight: displayEvidenceWeight,
+        })),
+        accent: (compactAccessoryDisplayRoles.accent || []).map((color) => withDisplayColorConfidence(color, {
+          zoneConfidence,
+          sourceConfidence: explainabilitySourceConfidence,
+          evidenceWeight: displayEvidenceWeight,
+        })),
+      }
+    : null;
+  const contaminationScore = buildContaminationEvidenceScore({
+    dominant,
+    regionCoverage: contextEvidence.coverage || regionCoverage,
+    suppressionGates: debugContext.suppression_gates,
+  });
+  debugContext.contamination_score_total = contaminationScore.total;
+  debugContext.contamination_score = contaminationScore;
+  const rejectedAlternatives = flattenRejectedDisplayAlternatives(displayPaletteSelection?.trace);
+  const explainabilityPublishedColors = calibratedDisplayPalette.length
+    ? calibratedDisplayPalette
+    : summaryColorReadClusters.map((color) => withDisplayColorConfidence(color, {
+        zoneConfidence,
+        sourceConfidence: explainabilitySourceConfidence,
+        evidenceWeight: displayEvidenceWeight,
+      }));
+  const explainabilityPrimary = accessoryDisplayRoles?.primary || withDisplayColorConfidence(primaryColorRead, {
+    zoneConfidence,
+    sourceConfidence: explainabilitySourceConfidence,
+    evidenceWeight: displayEvidenceWeight,
+  });
+  const publicationPrimaryReason = {
+    code: calibratedDisplayPalette.length ? "highest_priority_surviving_palette" : "zone_color_read_selected",
+    source: selectedDisplaySource,
+    selected_hex: explainabilityPrimary?.hex || dominantColor?.hex || null,
+    confidence: explainabilityPrimary?.confidence ?? calibrateConfidence(zoneConfidence),
+    message: calibratedDisplayPalette.length
+      ? "Published the highest-priority surviving color evidence after contamination filtering."
+      : "Published the finalized zone color read supported by available evidence.",
+  };
+  const publicationReasons = {
+    primary: publicationPrimaryReason,
+    supporting: [
+      {
+        code: "confidence_calibrated",
+        zone_weight: 0.55,
+        color_percentage_weight: 0.30,
+        source_confidence_weight: 0.15,
+        evidence_weight: round2(displayEvidenceWeight),
+      },
+      {
+        code: "contamination_evidence_scored",
+        total: contaminationScore.total,
+      },
+    ],
+  };
+  const evidenceLedger = {
+    zone: zoneKey,
+    source: selectedDisplaySource,
+    selected_color: explainabilityPrimary,
+    published_colors: explainabilityPublishedColors,
+    detector_evidence: rawDetectorPalette,
+    dino_evidence: rawDinoPalette,
+    crop_pixel_evidence: filterAccessoryDisplayPalette(pixelRefinedPalette).kept,
+    candidate_region_evidence: candidateRegionPalette,
+    contamination_scores: contaminationScore,
+  };
   debugContext.dominantColor = { hex: dominantColor?.hex || null };
   debugContext.primaryColor = { hex: primaryColorRead?.hex || null };
   if (zoneKey === "accessory_jewelry") {
@@ -1908,12 +2196,21 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     dominant_color: dominantColor,
     color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
     garment_identity: isGarmentZoneKey(zoneKey) ? buildGarmentIdentity(dominantColor, supportColors) : undefined,
-    primary_color: accessoryDetectedRoles?.primary || primaryColorRead,
+    primary_color: explainabilityPrimary,
     support_colors: supportColors,
-    secondary_colors: accessoryDetectedRoles ? accessoryDetectedRoles.secondary : mergeColorReadSummaryFamilies(supportColors),
-    accent_colors: accessoryDetectedRoles ? accessoryDetectedRoles.accent : mergeColorReadSummaryFamilies(accentColors),
-    detected_colors: accessoryDinoDetectedPalette.length ? accessoryDinoDetectedPalette : summaryColorReadClusters,
-    region_colors: accessoryDinoDetectedPalette.length ? accessoryDinoDetectedPalette : summaryColorReadClusters,
+    secondary_colors: accessoryDisplayRoles ? accessoryDisplayRoles.secondary : mergeColorReadSummaryFamilies(supportColors),
+    accent_colors: accessoryDisplayRoles ? accessoryDisplayRoles.accent : mergeColorReadSummaryFamilies(accentColors),
+    detected_colors: explainabilityPublishedColors,
+    region_colors: explainabilityPublishedColors,
+    raw_detector_palette: isAccessoryDisplayPaletteZone(zoneKey) ? rawDetectorPalette : undefined,
+    raw_dino_palette: isAccessoryDisplayPaletteZone(zoneKey) ? rawDinoPalette : undefined,
+    pixel_refined_palette: isAccessoryDisplayPaletteZone(zoneKey) ? filterAccessoryDisplayPalette(pixelRefinedPalette).kept : undefined,
+    display_palette: isAccessoryDisplayPaletteZone(zoneKey) ? calibratedDisplayPalette : undefined,
+    display_palette_trace: isAccessoryDisplayPaletteZone(zoneKey) ? displayPaletteSelection?.trace : undefined,
+    evidence_ledger: evidenceLedger,
+    publication_reasons: publicationReasons,
+    publication_reason: publicationReasons.primary,
+    rejected_alternatives: rejectedAlternatives,
     evidence_summary: buildEvidenceSummary(mode === "multicolor" ? "multi_color" : "single_color", colorReadClusters, useRawDinoMulticolorRead ? "raw DINO region colors" : debugContext.zone_color_source),
     ...(
       useRawDinoMulticolorRead && isGarmentZoneKey(zoneKey)
@@ -1937,6 +2234,14 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
             accentColors,
           })
     ),
+    ...(isAccessoryDisplayPaletteZone(zoneKey) ? {
+      primary_color: explainabilityPrimary,
+      secondary_colors: accessoryDisplayRoles?.secondary || [],
+      accent_colors: accessoryDisplayRoles?.accent || [],
+      detected_colors: explainabilityPublishedColors,
+      region_colors: explainabilityPublishedColors,
+      display_palette: calibratedDisplayPalette,
+    } : {}),
     _debug: debugContext,
   };
 }
@@ -2298,6 +2603,179 @@ function filterGarmentZoneOutput(zones = {}) {
   };
 }
 
+
+const V6_DECISION_CONFIDENCE_CONFIG = Object.freeze({
+  object_evidence: 0.20,
+  pixel_evidence: 0.16,
+  geometry: 0.10,
+  region: 0.14,
+  coverage: 0.10,
+  color_consistency: 0.12,
+  publication: 0.18,
+  skin_like_penalty: 0.08,
+  highlight_penalty: 0.06,
+  neutral_evidence: 0.50,
+});
+
+function normalizeDecisionConfidence(value, fallback = 0) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return Math.max(0, Math.min(1, fallback));
+  return Math.max(0, Math.min(1, n > 1 ? n / 100 : n));
+}
+
+function getZoneDecisionInputs(zone = {}) {
+  const evidence = zone?.evidence_ledger || {};
+  const contamination = evidence?.contamination_scores || {};
+  const publishedColors = Array.isArray(evidence?.published_colors) ? evidence.published_colors : [];
+  const regionColors = Array.isArray(zone?.region_colors) ? zone.region_colors : [];
+  const detectorEvidence = Array.isArray(evidence?.detector_evidence) ? evidence.detector_evidence : [];
+  const cropEvidence = Array.isArray(evidence?.crop_pixel_evidence) ? evidence.crop_pixel_evidence : [];
+  const candidateEvidence = Array.isArray(evidence?.candidate_region_evidence) ? evidence.candidate_region_evidence : [];
+  const pctTotal = (publishedColors.length ? publishedColors : regionColors)
+    .reduce((sum, color) => sum + Math.max(0, Number(color?.pct || 0)), 0);
+  const colorConfidenceValues = (publishedColors.length ? publishedColors : regionColors)
+    .map((color) => normalizeDecisionConfidence(color?.confidence, 0))
+    .filter((value) => Number.isFinite(value));
+  const avgColorConfidence = colorConfidenceValues.length
+    ? colorConfidenceValues.reduce((sum, value) => sum + value, 0) / colorConfidenceValues.length
+    : normalizeDecisionConfidence(zone?.confidence, V6_DECISION_CONFIDENCE_CONFIG.neutral_evidence);
+  const objectEvidence = normalizeDecisionConfidence(
+    Math.max(Number(zone?.score || 0), Number(zone?.confidence || 0)),
+    V6_DECISION_CONFIDENCE_CONFIG.neutral_evidence
+  );
+  const pixelEvidence = cropEvidence.length
+    ? Math.min(1, 0.55 + cropEvidence.length * 0.10)
+    : candidateEvidence.length
+      ? 0.58
+      : 0.42;
+  const geometry = zone?.mask_geometry || zone?.bbox ? 0.72 : 0.5;
+  const region = candidateEvidence.length || regionColors.length ? Math.min(1, 0.55 + Math.max(candidateEvidence.length, regionColors.length) * 0.07) : 0.4;
+  const coverage = Math.max(0, Math.min(1, Number(zone?.coverage || zone?.pct || pctTotal || 0)));
+  const colorConsistency = Math.max(0, Math.min(1, avgColorConfidence));
+  const publication = zone?.primary_color?.hex || zone?.hex ? 0.85 : zone?.interpretation === 'unknown' ? 0.12 : 0.45;
+  const skinPenalty = Math.max(0, Math.min(1, Number(contamination?.skin_or_beige || 0)));
+  const highlightPenalty = Math.max(0, Math.min(1, Number(contamination?.highlight_or_glare || 0)));
+
+  return {
+    object_evidence: objectEvidence,
+    pixel_evidence: pixelEvidence,
+    geometry,
+    region,
+    coverage,
+    color_consistency: colorConsistency,
+    publication,
+    skin_like_penalty: skinPenalty,
+    highlight_penalty: highlightPenalty,
+  };
+}
+
+function computeUnifiedZoneConfidence(zone = {}) {
+  const inputs = getZoneDecisionInputs(zone);
+  const positive =
+    inputs.object_evidence * V6_DECISION_CONFIDENCE_CONFIG.object_evidence +
+    inputs.pixel_evidence * V6_DECISION_CONFIDENCE_CONFIG.pixel_evidence +
+    inputs.geometry * V6_DECISION_CONFIDENCE_CONFIG.geometry +
+    inputs.region * V6_DECISION_CONFIDENCE_CONFIG.region +
+    inputs.coverage * V6_DECISION_CONFIDENCE_CONFIG.coverage +
+    inputs.color_consistency * V6_DECISION_CONFIDENCE_CONFIG.color_consistency +
+    inputs.publication * V6_DECISION_CONFIDENCE_CONFIG.publication;
+  const penalty =
+    inputs.skin_like_penalty * V6_DECISION_CONFIDENCE_CONFIG.skin_like_penalty +
+    inputs.highlight_penalty * V6_DECISION_CONFIDENCE_CONFIG.highlight_penalty;
+  const raw = Math.max(0, Math.min(1, positive - penalty));
+  const rawConfidence = Math.round(raw * 100);
+  const legacyConfidence = Math.round(clamp100(Number(zone?.confidence || zone?.score || 0)));
+  const calibratedConfidence = Math.round(clamp100(rawConfidence * 0.72 + legacyConfidence * 0.28));
+  return {
+    raw_confidence: rawConfidence,
+    calibrated_confidence: calibratedConfidence,
+    unified_confidence: calibratedConfidence,
+    confidence_inputs: Object.fromEntries(Object.entries(inputs).map(([key, value]) => [key, round2(value)])),
+    confidence_weights: { ...V6_DECISION_CONFIDENCE_CONFIG },
+  };
+}
+
+function getV6PublicationState(zone = {}, unifiedConfidence = 0) {
+  const hasPublishableEvidence = Boolean(zone?.primary_color?.hex || zone?.hex || zone?.dominant_color?.hex);
+  if (!hasPublishableEvidence || zone?.interpretation === 'unknown' || zone?.publication_decision === 'reject') {
+    return unifiedConfidence <= 20 ? 'rejected' : 'unknown';
+  }
+  if (unifiedConfidence >= 80) return 'confirmed';
+  if (unifiedConfidence >= 65) return 'probable';
+  if (unifiedConfidence >= 45) return 'possible';
+  return 'unknown';
+}
+
+function buildV6EvidenceChain(zone = {}) {
+  const evidence = zone?.evidence_ledger || {};
+  return [
+    { stage: 'detector', present: Array.isArray(evidence?.detector_evidence) && evidence.detector_evidence.length > 0, evidence: evidence?.detector_evidence || [] },
+    { stage: 'region_selection', present: Array.isArray(evidence?.candidate_region_evidence) && evidence.candidate_region_evidence.length > 0, evidence: evidence?.candidate_region_evidence || [] },
+    { stage: 'pixel_refinement', present: Array.isArray(evidence?.crop_pixel_evidence) && evidence.crop_pixel_evidence.length > 0, evidence: evidence?.crop_pixel_evidence || [] },
+    { stage: 'geometry_validation', present: Boolean(zone?.mask_geometry || zone?.bbox), evidence: zone?.mask_geometry || zone?.bbox || null },
+    { stage: 'contamination_analysis', present: Boolean(evidence?.contamination_scores), evidence: evidence?.contamination_scores || null },
+    { stage: 'alternative_candidates', present: Array.isArray(zone?.rejected_alternatives) && zone.rejected_alternatives.length > 0, evidence: zone?.rejected_alternatives || [] },
+    { stage: 'publication_decision', present: true, evidence: zone?.publication_reason || zone?.publication_reasons?.primary || null },
+  ];
+}
+
+function buildV6DecisionMetrics(zone = {}, unifiedConfidence = 0, publicationState = 'unknown') {
+  const alternatives = Array.isArray(zone?.rejected_alternatives) ? zone.rejected_alternatives : [];
+  const palette = Array.isArray(zone?.display_palette) && zone.display_palette.length
+    ? zone.display_palette
+    : Array.isArray(zone?.region_colors) ? zone.region_colors : [];
+  const confidences = palette.map((color) => Number(color?.confidence || 0)).filter(Number.isFinite).sort((a, b) => b - a);
+  const top = confidences[0] || unifiedConfidence;
+  const second = confidences[1] || 0;
+  const pct = palette.map((color) => Number(color?.pct || 0)).filter(Number.isFinite).sort((a, b) => b - a);
+  const dominantMargin = Math.max(0, (pct[0] || 0) - (pct[1] || 0));
+  const certaintyMap = { confirmed: 1, probable: 0.8, possible: 0.6, unknown: 0.3, rejected: 0 };
+  return {
+    decision_complexity: 1 + alternatives.length + Math.max(0, palette.length - 1),
+    candidate_count: Math.max(1, palette.length + alternatives.length),
+    confidence_spread: Math.round(Math.max(0, top - second)),
+    alternative_margin: Math.round(Math.max(0, unifiedConfidence - second)),
+    dominant_margin: round2(dominantMargin),
+    publication_certainty: certaintyMap[publicationState] ?? 0.3,
+  };
+}
+
+function validateV6DecisionConsistency(zone = {}) {
+  const issues = [];
+  if (!Number.isFinite(Number(zone?.unified_confidence))) issues.push('unified_confidence_missing');
+  if (!['confirmed', 'probable', 'possible', 'unknown', 'rejected'].includes(zone?.publication_state)) issues.push('invalid_publication_state');
+  if (!Array.isArray(zone?.evidence_chain) || zone.evidence_chain.length !== 7) issues.push('evidence_chain_incomplete');
+  if (zone?.publication_state === 'confirmed' && Number(zone?.unified_confidence || 0) < 80) issues.push('confirmed_below_threshold');
+  if (zone?.publication_state === 'rejected' && (zone?.primary_color?.hex || zone?.hex)) issues.push('rejected_has_publishable_color');
+  return { valid: issues.length === 0, issues };
+}
+
+function enrichV6FinalizedZone(zoneKey, zone = {}) {
+  const confidence = computeUnifiedZoneConfidence(zone);
+  const publicationState = getV6PublicationState(zone, confidence.unified_confidence);
+  const evidenceChain = buildV6EvidenceChain(zone);
+  const decisionMetrics = buildV6DecisionMetrics(zone, confidence.unified_confidence, publicationState);
+  const calibrationMetadata = {
+    predicted_confidence: confidence.raw_confidence,
+    final_confidence: confidence.unified_confidence,
+    supporting_evidence: evidenceChain.filter((entry) => entry.present).map((entry) => entry.stage),
+    confidence_source: 'formula_v6_unified_confidence',
+    calibration_ready: true,
+  };
+  const enriched = {
+    ...zone,
+    ...confidence,
+    publication_state: publicationState,
+    evidence_chain: evidenceChain,
+    decision_metrics: decisionMetrics,
+    calibration_metadata: calibrationMetadata,
+  };
+  return {
+    ...enriched,
+    decision_consistency: validateV6DecisionConsistency(enriched),
+  };
+}
+
 function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelligence = {}, segmentedRegions = []) {
   const roleByName = Object.fromEntries((colorRoles || []).map((r) => [r.role, r]));
   const dominant = visualIntelligence?.dominant_body_color || roleByName.anchor || normalizedColors[0] || null;
@@ -2569,6 +3047,12 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         },
       };
     };
+    const refinedRegionColors = zoneRegions
+      .filter((region) => !isDinoSourceType(region?.source_type))
+      .flatMap((region) => Array.isArray(region?.region_colors) ? region.region_colors : []);
+    const rawDinoRegionColors = zoneRegions
+      .filter((region) => isDinoSourceType(region?.source_type))
+      .flatMap((region) => Array.isArray(region?.region_colors) ? region.region_colors : []);
     const dinoOnlyZone =
       zoneRegions.length > 0 &&
       zoneRegions.every((region) => isDinoSourceType(region?.source_type));
@@ -2627,6 +3111,8 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         zoneColorSource: preserveDinoZoneColor ? "dino_primary" : consensusCluster?.base ? "cluster" : "fallback",
         dinoPrimaryRegionSelection: dinoPrimarySelection.debug,
         selectedDinoRegionColors: Array.isArray(dinoPrimaryRegion?.region_colors) ? dinoPrimaryRegion.region_colors : [],
+        refinedRegionColors,
+        rawDinoRegionColors,
         evidence,
       }
     );
@@ -2791,7 +3277,12 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
 
   const dedupeResult = dedupeDarkNeutralZoneReuse(zones);
   const garmentZoneFilterResult = filterGarmentZoneOutput(dedupeResult.zones);
-  const finalZones = garmentZoneFilterResult.zones;
+  const finalZones = Object.fromEntries(
+    Object.entries(garmentZoneFilterResult.zones).map(([zoneKey, zone]) => [
+      zoneKey,
+      enrichV6FinalizedZone(zoneKey, zone),
+    ])
+  );
   const denimSummary = {
     lower_zone_interpretation: finalZones?.lower_garment?.interpretation || "unknown",
     lower_zone_confidence: Number(finalZones?.lower_garment?.confidence || 0),
@@ -2826,6 +3317,15 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     zones: finalZones,
     confidence_breakdown: Object.fromEntries(
       Object.entries(finalZones).map(([key, value]) => [key, value?.confidence_breakdown || null])
+    ),
+    decision_consistency: Object.fromEntries(
+      Object.entries(finalZones).map(([key, value]) => [key, value?.decision_consistency || { valid: false, issues: ["missing_decision_consistency"] }])
+    ),
+    decision_metrics: Object.fromEntries(
+      Object.entries(finalZones).map(([key, value]) => [key, value?.decision_metrics || null])
+    ),
+    confidence_calibration: Object.fromEntries(
+      Object.entries(finalZones).map(([key, value]) => [key, value?.calibration_metadata || null])
     ),
     region_color_analysis: regionColorAnalysis,
     dino_lifecycle_trace: {
@@ -4014,7 +4514,8 @@ function buildSuggestedAdjustment(scoreBreakdown, colorRoles, bestMode) {
   return `Refining the relationship between ${anchorName}, ${supportName}, and ${accentName} would improve the overall outfit score.`;
 }
 
-function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], dinoGarmentRegions = [], pipeline = null }) {
+function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], dinoGarmentRegions = [], pipeline = null, decodedImage = null, perception_v6_mode, v6_mode }) {
+  const perceptionV6Mode = normalizePerceptionV6Mode(perception_v6_mode ?? v6_mode, "shadow");
   const normalizedColors = normalizeDetectedColors(topColors, dominantHex);
   const baseRoles = assignColorRoles(normalizedColors);
   const colorRoles = enforceStructuralPreservation(baseRoles, normalizedColors);
@@ -4050,19 +4551,61 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     summarizeDinoStageForTrace("garmentEvidenceRegions", garmentEvidenceRegions),
   ];
 
-  const garmentZones = inferGarmentZones(
+  const legacyGarmentZones = inferGarmentZones(
     normalizedColors,
     colorRoles,
     visualIntelligence,
     garmentEvidenceRegions
   );
   const perceptionV5 = analyzePerceptionV5({ regions: garmentEvidenceRegions, pipeline });
-  const perceptionV6 = analyzePerceptionV6({ perceptionV5, regions: garmentEvidenceRegions });
+  const perceptionV6 = analyzePerceptionV6({ perceptionV5, regions: garmentEvidenceRegions, decodedImage, mode: perceptionV6Mode });
+  const rejectedZones = new Set(perceptionV6.publication_decisions.filter((decision) => !decision.published).map((decision) => decision.zone));
+  const acceptedZones = new Set(perceptionV6.zone_reconciliation.map((decision) => decision.zone));
+  const suppressibleZones = new Set(["eyewear", "accessory_jewelry", "bag", "footwear"]);
+  let publishedZones;
+  if (perceptionV6Mode === "authoritative") {
+    publishedZones = perceptionV6.publication_gating.allowed
+      ? Object.fromEntries(perceptionV6.zone_reconciliation.map((decision) => {
+          const legacy = legacyGarmentZones.zones?.[decision.zone] || null;
+          const dominantObjectColor = decision.object_local_colors?.[0] || null;
+          return [decision.zone, {
+            ...(legacy || {}),
+            name: decision.selected_label,
+            label: decision.selected_label,
+            hex: dominantObjectColor?.hex || legacy?.hex || null,
+            object_local_colors: decision.object_local_colors || [],
+            evidence_ids: decision.selected_evidence_ids || [],
+            validation_decision: "accepted",
+            publication_decision: "publish",
+            reconciliation_result: decision.resolution,
+            legacy_diagnostic: legacy,
+            perception_source: "v6_reconciliation",
+          }];
+        }))
+      : {};
+  } else if (perceptionV6Mode === "assist") {
+    publishedZones = Object.fromEntries(Object.entries(legacyGarmentZones.zones || {}).filter(([zone]) =>
+      !(suppressibleZones.has(zone) && rejectedZones.has(zone) && !acceptedZones.has(zone))
+    ));
+  } else {
+    publishedZones = legacyGarmentZones.zones || {};
+  }
+  const garmentZones = perceptionV6Mode === "shadow" ? legacyGarmentZones : {
+    ...legacyGarmentZones,
+    zones: publishedZones,
+    publication_mode: perceptionV6Mode,
+    legacy_zones: legacyGarmentZones.zones,
+    v6_publication_diagnostics: perceptionV6.publication_decisions,
+  };
   const fullDinoLifecycleTrace = [
     ...dinoLifecycleTrace,
-    ...((garmentZones?.dino_lifecycle_trace?.stages || []).filter((stage) =>
+    ...((legacyGarmentZones?.dino_lifecycle_trace?.stages || []).filter((stage) =>
       !dinoLifecycleTrace.some((existing) => existing.stage === stage.stage)
     )),
+    ...perceptionV6.lifecycle_trace.map((entry) => ({
+      ...entry,
+      stage: `perception_v6.${entry.stage}`,
+    })),
   ];
   console.info("[DINO TRACE] dino_4 buildOutfitAnalysis lifecycle", {
     stages: fullDinoLifecycleTrace,
@@ -4104,6 +4647,7 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     garment_zones: garmentZones,
     perception_v5: perceptionV5,
     perception_v6: perceptionV6,
+    perception_v6_mode: perceptionV6Mode,
     dino_lifecycle_trace: {
       target_id: "dino_4",
       stages: fullDinoLifecycleTrace,
@@ -6434,10 +6978,12 @@ async function analyzeGhostColors(ghostUrl) {
   const groundingDino = await runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_QUERY);
   const dinoDetections = Array.isArray(groundingDino?.detections) ? groundingDino.detections : [];
   let dinoGarmentRegions = buildDinoSegmentedRegions(dinoDetections);
+  let decodedImage = null;
   let dinoColorEnrichmentReason = dinoGarmentRegions.length ? "no_bbox_color_enrichment" : "no_dino_garment_regions";
   try {
     if (dinoGarmentRegions.some((region) => !!region?.bbox)) {
       const ghostBuffer = await fetchImageBuffer(ghostUrl);
+      decodedImage = decodeImageRgba(ghostBuffer, ghostUrl);
       dinoGarmentRegions = extractColorsFromDinoBboxes(ghostBuffer, dinoGarmentRegions);
       dinoColorEnrichmentReason = "bbox_color_extraction_complete";
     } else if (dinoGarmentRegions.length) {
@@ -6445,6 +6991,13 @@ async function analyzeGhostColors(ghostUrl) {
     }
   } catch (error) {
     dinoColorEnrichmentReason = error?.message || "bbox_color_extraction_failed";
+  }
+  if (!decodedImage) {
+    try {
+      decodedImage = decodeImageRgba(await fetchImageBuffer(ghostUrl), ghostUrl);
+    } catch (error) {
+      console.warn("[PERCEPTION V6] Decoded-image evidence unavailable", { reason: error?.message || "decode_failed" });
+    }
   }
   const dinoColorEnrichmentCount = dinoGarmentRegions.filter((region) => safeHex(region?.dominant_hex) && Array.isArray(region?.region_colors) && region.region_colors.length > 0).length;
   const dinoColorEnrichmentOk = dinoColorEnrichmentCount > 0;
@@ -6481,6 +7034,7 @@ async function analyzeGhostColors(ghostUrl) {
     dominantHex,
     dominantName: getColorName(dominantHex),
     topColors,
+    decodedImage,
     segmentedRegions: samOk ? samRegions : dinoGarmentRegions,
     dinoGarmentRegions,
     dino_debug: dinoDebug,
@@ -6568,6 +7122,8 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         dominantHex: analysis.dominantHex,
         topColors: analysis.topColors,
         segmentedRegions,
+        decodedImage: analysis.decodedImage,
+        perception_v6_mode: MARKET_PERCEPTION_V6_MODE,
         dinoGarmentRegions: analysis.dinoGarmentRegions,
         pipeline: analysis.pipeline,
       });
@@ -6658,6 +7214,8 @@ app.post("/api/recommendations", async (req, res) => {
         segmentedRegions: analysis.segmentedRegions,
         dinoGarmentRegions: analysis.dinoGarmentRegions,
         pipeline: analysis.pipeline,
+        decodedImage: analysis.decodedImage,
+        perception_v6_mode: MARKET_PERCEPTION_V6_MODE,
       });
     } catch (error) {
       return sendStepError(res, 500, "palette_engine", error);
@@ -6778,6 +7336,8 @@ app.post("/api/retrieval/preview", async (req, res) => {
           dominantHex: analysis.dominantHex,
           topColors: analysis.topColors,
           segmentedRegions: analysis.segmentedRegions,
+          decodedImage: analysis.decodedImage,
+        perception_v6_mode: MARKET_PERCEPTION_V6_MODE,
           dinoGarmentRegions: analysis.dinoGarmentRegions,
           pipeline: analysis.pipeline,
         });
@@ -6865,4 +7425,4 @@ if (process.env.NODE_ENV !== "test") {
 }
 
 
-export { buildOutfitAnalysis, inferZoneColorRead, inferGarmentZones };
+export { buildOutfitAnalysis, inferZoneColorRead, inferGarmentZones, MARKET_PERCEPTION_V6_MODE };
