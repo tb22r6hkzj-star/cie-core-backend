@@ -1,0 +1,20 @@
+name: WP-03 verification
+on:
+  push:
+    branches:
+      - visioncore-rc1-wp03-hardening
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - name: Run WP-03 bridge tests
+        run: NODE_ENV=test node --test test/perceptionV6HardeningBridge.test.js
+      - name: Run full suite
+        run: npm test
