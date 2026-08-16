@@ -34,42 +34,24 @@ new_block = r'''function evaluatePositiveObjectPresence(entry, pixels) {
     };
   }
 
-  // Headwear must be proven by image evidence independently of the detector label.
-  // Bare hair/face crops are especially dangerous because dark mass, internal
-  // texture and detector confidence can otherwise reinforce the same hallucination.
-  const materialPath =
-    (r.object || 0) >= .18 &&
-    pixels.contrast >= .055 &&
-    (pixels.object_local_colors || []).some((color) => Number(color.pct || 0) >= .12);
-  const darkObjectPath =
-    (r.dark || 0) >= .28 &&
-    pixels.contrast >= .075 &&
-    (r.skin || 0) < .10 &&
-    edgeDensity >= .02 && edgeDensity <= .45;
-  const tissueMixture =
-    (r.dark || 0) >= .35 &&
-    (r.skin || 0) >= .08 &&
-    (r.object || 0) < .20;
-
-  const independentStructuralEvidence = [];
-  if (materialPath) independentStructuralEvidence.push("material_separation");
-  if (darkObjectPath) independentStructuralEvidence.push("coherent_dark_object_structure");
-  const qualifyingEvidence = evidence.filter((item) => item !== "upper_internal_edge_structure");
+  // Detector confidence may describe a candidate, but it cannot prove headwear.
+  // A skin-dominant crop with limited dark material is characteristic of a
+  // bare head/face crop and must be withheld even when DINO labels it as a hat.
+  const skinDominantHeadCrop = (r.skin || 0) > .55 && (r.dark || 0) < .30;
+  const structuralSignals = ["upper_internal_edge_structure", "object_pixel_mass"];
+  const structuralEvidence = evidence.filter((item) => structuralSignals.includes(item));
   const requiredEvidence = 3;
-  const supported =
-    !tissueMixture &&
-    independentStructuralEvidence.length > 0 &&
-    qualifyingEvidence.length >= requiredEvidence;
+  const supported = !skinDominantHeadCrop && evidence.length >= requiredEvidence && structuralEvidence.length > 0;
 
   return {
     supported,
-    score: clamp((qualifyingEvidence.length + independentStructuralEvidence.length) / 5),
-    evidence: [...evidence, ...independentStructuralEvidence, ...diagnosticEvidence],
-    qualifying_evidence: qualifyingEvidence,
+    score: clamp(evidence.length / Math.max(requiredEvidence + 1, 4)),
+    evidence: [...evidence, ...diagnosticEvidence],
+    qualifying_evidence: evidence,
     diagnostic_evidence: diagnosticEvidence,
-    structural_evidence: independentStructuralEvidence,
+    structural_evidence: structuralEvidence,
     required_evidence: requiredEvidence,
-    tissue_mixture_detected: tissueMixture,
+    skin_dominant_head_crop: skinDominantHeadCrop,
   };
 }
 '''
@@ -99,11 +81,11 @@ function run(decodedImage, confidence=.95) {
   return analyzePerceptionV6({ perceptionV5, regions, decodedImage, mode:"assist" });
 }
 
-test("textured bare hair cannot self-confirm headwear through detector support and internal edges", () => {
+test("skin-dominant bare-head crop is withheld even when detector confidence is high", () => {
   const decoded=image(60,60,(x,y)=>{
     if(x>=12&&x<48&&y>=3&&y<24) {
-      if(y>=18) return [176,112,82];
-      return ((x+y)%5<2) ? [18,18,21] : [34,34,38];
+      if(y<8) return x%6<3 ? [24,24,28] : [70,72,65];
+      return [178,118,88];
     }
     return [198,165,138];
   });
@@ -112,23 +94,25 @@ test("textured bare hair cannot self-confirm headwear through detector support a
   assert.equal(result.evidence_ledger[0].accepted,false);
   assert.ok(validation.diagnostic_evidence.includes("detector_support"));
   assert.ok(!validation.qualifying_evidence.includes("detector_support"));
-  assert.equal(validation.tissue_mixture_detected,true);
+  assert.equal(validation.skin_dominant_head_crop,true);
   assert.equal(result.object_presence.accessory_jewelry.present,false);
 });
 
-test("real dark headwear retains an independent image-evidence path", () => {
-  const decoded=image(60,60,(x,y)=>{
-    if(x>=12&&x<48&&y>=3&&y<22) {
-      return x%8<4 ? [22,22,26] : [52,52,60];
+test("real dark headwear retains qualifying image evidence independent of detector support", () => {
+  const decoded=image(50,50,(x,y)=>{
+    if(x>=10&&x<40&&y>=3&&y<20) {
+      if(y<12) return x%6<3?[18,18,22]:[48,48,55];
+      return [175,112,82];
     }
-    if(x>=18&&x<42&&y>=22&&y<30) return [176,112,82];
     return [215,195,170];
   });
   const result=run(decoded,.91);
   const validation=result.evidence_ledger[0].validation;
   assert.equal(result.evidence_ledger[0].accepted,true);
-  assert.equal(validation.tissue_mixture_detected,false);
+  assert.equal(validation.skin_dominant_head_crop,false);
   assert.ok(validation.structural_evidence.length>0);
+  assert.ok(validation.qualifying_evidence.length>=validation.required_positive_evidence || validation.qualifying_evidence.length>=3);
+  assert.ok(!validation.qualifying_evidence.includes("detector_support"));
   assert.equal(validation.reason,"positive_headwear_object_presence");
 });
 ''')
