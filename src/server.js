@@ -2060,8 +2060,27 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     sourceConfidence: explainabilitySourceConfidence,
     evidenceWeight: displayEvidenceWeight,
   }));
-  const accessoryDisplayRoles = calibratedDisplayPalette.length
+  const compactAccessoryDisplayRoles = calibratedDisplayPalette.length
     ? splitAccessoryDetectedPaletteRoles(calibratedDisplayPalette)
+    : null;
+  const accessoryDisplayRoles = compactAccessoryDisplayRoles
+    ? {
+        primary: withDisplayColorConfidence(compactAccessoryDisplayRoles.primary, {
+          zoneConfidence,
+          sourceConfidence: explainabilitySourceConfidence,
+          evidenceWeight: displayEvidenceWeight,
+        }),
+        secondary: (compactAccessoryDisplayRoles.secondary || []).map((color) => withDisplayColorConfidence(color, {
+          zoneConfidence,
+          sourceConfidence: explainabilitySourceConfidence,
+          evidenceWeight: displayEvidenceWeight,
+        })),
+        accent: (compactAccessoryDisplayRoles.accent || []).map((color) => withDisplayColorConfidence(color, {
+          zoneConfidence,
+          sourceConfidence: explainabilitySourceConfidence,
+          evidenceWeight: displayEvidenceWeight,
+        })),
+      }
     : null;
   const contaminationScore = buildContaminationEvidenceScore({
     dominant,
