@@ -16,7 +16,7 @@ function rgbaImage(width, height, painter) {
   return { width, height, data };
 }
 
-test("high-contrast hair plus face boundary is rejected as phantom headwear", () => {
+test("high-contrast bare-head candidate is withheld when positive headwear evidence is insufficient", () => {
   const image = rgbaImage(40, 40, (x,y) => {
     if (x >= 10 && x < 30 && y >= 2 && y < 16) {
       if (y < 12) return [18,18,20];
@@ -32,8 +32,10 @@ test("high-contrast hair plus face boundary is rejected as phantom headwear", ()
     arbitration:{ outcome:"accepted", confidence:.88 },
   };
   const result = analyzePerceptionV6({ perceptionV5, regions:[region], decodedImage:image, mode:"assist" });
+  const validation = result.evidence_ledger[0].validation;
   assert.equal(result.evidence_ledger[0].accepted, false);
-  assert.equal(result.evidence_ledger[0].validation.reason, "hair_face_boundary_pattern");
+  assert.equal(validation.reason, "insufficient_positive_headwear_evidence");
+  assert.equal(validation.structural_evidence, false);
   assert.equal(result.object_presence.accessory_jewelry.present, false);
 });
 
