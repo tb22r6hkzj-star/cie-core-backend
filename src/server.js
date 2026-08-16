@@ -4065,11 +4065,34 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
   const rejectedZones = new Set(perceptionV6.publication_decisions.filter((decision) => !decision.published).map((decision) => decision.zone));
   const acceptedZones = new Set(perceptionV6.zone_reconciliation.map((decision) => decision.zone));
   const suppressibleZones = new Set(["eyewear", "accessory_jewelry", "bag", "footwear"]);
-  const publishedZones = Object.fromEntries(Object.entries(legacyGarmentZones.zones || {}).filter(([zone]) => {
-    if (perceptionV6Mode === "shadow") return true;
-    if (perceptionV6Mode === "assist") return !(suppressibleZones.has(zone) && rejectedZones.has(zone) && !acceptedZones.has(zone));
-    return acceptedZones.has(zone);
-  }));
+  let publishedZones;
+  if (perceptionV6Mode === "authoritative") {
+    publishedZones = perceptionV6.publication_gating.allowed
+      ? Object.fromEntries(perceptionV6.zone_reconciliation.map((decision) => {
+          const legacy = legacyGarmentZones.zones?.[decision.zone] || null;
+          const dominantObjectColor = decision.object_local_colors?.[0] || null;
+          return [decision.zone, {
+            ...(legacy || {}),
+            name: decision.selected_label,
+            label: decision.selected_label,
+            hex: dominantObjectColor?.hex || legacy?.hex || null,
+            object_local_colors: decision.object_local_colors || [],
+            evidence_ids: decision.selected_evidence_ids || [],
+            validation_decision: "accepted",
+            publication_decision: "publish",
+            reconciliation_result: decision.resolution,
+            legacy_diagnostic: legacy,
+            perception_source: "v6_reconciliation",
+          }];
+        }))
+      : {};
+  } else if (perceptionV6Mode === "assist") {
+    publishedZones = Object.fromEntries(Object.entries(legacyGarmentZones.zones || {}).filter(([zone]) =>
+      !(suppressibleZones.has(zone) && rejectedZones.has(zone) && !acceptedZones.has(zone))
+    ));
+  } else {
+    publishedZones = legacyGarmentZones.zones || {};
+  }
   const garmentZones = perceptionV6Mode === "shadow" ? legacyGarmentZones : {
     ...legacyGarmentZones,
     zones: publishedZones,

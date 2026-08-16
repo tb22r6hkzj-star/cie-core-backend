@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { analyzePerceptionV5 } from "../src/intelligence/perceptionV5/index.js";
+import { analyzePerceptionV6 } from "../src/intelligence/perceptionV6/index.js";
 process.env.NODE_ENV = "test";
 const { buildOutfitAnalysis } = await import("../src/server.js");
 
@@ -26,3 +28,36 @@ test("headwear is rejected when its crop behaves like surrounding hair",()=>{con
 test("contrasting headwear survives hair contamination checks",()=>{const r=run(hat,image([18,18,20],{x:5,y:1,w:10,h:4,color:[20,80,160]}),"assist"); assert.ok(r.garment_zones.zones.accessory_jewelry); assert.equal(r.perception_v6.publication_decisions[0].published,true);});
 test("lifecycle records candidate, crop, pixel, color and publication stages",()=>{const r=run(eyewear,image()); assert.deepEqual(r.perception_v6.lifecycle_trace.map(x=>x.stage),["candidate_selection","crop_selection","pixel_validation","object_local_color_preservation","publication"]); assert.equal(r.perception_v6.lifecycle_trace.at(-1).decisions[0].id,"glasses");});
 test("WP-01 records and garment-zone output remain available",()=>{const r=run(eyewear,image()); assert.equal(r.perception_v5.version,"5"); assert.equal(r.perception_v6.version,"6"); assert.ok(r.garment_zones.zones.upper_garment); assert.equal(r.perception_v5.arbitration.selected_region_id,"glasses");});
+
+test("authoritative publication is enriched from the selected V6 reconciliation",()=>{
+  const r=run(eyewear,image(),"authoritative");
+  const published=r.garment_zones.zones.eyewear;
+  assert.equal(published.label,"glasses");
+  assert.deepEqual(published.evidence_ids,["glasses"]);
+  assert.ok(published.object_local_colors.length>0);
+  assert.equal(published.validation_decision,"accepted");
+  assert.equal(published.publication_decision,"publish");
+  assert.equal(published.reconciliation_result,"highest_pixel_validated_weighted_support");
+  assert.equal(published.perception_source,"v6_reconciliation");
+  assert.notDeepEqual(published,published.legacy_diagnostic);
+});
+
+test("authoritative mode honors the global publication gate even for pixel-accepted evidence",()=>{
+  const primary={...eyewear,source_type:"segmentation",id:"glasses-v6",label:"glasses",segment_label:"glasses"};
+  const rival={...eyewear,source_type:"segmentation",id:"sunglasses-v6",label:"sunglasses",segment_label:"sunglasses",confidence:.94};
+  const result=buildOutfitAnalysis({...base,segmentedRegions:[primary,rival],decodedImage:image(),perception_v6_mode:"authoritative"});
+  assert.equal(result.perception_v6.evidence_ledger[0].validation.accepted,true);
+  assert.equal(result.perception_v6.publication_gating.allowed,false);
+  assert.deepEqual(result.garment_zones.zones,{});
+});
+
+test("mixed eyewear crops retain dark object pixels without publishing skin pixels",()=>{
+  const mixed=image([170,105,75],{x:6,y:5,w:4,h:4,color:[20,25,30]});
+  const v5=analyzePerceptionV5({regions:[eyewear]});
+  const v6=analyzePerceptionV6({perceptionV5:v5,regions:[eyewear],decodedImage:mixed});
+  const evidence=v6.evidence_ledger[0];
+  assert.equal(evidence.accepted,true);
+  assert.ok(evidence.object_local_colors.some(c=>c.source_class==="dark"));
+  assert.ok(!evidence.object_local_colors.some(c=>c.source_class==="skin"));
+  assert.ok(evidence.pixel_evidence.ratios.skin>0);
+});

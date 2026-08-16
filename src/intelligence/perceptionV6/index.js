@@ -34,9 +34,22 @@ function inspectPixels(region, decodedImage) {
   for (let y = Math.max(0, y1 - padY); y < Math.min(image.height, y2 + padY); y += stride) for (let x = Math.max(0, x1 - padX); x < Math.min(image.width, x2 + padX); x += stride) if (x < x1 || x >= x2 || y < y1 || y >= y2) take(x, y, surrounding);
   if (!samples.length) return { available: false, valid: true, reason: "empty_crop", crop: { x: x1, y: y1, width: x2 - x1, height: y2 - y1 } };
   const counts = { skin: 0, highlight: 0, dark: 0, object: 0 }, buckets = new Map();
-  for (const p of samples) { counts[pixelKind(p)] += 1; if (pixelKind(p) !== "highlight") { const key = p.map(v => Math.round(v / 32) * 32).join(","); const item = buckets.get(key) || { sum: [0,0,0], count: 0 }; p.forEach((v,i) => item.sum[i] += v); item.count++; buckets.set(key,item); } }
+  for (const p of samples) {
+    const kind = pixelKind(p);
+    counts[kind] += 1;
+    // Object-local publication colors must never be sourced from skin or glare.
+    // Legitimate dark object pixels remain eligible; headwear/hair contamination
+    // is handled by validateObject's crop-structure checks below.
+    if (kind !== "object" && kind !== "dark") continue;
+    const key = p.map(v => Math.round(v / 32) * 32).join(",");
+    const item = buckets.get(key) || { sum: [0,0,0], count: 0 };
+    p.forEach((v,i) => item.sum[i] += v); item.count++; buckets.set(key,item);
+  }
   const mean = (values) => values.length ? values.reduce((a,p) => a.map((v,i) => v + p[i]), [0,0,0]).map(v => v / values.length) : null;
-  const localColors = [...buckets.values()].sort((a,b) => b.count-a.count).slice(0,4).map(v => ({ hex: rgbHex(v.sum.map(n => n/v.count)), pct: v.count/samples.length, pixel_count: v.count }));
+  const localColors = [...buckets.values()].sort((a,b) => b.count-a.count).slice(0,4).map(v => {
+    const rgb = v.sum.map(n => n/v.count);
+    return { hex: rgbHex(rgb), pct: v.count/samples.length, pixel_count: v.count, source_class: pixelKind(rgb) };
+  });
   const ratios = Object.fromEntries(Object.entries(counts).map(([k,v]) => [k, v/samples.length]));
   const contrast = surrounding.length ? distance(mean(samples), mean(surrounding)) : 0;
   return { available: true, valid: true, reason: "pixels_sampled", crop: { x: x1, y: y1, width: x2-x1, height: y2-y1 }, sample_count: samples.length, surrounding_sample_count: surrounding.length, ratios, contrast, object_local_colors: localColors };
@@ -70,7 +83,9 @@ export function analyzePerceptionV6({ perceptionV5, regions = [], decodedImage =
     const base = { id: region.id ?? `region-${index}`, source: region.source_type ?? "segmentation", zone: region.zone ?? "unknown", label: region.segment_label ?? region.label ?? region.category ?? "unknown", confidence, geometry };
     const pixelEvidence = inspectPixels({ ...region, normalized_box: geometry }, decodedImage), validation = validateObject(base, pixelEvidence);
     const supplied = (region.region_colors || []).map(c => c.hex).filter(Boolean);
-    const survivingColors = pixelEvidence.available ? pixelEvidence.object_local_colors.filter(c => pixelKind(c.hex.match(/[\da-f]{2}/gi).map(v => parseInt(v,16))) !== "highlight") : supplied.map(hex => ({ hex, source: "detector" }));
+    const survivingColors = pixelEvidence.available
+      ? pixelEvidence.object_local_colors.filter(c => !["skin", "highlight"].includes(c.source_class))
+      : supplied.map(hex => ({ hex, source: "detector" }));
     return { ...base, accepted: validation.accepted, detector_accepted: confidence >= .35, pixel_evidence: pixelEvidence, validation, object_local_colors: survivingColors };
   });
   const accepted = evidenceLedger.filter(e => e.accepted), grouped = new Map();
@@ -81,10 +96,11 @@ export function analyzePerceptionV6({ perceptionV5, regions = [], decodedImage =
   const byZone={}; for(const c of candidates) if(!byZone[c.zone]||c.support>byZone[c.zone].support) byZone[c.zone]=c;
   const objectPresence=Object.fromEntries(Object.entries(byZone).map(([z,x])=>[z,{present:true,label:x.label,confidence:clamp(x.support/x.evidence_ids.length),evidence_count:x.evidence_ids.length,object_local_colors:x.object_local_colors}]));
   for (const rejected of evidenceLedger.filter(e=>!e.accepted)) if (!objectPresence[rejected.zone]) objectPresence[rejected.zone]={present:false,label:rejected.label,confidence:rejected.confidence,evidence_count:1,reason:rejected.validation.reason};
-  const reconciliation=Object.entries(byZone).map(([zone,s])=>({zone,selected_label:s.label,selected_evidence_ids:s.evidence_ids,object_local_colors:s.object_local_colors,alternatives:candidates.filter(x=>x.zone===zone&&x.label!==s.label).map(x=>x.label),resolution:"highest_pixel_validated_weighted_support"}));
+  const reconciliation=Object.entries(byZone).map(([zone,s])=>({zone,selected_label:s.label,selected_evidence_ids:s.evidence_ids,object_local_colors:s.object_local_colors,alternatives:candidates.filter(x=>x.zone===zone&&x.label!==s.label).map(x=>x.label),resolution:"highest_pixel_validated_weighted_support",validation_decision:"accepted",publication_decision:"pending_global_gate"}));
   const contradictionPolicy={count:v5.contradictions?.length??0,action:v5.contradictions?.length?"penalize_and_require_consensus":"publish_normally",inherited_from_v5:true};
   const score=clamp((v5.arbitration?.confidence??0)*.65+consensus.ratio*.35), allowed=accepted.length>0&&v5.arbitration?.outcome==="accepted"&&score>=.55&&(contradictionPolicy.count===0||consensus.ratio>=.67);
   const reason=accepted.length===0?"no_accepted_evidence":v5.arbitration?.outcome!=="accepted"?"v5_not_accepted":score<.55?"insufficient_confidence":contradictionPolicy.count&&consensus.ratio<.67?"unresolved_contradiction":"evidence_threshold_met";
+  for (const item of reconciliation) item.publication_decision = allowed ? "publish" : "blocked_by_global_gate";
   const publicationDecisions=evidenceLedger.map(e=>({id:e.id,zone:e.zone,label:e.label,published:e.accepted,reason:e.validation.reason,colors:e.object_local_colors}));
   return {version:"6",mode,decoded_image_valid:!!validImage(decodedImage),evidence_ledger:evidenceLedger,consensus,object_presence:objectPresence,zone_reconciliation:reconciliation,contradiction_policy:contradictionPolicy,publication_gating:{allowed,score,reason},publication_decisions:publicationDecisions,
     decision_trace:[{step:"ingest_v5",hypothesis_count:v5.hypotheses?.length??0,contradiction_count:contradictionPolicy.count},{step:"ledger",evidence_count:evidenceLedger.length,accepted_count:accepted.length},{step:"consensus",zone:consensus.zone,label:consensus.label,ratio:consensus.ratio},{step:"reconcile",zone_count:reconciliation.length},{step:"publication_gate",allowed,score,reason}],
