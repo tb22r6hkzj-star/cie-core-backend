@@ -31,6 +31,7 @@ new_block = r'''function evaluatePositiveObjectPresence(entry, pixels) {
       diagnostic_evidence: diagnosticEvidence,
       structural_evidence: evidence.filter((item) => ["upper_internal_edge_structure", "object_pixel_mass"].includes(item)),
       required_evidence: requiredEvidence,
+      skin_dominant_head_crop: false,
     };
   }
 
@@ -56,6 +57,35 @@ new_block = r'''function evaluatePositiveObjectPresence(entry, pixels) {
 }
 '''
 text = text[:start] + new_block + text[end:]
+
+old_headwear_return = r'''    return {
+      supported,
+      accepted: supported && entry.confidence >= .35,
+      reason: supported ? "positive_headwear_object_presence" : contamination[0] || "insufficient_positive_headwear_evidence",
+      contamination,
+      positive_evidence: presence.evidence,
+      structural_evidence: presence.structural_evidence,
+      object_presence_score: presence.score,
+      required_positive_evidence: presence.required_evidence,
+    };
+'''
+new_headwear_return = r'''    return {
+      supported,
+      accepted: supported && entry.confidence >= .35,
+      reason: supported ? "positive_headwear_object_presence" : contamination[0] || "insufficient_positive_headwear_evidence",
+      contamination,
+      positive_evidence: presence.evidence,
+      qualifying_evidence: presence.qualifying_evidence || [],
+      diagnostic_evidence: presence.diagnostic_evidence || [],
+      structural_evidence: presence.structural_evidence,
+      object_presence_score: presence.score,
+      required_positive_evidence: presence.required_evidence,
+      skin_dominant_head_crop: !!presence.skin_dominant_head_crop,
+    };
+'''
+if old_headwear_return not in text:
+    raise SystemExit('headwear validation return anchor missing')
+text = text.replace(old_headwear_return, new_headwear_return, 1)
 path.write_text(text)
 
 Path('test/objectPresenceV3.test.js').write_text(r'''import test from "node:test";
@@ -109,7 +139,7 @@ test("real dark headwear retains qualifying image evidence independent of detect
   const validation=result.evidence_ledger[0].validation;
   assert.equal(result.evidence_ledger[0].accepted,true);
   assert.ok(validation.structural_evidence.length>0);
-  assert.ok(validation.qualifying_evidence.length>=validation.required_evidence);
+  assert.ok(validation.qualifying_evidence.length>=validation.required_positive_evidence);
   assert.ok(!validation.qualifying_evidence.includes("detector_support"));
   assert.equal(validation.reason,"positive_headwear_object_presence");
 });
