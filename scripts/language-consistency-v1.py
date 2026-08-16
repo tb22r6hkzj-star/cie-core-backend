@@ -2,8 +2,7 @@ from pathlib import Path
 
 p=Path('src/server.js')
 s=p.read_text()
-old='''  const anchorDescriptor = `${anchorTraits.depth || "mid"} ${anchor?.name || anchor?.hex || "anchor tone"}`;
-  const supportDescriptor = `${supportTraits.intensity || "balanced"} ${support?.name || support?.hex || "support tone"}`;
+old='''  const supportDescriptor = `${supportTraits.intensity || "balanced"} ${support?.name || support?.hex || "support tone"}`;
   const stabilizerDescriptor = `${stabilizerTraits.intensity || "balanced"} ${stabilizer?.name || stabilizer?.hex || "stabilizer tone"}`;
   const accentDescriptor = `${accentTraits.intensity || "balanced"} ${accent?.name || accent?.hex || "accent tone"}`;
 '''
@@ -18,7 +17,6 @@ new='''  const buildRoleDescriptor = (descriptor, colorName, fallbackName) => {
       : `${prefix} ${name}`;
   };
 
-  const anchorDescriptor = buildRoleDescriptor(anchorTraits.depth || "mid", anchor?.name || anchor?.hex, "anchor tone");
   const supportDescriptor = buildRoleDescriptor(supportTraits.intensity || "balanced", support?.name || support?.hex, "support tone");
   const stabilizerDescriptor = buildRoleDescriptor(stabilizerTraits.intensity || "balanced", stabilizer?.name || stabilizer?.hex, "stabilizer tone");
   const accentDescriptor = buildRoleDescriptor(accentTraits.intensity || "balanced", accent?.name || accent?.hex, "accent tone");
