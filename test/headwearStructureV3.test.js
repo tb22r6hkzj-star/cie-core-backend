@@ -29,8 +29,8 @@ test("smooth dark hair cannot use generic object mass as headwear structure", ()
   const result=run(decoded,.92);
   const validation=result.evidence_ledger[0].validation;
   assert.equal(result.evidence_ledger[0].accepted,false);
-  assert.ok(validation.positive_evidence.includes("object_pixel_mass"));
   assert.equal(validation.structural_evidence.includes("object_pixel_mass"), false);
+  assert.equal(validation.reason,"insufficient_positive_headwear_evidence");
 });
 
 test("textured headwear with boundary separation remains publishable", () => {
