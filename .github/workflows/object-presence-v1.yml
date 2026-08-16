@@ -1,0 +1,21 @@
+name: Object presence v1 verification
+on:
+  push:
+    branches: [visioncore-object-presence-v1]
+jobs:
+  test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: node --check src/intelligence/perceptionV6/index.js
+      - name: Positive object-presence regressions
+        run: NODE_ENV=test node --test test/objectPresenceV1.test.js
+      - name: Existing market and V6 regressions
+        run: NODE_ENV=test node --test test/marketHardening02.test.js test/perceptionV6Pixel.test.js test/perceptionV6Hardening.test.js test/accessoryPalettePreservation.test.js
+      - name: Full suite
+        run: npm test
