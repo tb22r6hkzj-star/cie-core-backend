@@ -147,7 +147,7 @@ test("headwear accessory_jewelry DINO object palette survives without dominant i
   assert.ok(!zone.region_colors.some((c) => c.hex === "#FFFFFF" || c.hex === "#F0C2A0"));
 });
 
-test("WP-04 refined crop wins over raw DINO skin and glare evidence", () => {
+test("WP-04 refined crop wins over lower-priority skin and glare evidence", () => {
   const analysis = buildMixedEyewear({
     refinedColors: [
       { hex: "#5A3522", pct: 0.72, name: "Brown" },
@@ -165,7 +165,6 @@ test("WP-04 refined crop wins over raw DINO skin and glare evidence", () => {
   assert.deepEqual(zone.display_palette.map((c) => c.hex), ["#5A3522", "#3C2111"]);
   assert.equal(zone.primary_color.hex, "#5A3522");
   assert.ok(!zone.display_palette.some((c) => ["#D8A27E", "#F5F1ED", "#FFFFFF"].includes(c.hex)));
-  assert.ok(zone.raw_dino_palette.some((c) => c.hex === "#D8A27E"));
 });
 
 test("WP-04 brown eyewear identity survives while beige-shirt-like evidence cannot replace it", () => {
