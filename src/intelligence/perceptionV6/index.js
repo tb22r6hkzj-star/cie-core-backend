@@ -37,9 +37,6 @@ function inspectPixels(region, decodedImage) {
   for (const p of samples) {
     const kind = pixelKind(p);
     counts[kind] += 1;
-    // Object-local publication colors must never be sourced from skin or glare.
-    // Legitimate dark object pixels remain eligible; headwear/hair contamination
-    // is handled by validateObject's crop-structure checks below.
     if (kind !== "object" && kind !== "dark") continue;
     const key = p.map(v => Math.round(v / 32) * 32).join(",");
     const item = buckets.get(key) || { sum: [0,0,0], count: 0 };
@@ -52,29 +49,74 @@ function inspectPixels(region, decodedImage) {
   });
   const ratios = Object.fromEntries(Object.entries(counts).map(([k,v]) => [k, v/samples.length]));
   const contrast = surrounding.length ? distance(mean(samples), mean(surrounding)) : 0;
-  return { available: true, valid: true, reason: "pixels_sampled", crop: { x: x1, y: y1, width: x2-x1, height: y2-y1 }, sample_count: samples.length, surrounding_sample_count: surrounding.length, ratios, contrast, object_local_colors: localColors };
+  const upperY2 = Math.min(y2, y1 + Math.max(1, Math.floor((y2 - y1) * .65)));
+  let upperEdgeComparisons = 0, upperStrongEdges = 0;
+  for (let y = y1; y < upperY2; y += stride) for (let x = x1; x + stride < x2; x += stride) {
+    const i=(y*image.width+x)*image.channels, j=(y*image.width+x+stride)*image.channels;
+    if (image.channels===4 && (image.data[i+3]<=15 || image.data[j+3]<=15)) continue;
+    const a=[image.data[i],image.data[i+1],image.data[i+2]], b=[image.data[j],image.data[j+1],image.data[j+2]];
+    if (pixelKind(a)==="skin" || pixelKind(b)==="skin") continue;
+    upperEdgeComparisons += 1;
+    if (distance(a,b) >= .055) upperStrongEdges += 1;
+  }
+  const spatial_structure={ upper_internal_edge_density: upperEdgeComparisons ? upperStrongEdges/upperEdgeComparisons : 0, upper_edge_comparisons: upperEdgeComparisons };
+  return { available: true, valid: true, reason: "pixels_sampled", crop: { x: x1, y: y1, width: x2-x1, height: y2-y1 }, sample_count: samples.length, surrounding_sample_count: surrounding.length, ratios, contrast, spatial_structure, object_local_colors: localColors };
+}
+
+function evaluatePositiveObjectPresence(entry, pixels) {
+  const label = `${entry.label} ${entry.zone}`.toLowerCase();
+  const r = pixels.ratios || {};
+  const evidence = [];
+  const objectShare = (r.object || 0) + (r.dark || 0);
+  if (pixels.contrast >= .055) evidence.push("boundary_separation");
+  if ((r.object || 0) >= .22) evidence.push("object_pixel_mass");
+  if ((r.dark || 0) >= .12 && pixels.contrast >= .075) evidence.push("structured_dark_mass");
+  if ((pixels.object_local_colors || []).some((color) => Number(color.pct || 0) >= .12)) evidence.push("coherent_object_color");
+  if (entry.confidence >= .62) evidence.push("detector_support");
+  if (objectShare >= .38 && (r.skin || 0) < .50 && (r.highlight || 0) < .50) evidence.push("crop_occupancy");
+
+  if (Number(pixels.spatial_structure?.upper_internal_edge_density || 0) >= .08) evidence.push("upper_internal_edge_structure");
+  const isHeadwear = /hat|cap|beanie|headwear/.test(label);
+  const requiredEvidence = isHeadwear ? 3 : 2;
+  const structuralSignals = ["upper_internal_edge_structure", "object_pixel_mass"];
+  const structuralEvidence = evidence.filter((item) => structuralSignals.includes(item));
+  const supported = evidence.length >= requiredEvidence && (!isHeadwear || structuralEvidence.length > 0);
+  return {
+    supported,
+    score: clamp(evidence.length / Math.max(requiredEvidence + 1, 4)),
+    evidence,
+    structural_evidence: structuralEvidence,
+    required_evidence: requiredEvidence,
+  };
 }
 
 function validateObject(entry, pixels) {
-  if (!pixels.available) return { supported: null, accepted: entry.confidence >= .35, reason: "detector_only_no_pixels", contamination: [] };
+  if (!pixels.available) return { supported: null, accepted: entry.confidence >= .35, reason: "detector_only_no_pixels", contamination: [], positive_evidence: [] };
   const label = `${entry.label} ${entry.zone}`.toLowerCase(), r = pixels.ratios, contamination = [];
   if (r.highlight > .55) contamination.push("glare_or_highlight_dominance");
   if (/glass|eyewear|sunglass/.test(label)) {
     if (r.skin > .62) contamination.push("skin_dominance");
     if (r.dark > .7 && pixels.contrast < .055) contamination.push("unstructured_dark_patch");
     const supported = contamination.length === 0 && ((r.dark > .08 && pixels.contrast >= .055) || (r.object > .22 && pixels.contrast >= .04));
-    return { supported, accepted: supported && entry.confidence >= .35, reason: supported ? "object_local_eyewear_structure" : contamination[0] || "insufficient_eyewear_pixel_contrast", contamination };
+    return { supported, accepted: supported && entry.confidence >= .35, reason: supported ? "object_local_eyewear_structure" : contamination[0] || "insufficient_eyewear_pixel_contrast", contamination, positive_evidence: [] };
   }
   if (/hat|cap|beanie|headwear/.test(label)) {
-    if (r.dark > .72 && pixels.contrast < .06) contamination.push("hair_like_dark_region");
-    if (r.skin > .55) contamination.push("skin_dominance");
-    const hairFaceBoundaryPattern = r.dark > .52 && r.skin >= .10 && r.object < .30;
-    if (hairFaceBoundaryPattern) contamination.push("hair_face_boundary_pattern");
-    const supported = contamination.length === 0 && pixels.contrast >= .045 && r.highlight < .55;
-    return { supported, accepted: supported && entry.confidence >= .35, reason: supported ? "object_local_headwear_structure" : contamination[0] || "insufficient_headwear_pixel_contrast", contamination };
+    if (r.highlight > .55) contamination.push("glare_or_highlight_dominance");
+    const presence = evaluatePositiveObjectPresence(entry, pixels);
+    const supported = contamination.length === 0 && presence.supported;
+    return {
+      supported,
+      accepted: supported && entry.confidence >= .35,
+      reason: supported ? "positive_headwear_object_presence" : contamination[0] || "insufficient_positive_headwear_evidence",
+      contamination,
+      positive_evidence: presence.evidence,
+      structural_evidence: presence.structural_evidence,
+      object_presence_score: presence.score,
+      required_positive_evidence: presence.required_evidence,
+    };
   }
   const supported = r.highlight < .72 && (pixels.contrast >= .025 || r.object + r.dark >= .25);
-  return { supported, accepted: supported && entry.confidence >= .35, reason: supported ? "region_pixels_support_candidate" : "pixel_evidence_failed", contamination };
+  return { supported, accepted: supported && entry.confidence >= .35, reason: supported ? "region_pixels_support_candidate" : "pixel_evidence_failed", contamination, positive_evidence: [] };
 }
 
 export function analyzePerceptionV6({ perceptionV5, regions = [], decodedImage = null, mode = "shadow" } = {}) {
@@ -103,8 +145,8 @@ export function analyzePerceptionV6({ perceptionV5, regions = [], decodedImage =
   const score=clamp((v5.arbitration?.confidence??0)*.65+consensus.ratio*.35), allowed=accepted.length>0&&v5.arbitration?.outcome==="accepted"&&score>=.55&&(contradictionPolicy.count===0||consensus.ratio>=.67);
   const reason=accepted.length===0?"no_accepted_evidence":v5.arbitration?.outcome!=="accepted"?"v5_not_accepted":score<.55?"insufficient_confidence":contradictionPolicy.count&&consensus.ratio<.67?"unresolved_contradiction":"evidence_threshold_met";
   for (const item of reconciliation) item.publication_decision = allowed ? "publish" : "blocked_by_global_gate";
-  const publicationDecisions=evidenceLedger.map(e=>({id:e.id,zone:e.zone,label:e.label,published:e.accepted,reason:e.validation.reason,colors:e.object_local_colors}));
+  const publicationDecisions=evidenceLedger.map(e=>({id:e.id,zone:e.zone,label:e.label,published:e.accepted,reason:e.validation.reason,colors:e.object_local_colors,positive_evidence:e.validation.positive_evidence || [],structural_evidence:e.validation.structural_evidence || []}));
   return {version:"6",mode,decoded_image_valid:!!validImage(decodedImage),evidence_ledger:evidenceLedger,consensus,object_presence:objectPresence,zone_reconciliation:reconciliation,contradiction_policy:contradictionPolicy,publication_gating:{allowed,score,reason},publication_decisions:publicationDecisions,
     decision_trace:[{step:"ingest_v5",hypothesis_count:v5.hypotheses?.length??0,contradiction_count:contradictionPolicy.count},{step:"ledger",evidence_count:evidenceLedger.length,accepted_count:accepted.length},{step:"consensus",zone:consensus.zone,label:consensus.label,ratio:consensus.ratio},{step:"reconcile",zone_count:reconciliation.length},{step:"publication_gate",allowed,score,reason}],
-    lifecycle_trace:[{stage:"candidate_selection",candidate_ids:evidenceLedger.map(e=>e.id)},{stage:"crop_selection",crops:evidenceLedger.map(e=>({id:e.id,crop:e.pixel_evidence.crop}))},{stage:"pixel_validation",results:evidenceLedger.map(e=>({id:e.id,supported:e.validation.supported,reason:e.validation.reason}))},{stage:"object_local_color_preservation",results:evidenceLedger.map(e=>({id:e.id,colors:e.object_local_colors}))},{stage:"publication",mode,decisions:publicationDecisions}]};
+    lifecycle_trace:[{stage:"candidate_selection",candidate_ids:evidenceLedger.map(e=>e.id)},{stage:"crop_selection",crops:evidenceLedger.map(e=>({id:e.id,crop:e.pixel_evidence.crop}))},{stage:"pixel_validation",results:evidenceLedger.map(e=>({id:e.id,supported:e.validation.supported,reason:e.validation.reason,positive_evidence:e.validation.positive_evidence || [],structural_evidence:e.validation.structural_evidence || []}))},{stage:"object_local_color_preservation",results:evidenceLedger.map(e=>({id:e.id,colors:e.object_local_colors}))},{stage:"publication",mode,decisions:publicationDecisions}]};
 }
