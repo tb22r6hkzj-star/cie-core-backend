@@ -2203,6 +2203,14 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
             accentColors,
           })
     ),
+    ...(isAccessoryDisplayPaletteZone(zoneKey) ? {
+      primary_color: explainabilityPrimary,
+      secondary_colors: accessoryDisplayRoles?.secondary || [],
+      accent_colors: accessoryDisplayRoles?.accent || [],
+      detected_colors: explainabilityPublishedColors,
+      region_colors: explainabilityPublishedColors,
+      display_palette: calibratedDisplayPalette,
+    } : {}),
     _debug: debugContext,
   };
 }
