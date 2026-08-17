@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { attachColorEvidenceToZones } from "../src/intelligence/colorEvidence/index.js";
+import { resolveConsumerZonePrimary } from "../src/server.js";
 
 function solidImage(hex, width = 40, height = 40) {
   const value = hex.replace("#", "");
@@ -74,4 +75,39 @@ test("V3 handoff preserves the downstream zone when authority is not earned", ()
   assert.equal(attached.upper_garment.color_publication_v3.applied_to_zone, false);
   assert.equal(zones.upper_garment.hex, "#60321E");
   assert.equal(zones.upper_garment.primary_color.hex, "#60321E");
+});
+
+test("market regression: finalized green lower garment remains the consumer primary while raw black stays evidence", () => {
+  const zones = {
+    lower_garment: {
+      hex: "#4E604F",
+      dominant_color: { hex: "#4E604F", pct: 1 },
+      primary_color: { hex: "#4E604F" },
+      signature_color: { hex: "#4E604F" },
+      confidence: 75,
+      publication_decision: "publish",
+      validation_decision: "accepted",
+      decision_consistency: { valid: true },
+    },
+  };
+
+  const attached = attachColorEvidenceToZones({
+    zones,
+    regions: [region("lower_garment", "#0D131E", 0.67)],
+    decodedImage: solidImage("#4E604F"),
+  });
+  const zone = attached.lower_garment;
+  const rawClusters = [{ base: "#0D131E", pct: 0.67 }, { base: "#4F3E30", pct: 0.08 }];
+  const consumer = resolveConsumerZonePrimary(
+    "lower_garment",
+    zone,
+    rawClusters,
+    zone.color_evidence_v1
+  );
+
+  assert.equal(zone.hex, "#4E604F");
+  assert.equal(zone.primary_color.hex, "#4E604F");
+  assert.equal(rawClusters[0].base, "#0D131E");
+  assert.equal(consumer.hex, "#4E604F");
+  assert.notEqual(consumer.source, "local_cluster_fallback");
 });
