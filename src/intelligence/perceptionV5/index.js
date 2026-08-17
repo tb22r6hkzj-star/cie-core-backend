@@ -1,4 +1,9 @@
 const clamp = (n) => Math.min(1, Math.max(0, Number(n) || 0));
+const normalizeConfidence = (n) => {
+  const value = Number(n);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return clamp(value > 1 ? value / 100 : value);
+};
 
 export function normalizeBoundingBox(region = {}, image = {}) {
   const value = region.bounding_box ?? region.bbox ?? region.box ?? region.geometry;
@@ -22,7 +27,7 @@ export function normalizeBoundingBox(region = {}, image = {}) {
 }
 
 export function isRecoveryEligible(region = {}, box = normalizeBoundingBox(region)) {
-  return Boolean(box) && clamp(region.confidence ?? region.score) >= 0.2 && box.width * box.height >= 0.0005 && region.recovery_disabled !== true;
+  return Boolean(box) && normalizeConfidence(region.confidence ?? region.score) >= 0.2 && box.width * box.height >= 0.0005 && region.recovery_disabled !== true;
 }
 
 function resize(box, scale) {
@@ -39,7 +44,7 @@ export function generateCropHypotheses(region = {}, image = {}) {
 }
 
 export function evaluateHypothesis(hypothesis, region = {}) {
-  const confidence = clamp(region.confidence ?? region.score), coverage = clamp(region.coverage ?? hypothesis.box.width * hypothesis.box.height);
+  const confidence = normalizeConfidence(region.confidence ?? region.score), coverage = clamp(region.coverage ?? hypothesis.box.width * hypothesis.box.height);
   const label = region.segment_label || region.label || region.category ? 1 : .35;
   const color = region.dominant_hex || region.region_colors?.length ? 1 : .45;
   const source = ["grounding_dino", "dino_detection"].includes(region.source_type) ? .95 : .85;

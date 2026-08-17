@@ -1,4 +1,9 @@
 const clamp = (n) => Math.min(1, Math.max(0, Number(n) || 0));
+const normalizeConfidence = (n) => {
+  const value = Number(n);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return clamp(value > 1 ? value / 100 : value);
+};
 
 const validImage = (image) => {
   const width = Number(image?.width), height = Number(image?.height);
@@ -151,7 +156,7 @@ export function analyzePerceptionV6({ perceptionV5, regions = [], decodedImage =
   const v5 = perceptionV5 ?? { hypotheses: [], contradictions: [], arbitration: { outcome: "no_evidence" } };
   const evidenceLedger = regions.map((region, index) => {
     const best = v5.hypotheses?.find((h) => h.region_index === index && h.strategy === "original");
-    const confidence = clamp(best?.score ?? region.confidence ?? region.score), geometry = v5.normalized_regions?.[index]?.normalized_box ?? null;
+    const confidence = best?.score != null ? normalizeConfidence(best.score) : normalizeConfidence(region.confidence ?? region.score), geometry = v5.normalized_regions?.[index]?.normalized_box ?? null;
     const base = { id: region.id ?? `region-${index}`, source: region.source_type ?? "segmentation", zone: region.zone ?? "unknown", label: region.segment_label ?? region.label ?? region.category ?? "unknown", confidence, geometry };
     const pixelEvidence = inspectPixels({ ...region, normalized_box: geometry }, decodedImage), validation = validateObject(base, pixelEvidence);
     const supplied = (region.region_colors || []).map(c => c.hex).filter(Boolean);
