@@ -30,9 +30,9 @@ Otherwise the result remains `observed` or `conflicted`.
 
 Provider confidence is evidence, not authority. VisionCore owns the reliability policy, perceptual agreement rule, source independence requirement, decision margin, and publication threshold.
 
-## Rollout
+## Agile rollout
 
-V3 is intentionally shadow-only in this package. It does not alter the public response contract or customer-facing garment color. Publication authority should only be granted after the fusion regressions and real-market evaluation set demonstrate that the new policy improves accuracy without creating new false corrections.
+V3 begins shadow-only only long enough to execute and inspect its regression behavior. The intent is not to leave it isolated. Once the focused fusion tests and repository-native suite pass, the next work package should integrate V3 into the publication resolver behind strict authority gates and immediately exercise that integrated path against market-derived cases.
 
 ## Executed validation — August 17, 2026
 
