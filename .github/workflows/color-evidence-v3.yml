@@ -1,0 +1,24 @@
+name: Color Evidence V3
+
+on:
+  push:
+    branches:
+      - visioncore-color-evidence-v3-fusion
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test-v3:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Run V3 focused regressions
+        run: node --test test/colorEvidenceV3.test.js test/colorEvidenceV3Publication.test.js
+      - name: Run full suite
+        run: npm test
