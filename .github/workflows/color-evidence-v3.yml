@@ -19,6 +19,6 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Run V3 focused regressions
-        run: node --test test/colorEvidenceV3.test.js test/colorEvidenceV3Publication.test.js
+        run: node --test test/colorEvidenceV3.test.js test/colorEvidenceV3Publication.test.js test/colorEvidenceV3Handoff.test.js
       - name: Run full suite
         run: npm test
