@@ -44,6 +44,7 @@ import jpeg from "jpeg-js";
 import { PNG } from "pngjs";
 import { analyzePerceptionV5 } from "./intelligence/perceptionV5/index.js";
 import { analyzePerceptionV6 } from "./intelligence/perceptionV6/index.js";
+import { attachColorEvidenceToZones } from "./intelligence/colorEvidence/index.js";
 import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
 import { mapDinoLabel } from "./engines/ontology/dinoMappings.js";
 import {
@@ -3425,7 +3426,7 @@ function isDenimLike(clusters = []) {
   return blueClusters.length >= 2 && supportiveBlueClusters.length >= 2 && blueCoverage >= 0.45 && meaningfulCoverage && lowChroma && midLight;
 }
 
-export function resolveConsumerZonePrimary(type, zoneData, clusters = []) {
+export function resolveConsumerZonePrimary(type, zoneData, clusters = [], colorEvidence = null) {
   const finalizedHex = safeHex(zoneData?.dominant_color?.hex || zoneData?.hex || "");
   const rawHex = safeHex(clusters?.[0]?.base || "");
   const signatureHex = safeHex(zoneData?.signature_color?.hex || "");
@@ -3442,6 +3443,32 @@ export function resolveConsumerZonePrimary(type, zoneData, clusters = []) {
   const locallyConsistent = finalizedVsRawDistance === null || finalizedVsRawDistance < 18;
   const corroborated = signatureCorroborates || supportCorroborates || locallyConsistent;
   const finalizedTrusted = !!finalizedHex && confidence >= minimumConfidence && consistencyValid && publicationAccepted && corroborated;
+  const evidenceHex = safeHex(colorEvidence?.consensus_hex || "");
+  const evidenceSupported = colorEvidence?.decision_state === "supported" && Number(colorEvidence?.region_purity || 0) >= 0.80 && Number(colorEvidence?.family_consensus || 0) >= 0.80;
+  const evidenceVsRawDistance = evidenceHex && rawHex ? colorDistanceLab(evidenceHex, rawHex) : null;
+  const evidenceVsFinalizedDistance = evidenceHex && finalizedHex ? colorDistanceLab(evidenceHex, finalizedHex) : null;
+  const rawTraits = rawHex ? getPerceptualTraits(rawHex) : null;
+  const rawLooksDarkNeutral = !!rawHex && (getLight(rawHex) <= 0.22 || Number(rawTraits?.chroma_magnitude || 0) < 18);
+  const evidenceCanCorrectDarkContamination = evidenceSupported && !!evidenceHex && rawLooksDarkNeutral && evidenceVsRawDistance !== null && evidenceVsRawDistance >= 18 && (!finalizedHex || evidenceVsFinalizedDistance < 18);
+
+  if (evidenceCanCorrectDarkContamination) {
+    return {
+      status: "resolved",
+      hex: evidenceHex,
+      source: "color_evidence_v2_consensus",
+      confidence,
+      finalized_vs_raw_lab: finalizedVsRawDistance,
+      evidence: {
+        region_purity: Number(colorEvidence.region_purity || 0),
+        family_consensus: Number(colorEvidence.family_consensus || 0),
+        consensus_family: colorEvidence.consensus_family || null,
+        consensus_hex: evidenceHex,
+        evidence_vs_raw_lab: evidenceVsRawDistance,
+        evidence_vs_finalized_lab: evidenceVsFinalizedDistance,
+      },
+      corroboration: { signature: signatureCorroborates, support: supportCorroborates, raw_agreement: locallyConsistent },
+    };
+  }
 
   if (finalizedTrusted) {
     return {
@@ -3475,7 +3502,7 @@ export function resolveConsumerZonePrimary(type, zoneData, clusters = []) {
   };
 }
 
-function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
+function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceByZone = {} }) {
   const z = zones || {};
   const items = [];
 
@@ -3508,7 +3535,7 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
         : [zoneData];
     const clusters = buildColorClusters(clusterInput);
     const rawDominant = clusters[0] || { base: zoneData.hex, pct: 1 };
-    const consumerColorResolution = resolveConsumerZonePrimary(type, zoneData, clusters);
+    const consumerColorResolution = resolveConsumerZonePrimary(type, zoneData, clusters, colorEvidenceByZone?.[type] || null);
     const dominant = { ...rawDominant, base: consumerColorResolution.hex || rawDominant.base };
 
     const dominantTraits = getPerceptualTraits(dominant.base);
@@ -4754,9 +4781,18 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     change_summary: buildDinoLifecycleChangeSummary(fullDinoLifecycleTrace),
   });
 
+  const colorEvidenceShadowZones = attachColorEvidenceToZones({
+    zones: garmentZones?.zones || {},
+    regions: garmentEvidenceRegions,
+    decodedImage,
+  });
+  const colorEvidenceByZone = Object.fromEntries(
+    Object.entries(colorEvidenceShadowZones || {}).map(([zone, value]) => [zone, value?.color_evidence_v1 || null])
+  );
   const garmentAnalysis = inferGarmentAndMaterial({
     zones: garmentZones?.zones,
     normalizedColors,
+    colorEvidenceByZone,
   });
 
   const reasoningColors = buildPublishedGarmentColorAuthority(garmentZones, normalizedColors);
