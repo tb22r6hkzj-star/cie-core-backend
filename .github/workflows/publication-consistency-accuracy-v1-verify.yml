@@ -26,8 +26,14 @@ jobs:
         run: NODE_ENV=test node --test test/colorAuthorityV1.test.js
       - name: Perception publication regressions
         run: NODE_ENV=test node --test test/headwearMarketSuppressionV6.test.js test/perceptionV6Pixel.test.js test/objectPresenceV2Publication.test.js
-      - name: Full suite
-        run: npm test
+      - name: Garment color identity suite
+        run: NODE_ENV=test node --test test/garmentColorIdentity.test.js
+      - name: Garment and color suites
+        run: NODE_ENV=test node --test test/marketHardening02.test.js test/colorIdentityV2.test.js test/colorClusters.test.js
+      - name: Remaining suite
+        run: |
+          files=$(find test -name '*.test.js' ! -name 'publicationConsistencyAccuracyV1.test.js' ! -name 'colorAuthorityV1.test.js' ! -name 'headwearMarketSuppressionV6.test.js' ! -name 'perceptionV6Pixel.test.js' ! -name 'objectPresenceV2Publication.test.js' ! -name 'garmentColorIdentity.test.js' ! -name 'marketHardening02.test.js' ! -name 'colorIdentityV2.test.js' ! -name 'colorClusters.test.js' -print)
+          NODE_ENV=test node --test $files
       - name: Persist validated change
         run: |
           git config user.name 'github-actions[bot]'
