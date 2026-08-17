@@ -136,8 +136,12 @@ function validateObject(entry, pixels) {
     const supported = contamination.length === 0 && presence.supported;
     return {
       supported,
-      accepted: supported && entry.confidence >= .35,
-      reason: supported ? "positive_headwear_object_presence" : contamination[0] || "insufficient_positive_headwear_evidence",
+      accepted: supported && entry.confidence >= .85,
+      reason: !supported
+        ? contamination[0] || "insufficient_positive_headwear_evidence"
+        : entry.confidence < .85
+          ? "insufficient_headwear_detector_confidence"
+          : "positive_headwear_object_presence",
       contamination,
       positive_evidence: presence.evidence,
       qualifying_evidence: presence.qualifying_evidence || [],
