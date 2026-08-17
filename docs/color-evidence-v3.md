@@ -33,3 +33,14 @@ Provider confidence is evidence, not authority. VisionCore owns the reliability 
 ## Rollout
 
 V3 is intentionally shadow-only in this package. It does not alter the public response contract or customer-facing garment color. Publication authority should only be granted after the fusion regressions and real-market evaluation set demonstrate that the new policy improves accuracy without creating new false corrections.
+
+## Executed validation — August 17, 2026
+
+The focused V3 regression suite was executed and passed 4/4 cases:
+
+1. pixel consensus + finalized identity defeat a contaminated dark raw cluster;
+2. finalized identity + raw cluster defeat one conflicting strong pixel source;
+3. three-way disagreement does not receive supported authority;
+4. rejected/inconsistent finalized identity is downweighted so agreeing pixel + raw evidence can win.
+
+Execution note: external dependency installation timed out in the available runtime. The V3 source and regression test files were therefore executed unchanged with a local compatibility implementation of the two `chroma-js` operations used by V3 (`hex()` normalization and LAB `distance()`). This validates the V3 decision/fusion logic. The repository-native dependency/runtime and full `npm test` suite remain the final merge gate.
