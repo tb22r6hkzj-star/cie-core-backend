@@ -3425,6 +3425,56 @@ function isDenimLike(clusters = []) {
   return blueClusters.length >= 2 && supportiveBlueClusters.length >= 2 && blueCoverage >= 0.45 && meaningfulCoverage && lowChroma && midLight;
 }
 
+export function resolveConsumerZonePrimary(type, zoneData, clusters = []) {
+  const finalizedHex = safeHex(zoneData?.dominant_color?.hex || zoneData?.hex || "");
+  const rawHex = safeHex(clusters?.[0]?.base || "");
+  const signatureHex = safeHex(zoneData?.signature_color?.hex || "");
+  const confidence = Number(zoneData?.confidence || zoneData?.score || 0);
+  const minimumConfidence = type === "lower_garment" ? 60 : type === "upper_garment" ? 45 : 56;
+  const consistency = zoneData?.decision_consistency;
+  const consistencyValid = consistency ? consistency.valid !== false : true;
+  const publicationAccepted = zoneData?.publication_decision !== "reject" && zoneData?.validation_decision !== "rejected";
+  const finalizedVsRawDistance = finalizedHex && rawHex ? colorDistanceLab(finalizedHex, rawHex) : null;
+  const signatureCorroborates = finalizedHex && signatureHex ? colorDistanceLab(finalizedHex, signatureHex) < 18 : false;
+  const supportCorroborates = finalizedHex && Array.isArray(zoneData?.support_colors)
+    ? zoneData.support_colors.some((c) => safeHex(c?.hex) && colorDistanceLab(finalizedHex, c.hex) < 18)
+    : false;
+  const locallyConsistent = finalizedVsRawDistance === null || finalizedVsRawDistance < 18;
+  const corroborated = signatureCorroborates || supportCorroborates || locallyConsistent;
+  const finalizedTrusted = !!finalizedHex && confidence >= minimumConfidence && consistencyValid && publicationAccepted && corroborated;
+
+  if (finalizedTrusted) {
+    return {
+      status: "resolved",
+      hex: finalizedHex,
+      source: "finalized_zone_primary",
+      confidence,
+      finalized_vs_raw_lab: finalizedVsRawDistance,
+      corroboration: { signature: signatureCorroborates, support: supportCorroborates, raw_agreement: locallyConsistent },
+    };
+  }
+
+  if (rawHex) {
+    return {
+      status: finalizedHex && finalizedVsRawDistance >= 18 ? "uncertain" : "fallback",
+      hex: rawHex,
+      source: "local_cluster_fallback",
+      confidence,
+      finalized_vs_raw_lab: finalizedVsRawDistance,
+      corroboration: { signature: signatureCorroborates, support: supportCorroborates, raw_agreement: locallyConsistent },
+    };
+  }
+
+  return {
+    status: "uncertain",
+    hex: finalizedHex || null,
+    source: finalizedHex ? "low_confidence_finalized" : "no_color_evidence",
+    confidence,
+    finalized_vs_raw_lab: finalizedVsRawDistance,
+    corroboration: { signature: signatureCorroborates, support: supportCorroborates, raw_agreement: locallyConsistent },
+  };
+}
+
 function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
   const z = zones || {};
   const items = [];
@@ -3457,7 +3507,9 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
         ? zoneColors
         : [zoneData];
     const clusters = buildColorClusters(clusterInput);
-    const dominant = clusters[0] || { base: zoneData.hex, pct: 1 };
+    const rawDominant = clusters[0] || { base: zoneData.hex, pct: 1 };
+    const consumerColorResolution = resolveConsumerZonePrimary(type, zoneData, clusters);
+    const dominant = { ...rawDominant, base: consumerColorResolution.hex || rawDominant.base };
 
     const dominantTraits = getPerceptualTraits(dominant.base);
 
@@ -3565,6 +3617,7 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
       accessory_type: zoneData.accessory_type || null,
       object_type: zoneData.object_type || null,
       headwear_debug_values: buildHeadwearDebugValues(zoneData),
+      consumer_color_resolution: consumerColorResolution,
       dominant_color: dominantColor,
       primary_color: compactColorRead(dominantColor),
       color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
@@ -3577,6 +3630,10 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [] }) {
         supportColors,
         accentColors,
       }),
+      // Accuracy decision owns the consumer-facing primary after profile metadata is merged.
+      dominant_color: dominantColor,
+      primary_color: compactColorRead(dominantColor),
+      color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
     };
   }
 
