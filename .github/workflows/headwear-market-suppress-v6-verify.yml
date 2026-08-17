@@ -22,8 +22,20 @@ jobs:
         run: |
           node --check src/server.js
           node --check src/ui/marketPublicationPolicy.js
-      - name: Targeted publication gate
-        run: NODE_ENV=test node --test test/headwearMarketSuppressionV6.test.js test/headwearPublicationV5.test.js test/objectPresenceV1.test.js test/objectPresenceV2Publication.test.js test/objectPresenceV3.test.js test/perceptionConfidenceNormalization.test.js test/perceptionV6Pixel.test.js
+      - name: V6 market publication policy
+        run: NODE_ENV=test node --test test/headwearMarketSuppressionV6.test.js
+      - name: V5 headwear publication regression
+        run: NODE_ENV=test node --test test/headwearPublicationV5.test.js
+      - name: Object presence V1 regression
+        run: NODE_ENV=test node --test test/objectPresenceV1.test.js
+      - name: Object presence V2 publication regression
+        run: NODE_ENV=test node --test test/objectPresenceV2Publication.test.js
+      - name: Object presence V3 regression
+        run: NODE_ENV=test node --test test/objectPresenceV3.test.js
+      - name: Confidence normalization regression
+        run: NODE_ENV=test node --test test/perceptionConfidenceNormalization.test.js
+      - name: Perception V6 pixel regression
+        run: NODE_ENV=test node --test test/perceptionV6Pixel.test.js
       - name: Full suite
         run: npm test
       - name: Persist validated change
