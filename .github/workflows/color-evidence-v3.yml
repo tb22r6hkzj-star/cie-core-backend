@@ -19,7 +19,8 @@ jobs:
       - name: Install dependencies
         run: npm install
       - name: Diagnose native color distance
-        run: node --input-type=module -e "import chroma from 'chroma-js'; console.log({ version: chroma.version, distance: chroma.distance('#4E604F','#0D131E','lab'), rawHsl: chroma('#0D131E').hsl(), rawLab: chroma('#0D131E').lab(), greenLab: chroma('#4E604F').lab() })"
+        run: |
+          node --input-type=module -e "import chroma from 'chroma-js'; console.log(JSON.stringify({version:chroma.version,distance:chroma.distance('#4E604F','#0D131E','lab'),rawHsl:chroma('#0D131E').hsl(),rawLab:chroma('#0D131E').lab(),greenLab:chroma('#4E604F').lab()}))"
       - name: Run V3 focused regressions
         run: node --test test/colorEvidenceV3.test.js test/colorEvidenceV3Publication.test.js test/colorEvidenceV3Handoff.test.js
       - name: Run V2 compatibility regression
