@@ -15,9 +15,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: npm
-      - run: npm ci
+          node-version: 22
+      - name: Install dependencies
+        run: npm install
       - name: Run V3 focused regressions
         run: node --test test/colorEvidenceV3.test.js test/colorEvidenceV3Publication.test.js test/colorEvidenceV3Handoff.test.js
       - name: Run full suite
