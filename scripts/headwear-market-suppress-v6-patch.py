@@ -19,13 +19,22 @@ function isHeadwearIdentity(value) {
   return /^(hat|cap|beanie|headwear)$/i.test(String(value || "").trim());
 }
 
+function legacyCarriesHeadwearIdentity(legacy = null) {
+  if (!legacy || typeof legacy !== "object") return false;
+  return [
+    legacy.display_zone_label,
+    legacy.object_type,
+    legacy.accessory_type,
+    legacy.name,
+    legacy.label,
+    legacy.segment_label,
+    legacy.category,
+  ].some(isHeadwearIdentity);
+}
+
 export function shouldPublishMarketAccessoryIdentity({ legacy = null, selectedLabel = null } = {}) {
   if (MARKET_HEADWEAR_PUBLICATION_ENABLED) return true;
-  const legacyObjectType = String(legacy?.object_type || legacy?.accessory_type || "").trim().toLowerCase();
-  const legacyIsHeadwear = legacy?.display_zone_label === "Headwear" || isHeadwearIdentity(legacyObjectType);
-  if (legacyIsHeadwear) return false;
-  if (isHeadwearIdentity(selectedLabel)) return false;
-  return true;
+  return !legacyCarriesHeadwearIdentity(legacy) && !isHeadwearIdentity(selectedLabel);
 }
 '''
 if anchor not in text:
@@ -66,12 +75,17 @@ delete process.env.HEADWEAR_MARKET_PUBLICATION_ENABLED;
 const { shouldPublishMarketAccessoryIdentity } = await import("../src/server.js");
 
 test("market publication suppresses legacy headwear identities by default", () => {
-  assert.equal(shouldPublishMarketAccessoryIdentity({
-    legacy: { display_zone_label: "Headwear", object_type: "hat", accessory_type: "hat" },
-  }), false);
-  assert.equal(shouldPublishMarketAccessoryIdentity({
-    legacy: { display_zone_label: "Headwear", object_type: "cap", accessory_type: "cap" },
-  }), false);
+  const fixtures = [
+    { display_zone_label: "Headwear" },
+    { object_type: "hat" },
+    { accessory_type: "cap" },
+    { name: "beanie" },
+    { label: "hat" },
+    { segment_label: "cap" },
+  ];
+  for (const legacy of fixtures) {
+    assert.equal(shouldPublishMarketAccessoryIdentity({ legacy }), false, JSON.stringify(legacy));
+  }
 });
 
 test("market publication suppresses reconciled headwear labels by default", () => {
