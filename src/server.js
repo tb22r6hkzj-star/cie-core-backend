@@ -58,6 +58,10 @@ import {
 } from "./engines/styleIdentity/index.js";
 import { inferAccessoryDisplayMetadata } from "./ui/accessoryDisplay.js";
 import {
+  marketHeadwearPublicationEnabled,
+  shouldPublishMarketAccessoryIdentity,
+} from "./ui/marketPublicationPolicy.js";
+import {
   CATEGORY_COMPATIBILITY,
   CATEGORY_SEARCH_KEYWORDS,
   CATEGORY_SUBTYPES,
@@ -93,6 +97,10 @@ const MARKET_PERCEPTION_V6_MODE = normalizePerceptionV6Mode(
   process.env.PERCEPTION_V6_MODE,
   "assist"
 );
+
+// Market safety: headwear perception remains available internally, but customer-facing
+// assist publication stays off until hair-vs-headwear discrimination is validated.
+const MARKET_HEADWEAR_PUBLICATION_ENABLED = marketHeadwearPublicationEnabled(process.env);
 
 /* =========================
    CORS
@@ -4613,10 +4621,20 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
       const legacyObjectType = String(legacy?.object_type || legacy?.accessory_type || "").trim().toLowerCase();
       const acceptedLabels = acceptedLabelsByZone.get(zone) || new Set();
       const legacyIdentityAccepted = legacyObjectType ? acceptedLabels.has(legacyObjectType) : true;
-      if (legacyIdentityAccepted) return [[zone, legacy]];
+      const legacyIdentityMarketSafe = shouldPublishMarketAccessoryIdentity({
+        legacy,
+        headwearEnabled: MARKET_HEADWEAR_PUBLICATION_ENABLED,
+      });
+      if (legacyIdentityAccepted && legacyIdentityMarketSafe) return [[zone, legacy]];
 
+      // If a legacy headwear identity is suppressed, still allow a separately accepted
+      // non-headwear reconciliation (for example a real necklace in the same canonical zone).
       const reconciliation = acceptedPublicationByZone.get(zone) || null;
       if (!reconciliation?.selected_label) return [];
+      if (!shouldPublishMarketAccessoryIdentity({
+        selectedLabel: reconciliation.selected_label,
+        headwearEnabled: MARKET_HEADWEAR_PUBLICATION_ENABLED,
+      })) return [];
       const displayMetadata = inferAccessoryDisplayMetadata([reconciliation.selected_label]);
       const dominantObjectColor = reconciliation.object_local_colors?.[0] || null;
       return [[zone, {
