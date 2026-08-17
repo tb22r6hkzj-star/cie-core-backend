@@ -72,14 +72,15 @@ old = '''      const legacyObjectType = String(legacy?.object_type || legacy?.ac
 '''
 new = '''      const legacyObjectType = String(legacy?.object_type || legacy?.accessory_type || "").trim().toLowerCase();
       const acceptedLabels = acceptedLabelsByZone.get(zone) || new Set();
-      if (!shouldPublishMarketAccessoryIdentity({
+      const legacyIdentityAccepted = legacyObjectType ? acceptedLabels.has(legacyObjectType) : true;
+      const legacyIdentityMarketSafe = shouldPublishMarketAccessoryIdentity({
         legacy,
         headwearEnabled: MARKET_HEADWEAR_PUBLICATION_ENABLED,
-      })) return [];
+      });
+      if (legacyIdentityAccepted && legacyIdentityMarketSafe) return [[zone, legacy]];
 
-      const legacyIdentityAccepted = legacyObjectType ? acceptedLabels.has(legacyObjectType) : true;
-      if (legacyIdentityAccepted) return [[zone, legacy]];
-
+      // If a legacy headwear identity is suppressed, still allow a separately accepted
+      // non-headwear reconciliation (for example a real necklace in the same canonical zone).
       const reconciliation = acceptedPublicationByZone.get(zone) || null;
       if (!reconciliation?.selected_label) return [];
       if (!shouldPublishMarketAccessoryIdentity({
