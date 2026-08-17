@@ -1,0 +1,37 @@
+name: Color Evidence V1 verification
+on:
+  push:
+    branches: [visioncore-color-evidence-v1]
+permissions:
+  contents: write
+jobs:
+  verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: visioncore-color-evidence-v1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install
+      - name: Apply integration patch
+        run: python scripts/color-evidence-v1-patch.py
+      - name: Syntax
+        run: node --check src/server.js && node --check src/intelligence/colorEvidence/index.js
+      - name: Color Evidence regression
+        run: NODE_ENV=test node --test test/colorEvidenceV1.test.js
+      - name: Accuracy and authority regressions
+        run: NODE_ENV=test node --test test/publicationConsistencyAccuracyV1.test.js test/colorAuthorityV1.test.js
+      - name: Perception publication regressions
+        run: NODE_ENV=test node --test test/headwearMarketSuppressionV6.test.js test/perceptionV6Pixel.test.js test/objectPresenceV2Publication.test.js
+      - name: Full suite
+        run: npm test
+      - name: Persist validated integration
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/server.js
+          git commit -m 'Attach Color Evidence V1 diagnostics to garment zones' || exit 0
+          git push
