@@ -4533,6 +4533,26 @@ function buildSuggestedAdjustment(scoreBreakdown, colorRoles, bestMode) {
   return `Refining the relationship between ${anchorName}, ${supportName}, and ${accentName} would improve the overall outfit score.`;
 }
 
+function buildPublishedGarmentColorAuthority(garmentZones, fallbackColors = []) {
+  const zones = garmentZones?.zones || {};
+  const orderedKeys = ["upper_garment", "lower_garment", "body_garment", "outerwear", "footwear", "bag", "accessory_jewelry", "eyewear"];
+  const authoritative = [];
+  for (const zone of orderedKeys) {
+    const z = zones[zone];
+    if (!z || z.interpretation === "unknown" || z.one_piece_suppressed) continue;
+    const hex = safeHex(z.hex || z.dominant_color?.hex || "");
+    if (!hex || authoritative.some((c) => c.hex === hex)) continue;
+    authoritative.push({ hex, pct: Math.max(0.01, Math.min(1, Number(z.dominant_color?.pct ?? z.pct ?? 0.25))), name: getColorName(hex), source_zone: zone, source: "published_garment_primary" });
+  }
+  if (!authoritative.length) return fallbackColors;
+  for (const c of fallbackColors) {
+    if (authoritative.length >= 5) break;
+    if (!c?.hex || authoritative.some((x) => x.hex === c.hex)) continue;
+    authoritative.push({ ...c, source: c.source || "global_palette_fallback" });
+  }
+  return authoritative;
+}
+
 function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], dinoGarmentRegions = [], pipeline = null, decodedImage = null, perception_v6_mode, v6_mode }) {
   const perceptionV6Mode = normalizePerceptionV6Mode(perception_v6_mode ?? v6_mode, "shadow");
   const normalizedColors = normalizeDetectedColors(topColors, dominantHex);
@@ -4682,11 +4702,14 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     normalizedColors,
   });
 
-  const scoreBreakdown = computeScoreBreakdown(colorRoles, normalizedColors);
+  const reasoningColors = buildPublishedGarmentColorAuthority(garmentZones, normalizedColors);
+  const reasoningBaseRoles = assignColorRoles(reasoningColors);
+  const reasoningColorRoles = enforceStructuralPreservation(reasoningBaseRoles, reasoningColors);
+  const scoreBreakdown = computeScoreBreakdown(reasoningColorRoles, reasoningColors);
   const scoredOutfit = scoreOutfit(scoreBreakdown);
   const modeScores = scoredOutfit.mode_scores;
   const best = getBestMode(modeScores);
-  const detectedPalette = buildDetectedPalette(colorRoles, normalizedColors);
+  const detectedPalette = buildDetectedPalette(reasoningColorRoles, reasoningColors);
   const styleIdentity = deriveStyleIdentity(best.mode, scoreBreakdown);
   const visualImportance = collectImportantColors(topColors, dominantHex);
   const outfitScore = scoredOutfit.outfit_score;
@@ -4702,10 +4725,14 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     detected_palette: detectedPalette,
     color_identity_summary: buildColorIdentitySummary(primaryColorIdentity),
     garment_identity: buildGarmentIdentity(normalizedColors[0], normalizedColors.slice(1, 4)),
-    color_roles: colorRoles,
+    color_roles: reasoningColorRoles,
+    color_authority: {
+      source: reasoningColors === normalizedColors ? "global_palette_fallback" : "published_garment_primaries",
+      colors: reasoningColors.map((c) => ({ hex: c.hex, name: c.name || getColorName(c.hex), source_zone: c.source_zone || null, source: c.source || null })),
+    },
     style_identity: styleIdentity,
-    why_this_works: buildWhyThisWorks(colorRoles),
-    suggested_adjustment: buildSuggestedAdjustment(scoreBreakdown, colorRoles, best.mode),
+    why_this_works: buildWhyThisWorks(reasoningColorRoles),
+    suggested_adjustment: buildSuggestedAdjustment(scoreBreakdown, reasoningColorRoles, best.mode),
     visual_importance: visualImportance,
     visual_intelligence: visualIntelligence,
     visual_intelligence_layer: visualIntelligence,
