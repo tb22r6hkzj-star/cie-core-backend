@@ -7,10 +7,18 @@ function family(hex) {
   const safe = safeHex(hex);
   if (!safe) return "unknown";
   const [hRaw, sRaw, lRaw] = chroma(safe).hsl();
+  const [r, g, b] = chroma(safe).rgb();
   const h = Number.isFinite(hRaw) ? hRaw : 0;
   const s = Number(sRaw || 0);
   const l = Number(lRaw || 0);
-  if (s < 0.12) return l < 0.18 ? "black" : l > 0.82 ? "white" : "gray";
+  if (s < 0.12) {
+    if (l < 0.18) return "black";
+    if (l > 0.82) return "white";
+    if (g - r >= 7 && g - b >= 7) return "green";
+    if (b - r >= 7 && b - g >= 7) return "blue";
+    if (r - b >= 8 && g - b >= 5 && r >= g) return "brown";
+    return "gray";
+  }
   if (h < 15 || h >= 345) return "red";
   if (h < 45) return l < 0.45 ? "brown" : "orange";
   if (h < 75) return "yellow";
