@@ -25,5 +25,7 @@ jobs:
         run: node --test test/colorEvidenceV3.test.js test/colorEvidenceV3Publication.test.js test/colorEvidenceV3Handoff.test.js
       - name: Run V2 compatibility regression
         run: node --test test/colorEvidenceV2.test.js
-      - name: Run full suite
+      - name: Run full suite serially
+        run: NODE_ENV=test node --test --test-concurrency=1
+      - name: Run full suite normally
         run: npm test
