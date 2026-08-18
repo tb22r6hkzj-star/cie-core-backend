@@ -46,6 +46,13 @@ function representativeHex(samples = []) {
   return best.hex;
 }
 
+function cohesion(samples = [], anchorHex = null) {
+  const valid = samples.map(normalizeSample).filter(Boolean);
+  if (!valid.length || !anchorHex) return 0;
+  const mean = valid.reduce((sum, sample) => sum + deltaE(anchorHex, sample.hex), 0) / valid.length;
+  return clamp01(1 - mean / 30);
+}
+
 export function evaluateSceneBoundaryPurityV1({
   interiorSamples = [],
   boundarySamples = [],
@@ -68,11 +75,11 @@ export function evaluateSceneBoundaryPurityV1({
   const garmentAgreement = safeHex(garmentHex || "")
     ? clamp01(1 - deltaE(interiorHex, garmentHex) / 45)
     : null;
-
-  const boundarySeparation = boundaryDeltaE === null ? 1 : clamp01(boundaryDeltaE / 30);
-  const boundaryRisk = boundaryDeltaE === null ? 0 : clamp01(1 - boundaryDeltaE / 30);
-  const interiorSupport = garmentAgreement === null ? 1 : garmentAgreement;
-  const purityScore = clamp01(interiorSupport * 0.7 + boundarySeparation * 0.3);
+  const interiorCohesion = cohesion(interior, interiorHex);
+  const boundaryContextLikelihood = boundaryDeltaE === null ? 0 : clamp01(boundaryDeltaE / 30);
+  const boundaryGarmentOverlap = boundaryDeltaE === null ? 0 : clamp01(1 - boundaryDeltaE / 30);
+  const interiorSupport = garmentAgreement === null ? interiorCohesion : garmentAgreement;
+  const purityScore = clamp01(interiorSupport * 0.7 + interiorCohesion * 0.3);
 
   const contextCandidates = boundary
     .filter((sample) => deltaE(interiorHex, sample.hex) >= 18)
@@ -89,11 +96,12 @@ export function evaluateSceneBoundaryPurityV1({
     boundary_hex: boundaryHex,
     boundary_delta_e: boundaryDeltaE === null ? null : Number(boundaryDeltaE.toFixed(2)),
     garment_agreement: garmentAgreement === null ? null : Number(garmentAgreement.toFixed(3)),
-    boundary_separation: Number(boundarySeparation.toFixed(3)),
-    boundary_contamination_risk: Number(boundaryRisk.toFixed(3)),
+    interior_cohesion: Number(interiorCohesion.toFixed(3)),
+    boundary_context_likelihood: Number(boundaryContextLikelihood.toFixed(3)),
+    boundary_garment_overlap: Number(boundaryGarmentOverlap.toFixed(3)),
     region_purity: Number(purityScore.toFixed(3)),
     decision_state:
-      purityScore >= 0.78 && boundaryRisk <= 0.45
+      purityScore >= 0.78
         ? "clean"
         : purityScore >= 0.58
           ? "mixed"
