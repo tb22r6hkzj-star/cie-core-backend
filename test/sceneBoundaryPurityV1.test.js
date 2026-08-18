@@ -20,6 +20,7 @@ test("green garment interior remains garment authority while black boundary beco
   assert.equal(result.interior_hex, "#4E604F");
   assert.equal(result.policy.garment_authority_source, "interior_evidence");
   assert.equal(result.policy.boundary_role, "context_only");
+  assert.ok(result.boundary_context_likelihood > 0.5);
   assert.ok(result.scene_context_candidates.some((c) => c.hex === "#0D131E"));
 });
 
@@ -41,7 +42,7 @@ test("warm stone boundary is retained as context without changing rich-brown gar
   assert.equal(result.policy.boundary_role, "context_only");
 });
 
-test("boundary close to garment color is not falsely promoted to scene context", () => {
+test("boundary close to garment color is treated as garment overlap, not scene context", () => {
   const result = evaluateSceneBoundaryPurityV1({
     garmentHex: "#4E604F",
     interiorSamples: [{ id: "center", hex: "#4E604F", family: "green" }],
@@ -49,7 +50,8 @@ test("boundary close to garment color is not falsely promoted to scene context",
   });
 
   assert.equal(result.scene_context_candidates.length, 0);
-  assert.ok(result.boundary_contamination_risk > 0.5);
+  assert.ok(result.boundary_garment_overlap > 0.5);
+  assert.ok(result.boundary_context_likelihood < 0.5);
 });
 
 test("missing interior evidence withholds a garment purity decision", () => {
