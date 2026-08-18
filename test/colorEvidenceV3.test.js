@@ -85,3 +85,68 @@ test("V3 downweights rejected finalized identity instead of treating confidence 
   assert.ok(result.winning_sources.includes("raw_primary_cluster"));
   assert.ok(!result.winning_sources.includes("finalized_identity"));
 });
+
+test("V3 returns unavailable when every candidate color is missing or invalid", () => {
+  const result = fuseColorEvidenceV3({
+    zoneData: { dominant_color: { hex: "not-a-color" }, confidence: 90 },
+    clusters: [{ base: "also-not-a-color", pct: 0.9 }],
+    colorEvidence: { available: true, consensus_hex: "invalid", decision_state: "supported" },
+  });
+
+  assert.equal(result.available, false);
+  assert.equal(result.decision_state, "unavailable");
+  assert.equal(result.reason, "no_evidence_sources");
+  assert.deepEqual(result.sources, []);
+});
+
+test("V3 normalizes percentage and unit confidence identically", () => {
+  const percent = fuseColorEvidenceV3({ zoneData: zone("#4E604F", 75) });
+  const unit = fuseColorEvidenceV3({ zoneData: zone("#4E604F", 0.75) });
+
+  const percentIdentity = percent.sources.find((source) => source.id === "finalized_identity");
+  const unitIdentity = unit.sources.find((source) => source.id === "finalized_identity");
+  assert.equal(percentIdentity.reliability, unitIdentity.reliability);
+});
+
+test("V3 keeps the LAB agreement boundary strict at delta E 18", () => {
+  const inside = fuseColorEvidenceV3({
+    zoneData: zone("#4E604F", 100),
+    clusters: [{ base: "#7A7A7A", pct: 0.9 }],
+  });
+  const outside = fuseColorEvidenceV3({
+    zoneData: zone("#4E604F", 100),
+    clusters: [{ base: "#3E3E3E", pct: 0.9 }],
+  });
+
+  assert.equal(inside.policy.agreement_delta_e, 18);
+  assert.equal(inside.independent_source_count, 2);
+  assert.equal(inside.decision_state, "supported");
+  assert.equal(outside.independent_source_count, 1);
+  assert.notEqual(outside.decision_state, "supported");
+});
+
+test("V3 observed pixel evidence cannot manufacture supported authority with one agreeing raw stream", () => {
+  const result = fuseColorEvidenceV3({
+    clusters: [{ base: "#4E604F", pct: 0.76 }],
+    colorEvidence: supportedEvidence("#4E604F", { decision_state: "observed" }),
+  });
+
+  assert.notEqual(result.decision_state, "supported");
+  assert.equal(result.independent_source_count, 2);
+  assert.ok(result.winning_sources.includes("pixel_consensus"));
+  assert.ok(result.winning_sources.includes("raw_primary_cluster"));
+});
+
+test("V3 does not allow bridge evidence to create transitive consensus between endpoints beyond delta E", () => {
+  const result = fuseColorEvidenceV3({
+    zoneData: zone("#4E604F", 100),
+    clusters: [{ base: "#899A81", pct: 0.76 }],
+    colorEvidence: supportedEvidence("#62735F"),
+  });
+
+  assert.equal(result.decision_state, "supported");
+  assert.ok(result.winning_sources.includes("finalized_identity"));
+  assert.ok(result.winning_sources.includes("pixel_consensus"));
+  assert.ok(!result.winning_sources.includes("raw_primary_cluster"));
+  assert.equal(result.independent_source_count, 2);
+});
