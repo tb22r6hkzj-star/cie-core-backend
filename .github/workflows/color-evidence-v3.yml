@@ -26,6 +26,16 @@ jobs:
       - name: Run V2 compatibility regression
         run: NODE_ENV=test node --test test/colorEvidenceV2.test.js
       - name: Run full suite serially
-        run: NODE_ENV=test node --test --test-concurrency=1
+        shell: bash
+        run: |
+          set -o pipefail
+          NODE_ENV=test node --test --test-concurrency=1 2>&1 | tee serial-test.log
+      - name: Upload serial test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: color-evidence-v3-serial-test-log
+          path: serial-test.log
+          if-no-files-found: error
       - name: Run full suite normally
         run: NODE_ENV=test npm test
