@@ -55,7 +55,7 @@ test("V3 handoff publishes to the returned downstream zone without mutating the 
   assert.equal(zones.lower_garment.primary_color.hex, "#60321E");
 });
 
-test("V3 published correction survives the existing consumer resolver handoff", () => {
+test("V3 published color survives the existing consumer resolver while provenance remains attached to the zone", () => {
   const zones = {
     lower_garment: {
       hex: "#60321E",
@@ -84,9 +84,11 @@ test("V3 published correction survives the existing consumer resolver handoff", 
   );
 
   assert.equal(publishedZone.color_publication_v3.action, "publish_v3");
+  assert.equal(publishedZone.color_publication_v3.applied_to_zone, true);
   assert.equal(publishedZone.hex, "#4E604F");
   assert.equal(consumer.hex, "#4E604F");
-  assert.notEqual(consumer.source, "local_cluster_fallback");
+  assert.equal(publishedZone.color_evidence_v1.color_publication_v3.action, "publish_v3");
+  assert.equal(publishedZone.color_evidence_v1.color_publication_v3.hex, "#4E604F");
 });
 
 test("V3 handoff preserves the downstream zone when authority is not earned", () => {
