@@ -24,4 +24,14 @@ jobs:
       - name: Run scene boundary purity regressions
         run: NODE_ENV=test node --test test/sceneBoundaryPurityV1.test.js
       - name: Run full suite
-        run: NODE_ENV=test npm test
+        shell: bash
+        run: |
+          set -o pipefail
+          NODE_ENV=test npm test 2>&1 | tee scene-boundary-full-suite.tap
+      - name: Preserve full-suite output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scene-boundary-full-suite
+          path: scene-boundary-full-suite.tap
+          if-no-files-found: error
