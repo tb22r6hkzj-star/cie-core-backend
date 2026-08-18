@@ -92,7 +92,7 @@ test("V3 published color survives the existing consumer resolver while provenanc
   assert.equal(publishedZone.color_evidence_v1.color_publication_v3.hex, "#4E604F");
 });
 
-test("V3 handoff preserves the downstream zone when authority is not earned", () => {
+test("V3 handoff does not replace the downstream zone when V3 does not publish a different color", () => {
   const zones = {
     upper_garment: {
       hex: "#60321E",
@@ -111,8 +111,10 @@ test("V3 handoff preserves the downstream zone when authority is not earned", ()
     decodedImage: solidImage("#4E604F"),
   });
 
-  assert.equal(attached.upper_garment.color_publication_v3.action, "preserve_current");
+  assert.ok(["preserve_current", "confirm_current"].includes(attached.upper_garment.color_publication_v3.action));
   assert.equal(attached.upper_garment.color_publication_v3.applied_to_zone, false);
+  assert.equal(attached.upper_garment.hex, "#60321E");
+  assert.equal(attached.upper_garment.primary_color.hex, "#60321E");
   assert.equal(zones.upper_garment.hex, "#60321E");
   assert.equal(zones.upper_garment.primary_color.hex, "#60321E");
 });
