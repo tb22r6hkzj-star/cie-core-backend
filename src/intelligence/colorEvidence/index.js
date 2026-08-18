@@ -69,6 +69,8 @@ const INTERIOR_WINDOW_SPECS = [
   { id: "center", x: 0.34, y: 0.30, w: 0.32, h: 0.40 },
   { id: "upper", x: 0.34, y: 0.12, w: 0.32, h: 0.26 },
   { id: "lower", x: 0.34, y: 0.62, w: 0.32, h: 0.26 },
+  { id: "left_interior", x: 0.30, y: 0.30, w: 0.18, h: 0.40 },
+  { id: "right_interior", x: 0.52, y: 0.30, w: 0.18, h: 0.40 },
 ];
 
 const BOUNDARY_WINDOW_SPECS = [
