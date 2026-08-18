@@ -25,36 +25,9 @@ jobs:
         run: NODE_ENV=test node --test test/colorEvidenceV3.test.js test/colorEvidenceV3Publication.test.js test/colorEvidenceV3Handoff.test.js
       - name: Run V2 compatibility regression
         run: NODE_ENV=test node --test test/colorEvidenceV2.test.js
-      - name: Diagnose signature-color static match
-        shell: bash
-        run: |
-          node --input-type=module <<'NODE' | tee signature-color-static-diagnostic.log
-          import { readFileSync } from "node:fs";
-          const source = readFileSync("src/server.js", "utf8");
-          const patterns = [
-            /signature_color[\s\S]{0,120}(score|scoring|outfit)/i,
-            /(score|scoring|outfit)[\s\S]{0,120}signature_color/i,
-            /signature_color[\s\S]{0,120}(detected_palette|color_roles|retrieval|recommendation)/i,
-            /(detected_palette|color_roles|retrieval|recommendation)[\s\S]{0,120}signature_color/i,
-          ];
-          for (const [index, pattern] of patterns.entries()) {
-            const match = source.match(pattern);
-            console.log(JSON.stringify({ index, pattern: String(pattern), match: match?.[0] || null }));
-          }
-          NODE
+      - name: Run signature-color display-only guard
+        run: NODE_ENV=test node scripts/test-signature-color-static.mjs
       - name: Run full suite serially
-        shell: bash
-        run: |
-          set -o pipefail
-          NODE_ENV=test node --test --test-concurrency=1 2>&1 | tee serial-test.log
-      - name: Upload diagnostic logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: color-evidence-v3-diagnostic-logs
-          path: |
-            serial-test.log
-            signature-color-static-diagnostic.log
-          if-no-files-found: error
+        run: NODE_ENV=test node --test --test-concurrency=1
       - name: Run full suite normally
         run: NODE_ENV=test npm test
