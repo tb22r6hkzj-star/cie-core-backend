@@ -27,26 +27,30 @@ jobs:
       - name: Apply guarded production handoff patch
         shell: python
         run: |
+          import re
           from pathlib import Path
 
           server_path = Path("src/server.js")
           server = server_path.read_text()
           if 'source: "color_evidence_v3_publication"' not in server:
-              old_call = '''  const garmentAnalysis = inferGarmentAndMaterial({
-            zones: garmentZones?.zones,
-            normalizedColors,
-            colorEvidenceByZone,
-          });'''
-              new_call = '''  const garmentAnalysis = inferGarmentAndMaterial({
+              call_pattern = re.compile(
+                  r"const garmentAnalysis = inferGarmentAndMaterial\(\{\s*"
+                  r"zones:\s*garmentZones\?\.zones,\s*"
+                  r"normalizedColors,\s*"
+                  r"colorEvidenceByZone,\s*"
+                  r"\}\);"
+              )
+              matches = list(call_pattern.finditer(server))
+              if len(matches) != 1:
+                  raise SystemExit(f"Expected exactly one garment-analysis handoff match, found {len(matches)}")
+              replacement = '''const garmentAnalysis = inferGarmentAndMaterial({
             zones: colorEvidenceShadowZones,
             normalizedColors,
             colorEvidenceByZone,
           });'''
-              if server.count(old_call) != 1:
-                  raise SystemExit(f"Expected exactly one garment-analysis handoff match, found {server.count(old_call)}")
-              server = server.replace(old_call, new_call, 1)
+              server = call_pattern.sub(replacement, server, count=1)
 
-              anchor = '''  const locallyConsistent = finalizedVsRawDistance === null || finalizedVsRawDistance < 18;'''
+              anchor = '  const locallyConsistent = finalizedVsRawDistance === null || finalizedVsRawDistance < 18;'
               insertion = '''  const locallyConsistent = finalizedVsRawDistance === null || finalizedVsRawDistance < 18;
 
           const v3Publication = zoneData?.color_publication_v3;
