@@ -87,6 +87,7 @@ test("V3 published color survives the existing consumer resolver while provenanc
   assert.equal(publishedZone.color_publication_v3.applied_to_zone, true);
   assert.equal(publishedZone.hex, "#4E604F");
   assert.equal(consumer.hex, "#4E604F");
+  assert.equal(consumer.source, "color_evidence_v3_publication");
   assert.equal(publishedZone.color_evidence_v1.color_publication_v3.action, "publish_v3");
   assert.equal(publishedZone.color_evidence_v1.color_publication_v3.hex, "#4E604F");
 });

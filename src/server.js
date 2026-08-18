@@ -3441,6 +3441,34 @@ export function resolveConsumerZonePrimary(type, zoneData, clusters = [], colorE
     ? zoneData.support_colors.some((c) => safeHex(c?.hex) && colorDistanceLab(finalizedHex, c.hex) < 18)
     : false;
   const locallyConsistent = finalizedVsRawDistance === null || finalizedVsRawDistance < 18;
+
+const v3Publication = zoneData?.color_publication_v3;
+const v3PublishedHex = safeHex(v3Publication?.hex || "");
+const v3PublicationApplied =
+  v3Publication?.action === "publish_v3" &&
+  v3Publication?.applied_to_zone === true &&
+  finalizedHex &&
+  v3PublishedHex === finalizedHex;
+
+if (v3PublicationApplied) {
+  return {
+    status: "resolved",
+    hex: finalizedHex,
+    source: "color_evidence_v3_publication",
+    confidence,
+    finalized_vs_raw_lab: finalizedVsRawDistance,
+    corroboration: {
+      signature: signatureCorroborates,
+      support: supportCorroborates,
+      raw_agreement: locallyConsistent,
+    },
+    publication: {
+      action: v3Publication.action,
+      reason: v3Publication.reason || null,
+      source: v3Publication.source || "color_evidence_v3",
+    },
+  };
+}
   const corroborated = signatureCorroborates || supportCorroborates || locallyConsistent;
   const finalizedTrusted = !!finalizedHex && confidence >= minimumConfidence && consistencyValid && publicationAccepted && corroborated;
   const evidenceHex = safeHex(colorEvidence?.consensus_hex || "");
@@ -4790,10 +4818,10 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     Object.entries(colorEvidenceShadowZones || {}).map(([zone, value]) => [zone, value?.color_evidence_v1 || null])
   );
   const garmentAnalysis = inferGarmentAndMaterial({
-    zones: garmentZones?.zones,
-    normalizedColors,
-    colorEvidenceByZone,
-  });
+  zones: colorEvidenceShadowZones,
+  normalizedColors,
+  colorEvidenceByZone,
+});
 
   const reasoningColors = buildPublishedGarmentColorAuthority(garmentZones, normalizedColors);
   const reasoningBaseRoles = assignColorRoles(reasoningColors);
