@@ -7,9 +7,10 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test-v3:
@@ -24,80 +25,6 @@ jobs:
           node-version: 22
       - name: Install dependencies
         run: npm install
-      - name: Apply guarded production handoff patch
-        shell: python
-        run: |
-          import re
-          from pathlib import Path
-
-          server_path = Path("src/server.js")
-          server = server_path.read_text()
-          if 'source: "color_evidence_v3_publication"' not in server:
-              call_pattern = re.compile(
-                  r"const garmentAnalysis = inferGarmentAndMaterial\(\{\s*"
-                  r"zones:\s*garmentZones\?\.zones,\s*"
-                  r"normalizedColors,\s*"
-                  r"colorEvidenceByZone,\s*"
-                  r"\}\);"
-              )
-              matches = list(call_pattern.finditer(server))
-              if len(matches) != 1:
-                  raise SystemExit(f"Expected exactly one garment-analysis handoff match, found {len(matches)}")
-              replacement = '''const garmentAnalysis = inferGarmentAndMaterial({
-            zones: colorEvidenceShadowZones,
-            normalizedColors,
-            colorEvidenceByZone,
-          });'''
-              server = call_pattern.sub(replacement, server, count=1)
-
-              anchor = '  const locallyConsistent = finalizedVsRawDistance === null || finalizedVsRawDistance < 18;'
-              insertion = '''  const locallyConsistent = finalizedVsRawDistance === null || finalizedVsRawDistance < 18;
-
-          const v3Publication = zoneData?.color_publication_v3;
-          const v3PublishedHex = safeHex(v3Publication?.hex || "");
-          const v3PublicationApplied =
-            v3Publication?.action === "publish_v3" &&
-            v3Publication?.applied_to_zone === true &&
-            finalizedHex &&
-            v3PublishedHex === finalizedHex;
-
-          if (v3PublicationApplied) {
-            return {
-              status: "resolved",
-              hex: finalizedHex,
-              source: "color_evidence_v3_publication",
-              confidence,
-              finalized_vs_raw_lab: finalizedVsRawDistance,
-              corroboration: {
-                signature: signatureCorroborates,
-                support: supportCorroborates,
-                raw_agreement: locallyConsistent,
-              },
-              publication: {
-                action: v3Publication.action,
-                reason: v3Publication.reason || null,
-                source: v3Publication.source || "color_evidence_v3",
-              },
-            };
-          }'''
-              if server.count(anchor) != 1:
-                  raise SystemExit(f"Expected exactly one resolver anchor match, found {server.count(anchor)}")
-              server = server.replace(anchor, insertion, 1)
-              server_path.write_text(server)
-
-          test_path = Path("test/colorEvidenceV3Handoff.test.js")
-          test = test_path.read_text()
-          if 'assert.equal(consumer.source, "color_evidence_v3_publication");' not in test:
-              old_assert = '''  assert.equal(consumer.hex, "#4E604F");
-            assert.equal(publishedZone.color_evidence_v1.color_publication_v3.action, "publish_v3");'''
-              new_assert = '''  assert.equal(consumer.hex, "#4E604F");
-            assert.equal(consumer.source, "color_evidence_v3_publication");
-            assert.equal(publishedZone.color_evidence_v1.color_publication_v3.action, "publish_v3");'''
-              if test.count(old_assert) != 1:
-                  raise SystemExit(f"Expected exactly one V3 provenance assertion anchor, found {test.count(old_assert)}")
-              test = test.replace(old_assert, new_assert, 1)
-              test_path.write_text(test)
-
       - name: Diagnose native color distance
         run: |
           node --input-type=module -e "import chroma from 'chroma-js'; console.log(JSON.stringify({version:chroma.version,distance:chroma.distance('#4E604F','#0D131E','lab'),rawHsl:chroma('#0D131E').hsl(),rawLab:chroma('#0D131E').lab(),greenLab:chroma('#4E604F').lab()}))"
@@ -111,14 +38,3 @@ jobs:
         run: NODE_ENV=test node --test --test-concurrency=1
       - name: Run full suite normally
         run: NODE_ENV=test npm test
-      - name: Commit validated production handoff
-        run: |
-          git config user.name "visioncore-ci"
-          git config user.email "actions@users.noreply.github.com"
-          git add src/server.js test/colorEvidenceV3Handoff.test.js
-          if git diff --cached --quiet; then
-            echo "No production handoff changes to commit."
-            exit 0
-          fi
-          git commit -m "feat: wire V3 publication into production garment analysis"
-          git push origin HEAD:visioncore-color-evidence-v3-fusion
