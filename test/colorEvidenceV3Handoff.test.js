@@ -55,6 +55,40 @@ test("V3 handoff publishes to the returned downstream zone without mutating the 
   assert.equal(zones.lower_garment.primary_color.hex, "#60321E");
 });
 
+test("V3 published correction survives the existing consumer resolver handoff", () => {
+  const zones = {
+    lower_garment: {
+      hex: "#60321E",
+      dominant_color: { hex: "#60321E" },
+      primary_color: { hex: "#60321E" },
+      confidence: 96,
+      publication_decision: "reject",
+      validation_decision: "rejected",
+      decision_consistency: { valid: false },
+      signature_color: null,
+    },
+  };
+
+  const attached = attachColorEvidenceToZones({
+    zones,
+    regions: [region("lower_garment", "#4E604F", 0.76)],
+    decodedImage: solidImage("#4E604F"),
+  });
+  const publishedZone = attached.lower_garment;
+  const rawClusters = [{ base: "#4E604F", pct: 0.76 }];
+  const consumer = resolveConsumerZonePrimary(
+    "lower_garment",
+    publishedZone,
+    rawClusters,
+    publishedZone.color_evidence_v1
+  );
+
+  assert.equal(publishedZone.color_publication_v3.action, "publish_v3");
+  assert.equal(publishedZone.hex, "#4E604F");
+  assert.equal(consumer.hex, "#4E604F");
+  assert.notEqual(consumer.source, "local_cluster_fallback");
+});
+
 test("V3 handoff preserves the downstream zone when authority is not earned", () => {
   const zones = {
     upper_garment: {
