@@ -49,6 +49,24 @@ test("green garment interior remains garment authority while black boundary beco
   assert.ok(result.scene_context_candidates.some((c) => c.hex === "#0D131E"));
 });
 
+test("coherent green interior stays high-purity when the current garment hypothesis is stale black", () => {
+  const result = evaluateSceneBoundaryPurityV1({
+    garmentHex: "#0D131E",
+    interiorSamples: [
+      { id: "center", hex: "#4E604F", family: "green" },
+      { id: "upper", hex: "#526554", family: "green" },
+      { id: "lower", hex: "#455947", family: "green" },
+    ],
+    boundarySamples: [],
+  });
+
+  assert.equal(result.available, true);
+  assert.ok(result.garment_agreement < 0.5);
+  assert.ok(result.region_purity >= 0.78);
+  assert.equal(result.decision_state, "clean");
+  assert.equal(result.policy.current_garment_hypothesis_role, "diagnostic_only");
+});
+
 test("warm stone boundary is retained as context without changing rich-brown garment authority", () => {
   const result = evaluateSceneBoundaryPurityV1({
     garmentHex: "#60321E",
