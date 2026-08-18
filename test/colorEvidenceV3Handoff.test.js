@@ -25,7 +25,7 @@ function region(zone, rawHex, pct = 0.76) {
   };
 }
 
-test("V3 handoff applies a supported pixel+raw winner to the actual downstream zone object", () => {
+test("V3 handoff publishes to the returned downstream zone without mutating the caller input", () => {
   const zones = {
     lower_garment: {
       hex: "#60321E",
@@ -38,6 +38,7 @@ test("V3 handoff applies a supported pixel+raw winner to the actual downstream z
     },
   };
 
+  const originalZone = zones.lower_garment;
   const attached = attachColorEvidenceToZones({
     zones,
     regions: [region("lower_garment", "#4E604F")],
@@ -48,8 +49,10 @@ test("V3 handoff applies a supported pixel+raw winner to the actual downstream z
   assert.equal(attached.lower_garment.color_publication_v3.applied_to_zone, true);
   assert.equal(attached.lower_garment.hex, "#4E604F");
   assert.equal(attached.lower_garment.primary_color.hex, "#4E604F");
-  assert.equal(zones.lower_garment.hex, "#4E604F");
-  assert.equal(zones.lower_garment.dominant_color.hex, "#4E604F");
+  assert.notEqual(attached.lower_garment, originalZone);
+  assert.equal(zones.lower_garment.hex, "#60321E");
+  assert.equal(zones.lower_garment.dominant_color.hex, "#60321E");
+  assert.equal(zones.lower_garment.primary_color.hex, "#60321E");
 });
 
 test("V3 handoff preserves the downstream zone when authority is not earned", () => {
