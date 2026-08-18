@@ -1,0 +1,40 @@
+name: Color Evidence V3
+
+on:
+  push:
+    branches:
+      - visioncore-color-evidence-v3-fusion
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-v3:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: visioncore-color-evidence-v3-fusion
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install
+      - name: Diagnose native color distance
+        run: |
+          node --input-type=module -e "import chroma from 'chroma-js'; console.log(JSON.stringify({version:chroma.version,distance:chroma.distance('#4E604F','#0D131E','lab'),rawHsl:chroma('#0D131E').hsl(),rawLab:chroma('#0D131E').lab(),greenLab:chroma('#4E604F').lab()}))"
+      - name: Run V3 focused regressions
+        run: NODE_ENV=test node --test test/colorEvidenceV3.test.js test/colorEvidenceV3Publication.test.js test/colorEvidenceV3Handoff.test.js
+      - name: Run V2 compatibility regression
+        run: NODE_ENV=test node --test test/colorEvidenceV2.test.js
+      - name: Run signature-color display-only guard
+        run: NODE_ENV=test node scripts/test-signature-color-static.mjs
+      - name: Run full suite serially
+        run: NODE_ENV=test node --test --test-concurrency=1
+      - name: Run full suite normally
+        run: NODE_ENV=test npm test

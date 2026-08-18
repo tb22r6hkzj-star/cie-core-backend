@@ -1,4 +1,5 @@
 import chroma from "chroma-js";
+import { evaluateColorPublicationV3 } from "./publicationPolicyV3.js";
 
 function clamp01(v) { return Math.max(0, Math.min(1, Number(v) || 0)); }
 function safeHex(hex) { try { return chroma(hex).hex().toUpperCase(); } catch { return null; } }
@@ -109,16 +110,97 @@ export function analyzeRegionColorEvidence({ decodedImage, bbox, expectedHex = n
   };
 }
 
+function buildV3RegionClusters(region = {}, zone = {}) {
+  const rawRegionColors = Array.isArray(region?.region_colors) ? region.region_colors : [];
+  const zoneColors = [
+    zone?.dominant_color,
+    ...(Array.isArray(zone?.support_colors) ? zone.support_colors : []),
+  ].filter(Boolean);
+  const source = rawRegionColors.length ? rawRegionColors : zoneColors;
+  return source
+    .map((color) => ({
+      base: safeHex(color?.hex || color?.base || ""),
+      pct: Number(color?.pct ?? color?.percentage ?? 0),
+    }))
+    .filter((color) => color.base)
+    .sort((a, b) => Number(b.pct || 0) - Number(a.pct || 0));
+}
+
+function getCurrentZoneResolution(zone = {}) {
+  const hex = safeHex(zone?.primary_color?.hex || zone?.dominant_color?.hex || zone?.hex || "");
+  return {
+    hex,
+    source: zone?.color_publication_v3?.source || zone?.publication_reason?.source || "finalized_zone_primary",
+  };
+}
+
+function applyV3PublishedColor(zone, publication) {
+  if (!zone || publication?.action !== "publish_v3" || !publication?.hex) return false;
+  const hex = safeHex(publication.hex);
+  if (!hex) return false;
+
+  zone.hex = hex;
+  if (zone.dominant_color) zone.dominant_color = { ...zone.dominant_color, hex };
+  else zone.dominant_color = { hex };
+  if (zone.primary_color) zone.primary_color = { ...zone.primary_color, hex };
+  else zone.primary_color = { hex };
+  zone.color_publication_v3 = {
+    action: publication.action,
+    reason: publication.reason,
+    source: publication.source,
+    hex,
+    fusion: publication.fusion,
+  };
+  return true;
+}
+
 export function attachColorEvidenceToZones({ zones = {}, regions = [], decodedImage = null } = {}) {
   const out = { ...zones };
   for (const zoneKey of ["upper_garment", "lower_garment", "body_garment", "outerwear"]) {
-    const zone = out[zoneKey];
-    if (!zone) continue;
+    const sourceZone = out[zoneKey];
+    if (!sourceZone) continue;
+    const zone = {
+      ...sourceZone,
+      dominant_color: sourceZone?.dominant_color ? { ...sourceZone.dominant_color } : sourceZone?.dominant_color,
+      primary_color: sourceZone?.primary_color ? { ...sourceZone.primary_color } : sourceZone?.primary_color,
+    };
     const candidates = regions.filter((r) => r?.zone === zoneKey);
     const region = candidates.sort((a, b) => Number(b?.confidence || 0) - Number(a?.confidence || 0))[0];
     const bbox = region?.bounding_box || region?.bbox || region?.mask_geometry?.bbox;
     const evidence = analyzeRegionColorEvidence({ decodedImage, bbox, expectedHex: zone?.hex || zone?.dominant_color?.hex });
-    out[zoneKey] = { ...zone, color_evidence_v1: evidence };
+    const clusters = buildV3RegionClusters(region, zone);
+    const publication = evaluateColorPublicationV3({
+      zoneData: zone,
+      clusters,
+      colorEvidence: evidence,
+      currentResolution: getCurrentZoneResolution(zone),
+    });
+
+    const published = applyV3PublishedColor(zone, publication);
+    const evidenceWithV3 = {
+      ...evidence,
+      color_evidence_v3: publication.fusion,
+      color_publication_v3: {
+        action: publication.action,
+        reason: publication.reason,
+        source: publication.source,
+        hex: publication.hex,
+        applied_to_zone: published,
+      },
+    };
+
+    out[zoneKey] = {
+      ...zone,
+      color_evidence_v1: evidenceWithV3,
+      color_evidence_v3: publication.fusion,
+      color_publication_v3: {
+        action: publication.action,
+        reason: publication.reason,
+        source: publication.source,
+        hex: publication.hex,
+        applied_to_zone: published,
+      },
+    };
   }
   return out;
 }

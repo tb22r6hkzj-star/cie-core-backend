@@ -6,9 +6,12 @@ const source = readFileSync(new URL("../src/server.js", import.meta.url), "utf8"
 assert.match(source, /function deriveSignatureColorDisplayRead\(zoneRead = \{\}, zoneKey = ""\)/);
 assert.match(source, /const zoneRead = inferZoneColorRead\([\s\S]*?\);[\s\S]*?const signatureColor = deriveSignatureColorDisplayRead\(zoneRead, zoneKey\);[\s\S]*?zones\[zoneKey\] = \{[\s\S]*?\.\.\.zoneRead,[\s\S]*?signature_color: signatureColor,/);
 
+// Keep signature_color display-only without confusing generic confidence fields such as
+// zoneData.score with an actual outfit-scoring consumer. These patterns intentionally
+// target named scoring surfaces rather than every occurrence of the token "score".
 const forbiddenConsumers = [
-  /signature_color[\s\S]{0,120}(score|scoring|outfit)/i,
-  /(score|scoring|outfit)[\s\S]{0,120}signature_color/i,
+  /signature_color[\s\S]{0,120}(scoreEngine|scoreOutfit|outfit_score|outfitScore|scoring)/i,
+  /(scoreEngine|scoreOutfit|outfit_score|outfitScore|scoring)[\s\S]{0,120}signature_color/i,
   /signature_color[\s\S]{0,120}(detected_palette|color_roles|retrieval|recommendation)/i,
   /(detected_palette|color_roles|retrieval|recommendation)[\s\S]{0,120}signature_color/i,
 ];
