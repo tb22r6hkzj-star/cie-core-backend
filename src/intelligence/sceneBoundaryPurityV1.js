@@ -78,8 +78,11 @@ export function evaluateSceneBoundaryPurityV1({
   const interiorCohesion = cohesion(interior, interiorHex);
   const boundaryContextLikelihood = boundaryDeltaE === null ? 0 : clamp01(boundaryDeltaE / 30);
   const boundaryGarmentOverlap = boundaryDeltaE === null ? 0 : clamp01(1 - boundaryDeltaE / 30);
-  const interiorSupport = garmentAgreement === null ? interiorCohesion : garmentAgreement;
-  const purityScore = clamp01(interiorSupport * 0.7 + interiorCohesion * 0.3);
+
+  // Purity describes the internal consistency of the observed garment pixels.
+  // Agreement with the current garment hypothesis is deliberately diagnostic only:
+  // a stale/contaminated publication must not be allowed to downgrade independent evidence.
+  const purityScore = interiorCohesion;
 
   const contextCandidates = boundary
     .filter((sample) => deltaE(interiorHex, sample.hex) >= 18)
@@ -109,6 +112,7 @@ export function evaluateSceneBoundaryPurityV1({
     scene_context_candidates: contextCandidates,
     policy: {
       garment_authority_source: "interior_evidence",
+      current_garment_hypothesis_role: "diagnostic_only",
       boundary_role: "context_only",
       scene_context_delta_e_min: 18,
     },
