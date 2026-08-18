@@ -1,5 +1,6 @@
 import chroma from "chroma-js";
 import { evaluateColorPublicationV3 } from "./publicationPolicyV3.js";
+import { evaluateSceneBoundaryPurityV1 } from "../sceneBoundaryPurityV1.js";
 
 function clamp01(v) { return Math.max(0, Math.min(1, Number(v) || 0)); }
 function safeHex(hex) { try { return chroma(hex).hex().toUpperCase(); } catch { return null; } }
@@ -64,18 +65,29 @@ function sampleWindow(decodedImage, bbox, spec) {
   return { hex, family: family(hex), sample_count: pixels.length };
 }
 
-const WINDOW_SPECS = [
-  { id: "center", x: 0.30, y: 0.30, w: 0.40, h: 0.40 },
-  { id: "upper", x: 0.30, y: 0.12, w: 0.40, h: 0.28 },
-  { id: "lower", x: 0.30, y: 0.60, w: 0.40, h: 0.28 },
-  { id: "left", x: 0.12, y: 0.30, w: 0.28, h: 0.40 },
-  { id: "right", x: 0.60, y: 0.30, w: 0.28, h: 0.40 },
+const INTERIOR_WINDOW_SPECS = [
+  { id: "center", x: 0.34, y: 0.30, w: 0.32, h: 0.40 },
+  { id: "upper", x: 0.34, y: 0.12, w: 0.32, h: 0.26 },
+  { id: "lower", x: 0.34, y: 0.62, w: 0.32, h: 0.26 },
+  { id: "left_interior", x: 0.30, y: 0.30, w: 0.18, h: 0.40 },
+  { id: "right_interior", x: 0.52, y: 0.30, w: 0.18, h: 0.40 },
+];
+
+const BOUNDARY_WINDOW_SPECS = [
+  { id: "left_edge", x: 0.02, y: 0.24, w: 0.16, h: 0.52 },
+  { id: "right_edge", x: 0.82, y: 0.24, w: 0.16, h: 0.52 },
+  { id: "top_edge", x: 0.22, y: 0.02, w: 0.56, h: 0.14 },
+  { id: "bottom_edge", x: 0.22, y: 0.84, w: 0.56, h: 0.14 },
 ];
 
 export function analyzeRegionColorEvidence({ decodedImage, bbox, expectedHex = null } = {}) {
   const normalized = normalizeBox(bbox);
   if (!normalized || !decodedImage?.data) return { available: false, reason: "missing_image_or_bbox" };
-  const windows = WINDOW_SPECS.map((spec) => {
+  const windows = INTERIOR_WINDOW_SPECS.map((spec) => {
+    const sampled = sampleWindow(decodedImage, normalized, spec);
+    return sampled ? { id: spec.id, ...sampled } : null;
+  }).filter(Boolean);
+  const boundaryWindows = BOUNDARY_WINDOW_SPECS.map((spec) => {
     const sampled = sampleWindow(decodedImage, normalized, spec);
     return sampled ? { id: spec.id, ...sampled } : null;
   }).filter(Boolean);
@@ -92,13 +104,22 @@ export function analyzeRegionColorEvidence({ decodedImage, bbox, expectedHex = n
   const meanDeltaE = pairDistances.length ? pairDistances.reduce((a, b) => a + b, 0) / pairDistances.length : 0;
   const spreadScore = clamp01(1 - meanDeltaE / 45);
   const expectedAgreement = expectedHex ? clamp01(1 - deltaE(expectedHex, consensusHex) / 45) : null;
-  const purityScore = clamp01(familyConsensus * 0.70 + spreadScore * 0.30);
+  const basePurityScore = clamp01(familyConsensus * 0.70 + spreadScore * 0.30);
+  const sceneBoundaryPurity = evaluateSceneBoundaryPurityV1({
+    interiorSamples: windows,
+    boundarySamples: boundaryWindows,
+    garmentHex: expectedHex || consensusHex,
+  });
+  const purityScore = sceneBoundaryPurity?.available
+    ? Math.min(basePurityScore, Number(sceneBoundaryPurity.region_purity ?? basePurityScore))
+    : basePurityScore;
 
   return {
     available: true,
     version: "color_evidence_v1",
     window_count: windows.length,
     windows,
+    boundary_windows: boundaryWindows,
     consensus_family: consensusFamily,
     consensus_hex: consensusHex,
     family_consensus: Number(familyConsensus.toFixed(3)),
@@ -106,6 +127,8 @@ export function analyzeRegionColorEvidence({ decodedImage, bbox, expectedHex = n
     spread_score: Number(spreadScore.toFixed(3)),
     region_purity: Number(purityScore.toFixed(3)),
     expected_agreement: expectedAgreement === null ? null : Number(expectedAgreement.toFixed(3)),
+    scene_boundary_purity: sceneBoundaryPurity,
+    scene_context_candidates: sceneBoundaryPurity?.scene_context_candidates || [],
     decision_state: purityScore >= 0.80 && familyConsensus >= 0.8 ? "supported" : purityScore >= 0.58 ? "observed" : "conflicted",
   };
 }
@@ -200,6 +223,7 @@ export function attachColorEvidenceToZones({ zones = {}, regions = [], decodedIm
         hex: publication.hex,
         applied_to_zone: published,
       },
+      scene_context_candidates: evidence.scene_context_candidates || [],
     };
   }
   return out;
