@@ -21,6 +21,21 @@ jobs:
       - name: Diagnose native color distance
         run: |
           node --input-type=module -e "import chroma from 'chroma-js'; console.log(JSON.stringify({version:chroma.version,distance:chroma.distance('#4E604F','#0D131E','lab'),rawHsl:chroma('#0D131E').hsl(),rawLab:chroma('#0D131E').lab(),greenLab:chroma('#4E604F').lab()}))"
+      - name: Inspect V3 production integration context
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const source = readFileSync("src/server.js", "utf8");
+          for (const needle of [
+            "export function resolveConsumerZonePrimary",
+            "const garmentAnalysis = inferGarmentAndMaterial({",
+          ]) {
+            const index = source.indexOf(needle);
+            if (index < 0) throw new Error(`Missing integration needle: ${needle}`);
+            console.log(`--- ${needle} ---`);
+            console.log(source.slice(Math.max(0, index - 300), Math.min(source.length, index + 5000)));
+          }
+          NODE
       - name: Run V3 focused regressions
         run: NODE_ENV=test node --test test/colorEvidenceV3.test.js test/colorEvidenceV3Publication.test.js test/colorEvidenceV3Handoff.test.js
       - name: Run V2 compatibility regression
