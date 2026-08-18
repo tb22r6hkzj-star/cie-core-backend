@@ -157,8 +157,13 @@ function applyV3PublishedColor(zone, publication) {
 export function attachColorEvidenceToZones({ zones = {}, regions = [], decodedImage = null } = {}) {
   const out = { ...zones };
   for (const zoneKey of ["upper_garment", "lower_garment", "body_garment", "outerwear"]) {
-    const zone = out[zoneKey];
-    if (!zone) continue;
+    const sourceZone = out[zoneKey];
+    if (!sourceZone) continue;
+    const zone = {
+      ...sourceZone,
+      dominant_color: sourceZone?.dominant_color ? { ...sourceZone.dominant_color } : sourceZone?.dominant_color,
+      primary_color: sourceZone?.primary_color ? { ...sourceZone.primary_color } : sourceZone?.primary_color,
+    };
     const candidates = regions.filter((r) => r?.zone === zoneKey);
     const region = candidates.sort((a, b) => Number(b?.confidence || 0) - Number(a?.confidence || 0))[0];
     const bbox = region?.bounding_box || region?.bbox || region?.mask_geometry?.bbox;
