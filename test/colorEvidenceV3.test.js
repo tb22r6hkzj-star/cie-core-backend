@@ -39,21 +39,26 @@ test("V3 fuses independent pixel and finalized identity evidence against a conta
   assert.ok(result.winning_sources.includes("pixel_consensus"));
   assert.ok(result.winning_sources.includes("finalized_identity"));
   assert.equal(result.independent_source_count, 2);
+  assert.equal(result.evidence_lineage_count, 2);
   assert.ok(result.decision_margin >= 0.12);
 });
 
-test("V3 prevents one strong pixel source from defeating two independent agreeing sources", () => {
+test("V3 does not treat finalized identity and raw cluster from one legacy pipeline as independent votes", () => {
   const result = fuseColorEvidenceV3({
     zoneData: zone("#27486B", 92),
     clusters: [{ base: "#27486B", pct: 0.82 }],
     colorEvidence: supportedEvidence("#4E604F", { region_purity: 0.96, spread_score: 0.96 }),
   });
 
-  assert.equal(result.decision_state, "supported");
+  assert.notEqual(result.decision_state, "supported");
   assert.equal(result.winner_hex, "#27486B");
   assert.ok(result.winning_sources.includes("finalized_identity"));
   assert.ok(result.winning_sources.includes("raw_primary_cluster"));
   assert.ok(!result.winning_sources.includes("pixel_consensus"));
+  assert.equal(result.independent_kind_count, 2);
+  assert.equal(result.evidence_lineage_count, 1);
+  assert.equal(result.independent_source_count, 1);
+  assert.deepEqual(result.evidence_lineages, ["legacy_zone_pipeline"]);
 });
 
 test("V3 withholds supported authority when all evidence sources disagree", () => {
@@ -84,6 +89,7 @@ test("V3 downweights rejected finalized identity instead of treating confidence 
   assert.ok(result.winning_sources.includes("pixel_consensus"));
   assert.ok(result.winning_sources.includes("raw_primary_cluster"));
   assert.ok(!result.winning_sources.includes("finalized_identity"));
+  assert.equal(result.evidence_lineage_count, 2);
 });
 
 test("V3 returns unavailable when every candidate color is missing or invalid", () => {
@@ -108,21 +114,26 @@ test("V3 normalizes percentage and unit confidence identically", () => {
   assert.equal(percentIdentity.reliability, unitIdentity.reliability);
 });
 
-test("V3 keeps the LAB agreement boundary strict at delta E 18", () => {
+test("V3 keeps the LAB agreement boundary strict at delta E 18 without inflating lineage independence", () => {
   const inside = fuseColorEvidenceV3({
     zoneData: zone("#4E604F", 100),
     clusters: [{ base: "#7A7A7A", pct: 0.9 }],
+    colorEvidence: supportedEvidence("#4E604F"),
   });
   const outside = fuseColorEvidenceV3({
     zoneData: zone("#4E604F", 100),
     clusters: [{ base: "#3E3E3E", pct: 0.9 }],
+    colorEvidence: supportedEvidence("#4E604F"),
   });
 
   assert.equal(inside.policy.agreement_delta_e, 18);
+  assert.equal(inside.policy.independence_basis, "evidence_lineage");
   assert.equal(inside.independent_source_count, 2);
   assert.equal(inside.decision_state, "supported");
-  assert.equal(outside.independent_source_count, 1);
-  assert.notEqual(outside.decision_state, "supported");
+  assert.ok(inside.winning_sources.includes("raw_primary_cluster"));
+  assert.equal(outside.independent_source_count, 2);
+  assert.equal(outside.decision_state, "supported");
+  assert.ok(!outside.winning_sources.includes("raw_primary_cluster"));
 });
 
 test("V3 observed pixel evidence cannot manufacture supported authority with one agreeing raw stream", () => {
@@ -148,5 +159,24 @@ test("V3 does not allow bridge evidence to create transitive consensus between e
   assert.ok(result.winning_sources.includes("finalized_identity"));
   assert.ok(result.winning_sources.includes("pixel_consensus"));
   assert.ok(!result.winning_sources.includes("raw_primary_cluster"));
+  assert.equal(result.independent_source_count, 2);
+});
+
+test("V3 exposes source lineage so downstream audits can distinguish fields from independent observations", () => {
+  const result = fuseColorEvidenceV3({
+    zoneData: zone("#4E604F", 82),
+    clusters: [{ base: "#4E604F", pct: 0.8 }],
+    colorEvidence: supportedEvidence("#4E604F"),
+  });
+
+  const finalized = result.sources.find((source) => source.id === "finalized_identity");
+  const raw = result.sources.find((source) => source.id === "raw_primary_cluster");
+  const pixel = result.sources.find((source) => source.id === "pixel_consensus");
+
+  assert.equal(finalized.lineage, "legacy_zone_pipeline");
+  assert.equal(raw.lineage, "legacy_zone_pipeline");
+  assert.equal(pixel.lineage, "independent_pixel_sampling");
+  assert.equal(result.independent_kind_count, 3);
+  assert.equal(result.evidence_lineage_count, 2);
   assert.equal(result.independent_source_count, 2);
 });
