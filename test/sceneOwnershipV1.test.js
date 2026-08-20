@@ -1,0 +1,75 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { buildSceneOwnershipV1 } from "../src/intelligence/sceneOwnershipV1.js";
+
+function zones() {
+  return {
+    zones: {
+      upper_garment: {
+        primary_color: { hex: "#935234", pct: 1 },
+        dominant_color: { hex: "#935234", pct: 0.98 },
+        scene_context_candidates: [{ hex: "#C9A778", pct: 0.22 }],
+      },
+      lower_garment: {
+        primary_color: { hex: "#3F5041", pct: 1 },
+        dominant_color: { hex: "#3F5041", pct: 0.98 },
+      },
+    },
+  };
+}
+
+test("separates owned outfit colors from positive scene context", () => {
+  const result = buildSceneOwnershipV1({
+    authoritativeGarmentZones: zones(),
+    normalizedColors: [
+      { hex: "#935234", pct: 0.3 },
+      { hex: "#3F5041", pct: 0.25 },
+      { hex: "#C9A778", pct: 0.2 },
+      { hex: "#EEE1CC", pct: 0.15 },
+    ],
+  });
+  assert.ok(result.outfit_palette.some((c) => c.hex === "#935234"));
+  assert.ok(result.outfit_palette.some((c) => c.hex === "#3F5041"));
+  assert.ok(!result.outfit_palette.some((c) => c.hex === "#C9A778"));
+  assert.ok(result.scene_palette.some((c) => c.hex === "#C9A778"));
+  assert.ok(result.unknown_palette.some((c) => c.hex === "#EEE1CC"));
+});
+
+test("global-only colors remain unknown rather than being guessed as background", () => {
+  const result = buildSceneOwnershipV1({
+    authoritativeGarmentZones: zones(),
+    normalizedColors: [{ hex: "#BDA17A", pct: 0.4 }],
+  });
+  assert.equal(result.scene_palette.length, 1);
+  assert.ok(result.unknown_palette.some((c) => c.hex === "#BDA17A"));
+});
+
+test("outfit reasoning palette requires positive outfit ownership", () => {
+  const result = buildSceneOwnershipV1({
+    authoritativeGarmentZones: zones(),
+    normalizedColors: [
+      { hex: "#C17D5A", pct: 0.7 },
+      { hex: "#C9A778", pct: 0.6 },
+    ],
+  });
+  assert.ok(result.outfit_palette.length >= 2);
+  assert.ok(result.outfit_palette.every((c) => c.ownership === "outfit"));
+  assert.ok(result.outfit_palette.every((c) => !["#C17D5A", "#C9A778"].includes(c.hex)));
+  assert.equal(result.policy.unknown_global_colors_can_vote_as_outfit_reasoning, false);
+});
+
+test("owned accessories remain outfit members instead of scene context", () => {
+  const garmentAnalysis = {
+    detected_items: [
+      { type: "footwear", primary_color: { hex: "#101216", pct: 0.9 } },
+      { type: "bag", dominant_color: { hex: "#4B2F25", pct: 0.8 } },
+    ],
+  };
+  const result = buildSceneOwnershipV1({
+    authoritativeGarmentZones: zones(),
+    garmentAnalysis,
+    normalizedColors: [],
+  });
+  assert.ok(result.ownership_map.outfit.some((c) => c.owner_zone === "footwear"));
+  assert.ok(result.ownership_map.outfit.some((c) => c.owner_zone === "bag"));
+});
