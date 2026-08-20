@@ -52,6 +52,44 @@ function lowerGarmentSecondaryIsOwned(candidate = {}) {
   return bodyShare >= 0.45 && separatorShare <= 0.32 && spatialPenalty >= 0.8;
 }
 
+function upperGarmentSecondaryIsOwned(candidate = {}) {
+  const source = String(candidate?.source || "");
+  if (source !== "upper_garment_purity_v1") return false;
+  const bodyShare = Number(candidate?.body_share);
+  const boundaryShare = Number(candidate?.boundary_share);
+  const underarmShare = Number(candidate?.underarm_share);
+  const spatialPenalty = Number(candidate?.spatial_penalty);
+  if (![bodyShare, boundaryShare, underarmShare, spatialPenalty].every(Number.isFinite)) return false;
+  return bodyShare >= 0.45 && boundaryShare <= 0.42 && underarmShare <= 0.28 && spatialPenalty >= 0.8;
+}
+
+function secondaryIsOwned(zoneKey, candidate = {}) {
+  if (zoneKey === "lower_garment") return lowerGarmentSecondaryIsOwned(candidate);
+  if (zoneKey === "upper_garment") return upperGarmentSecondaryIsOwned(candidate);
+  return false;
+}
+
+function provenanceFor(zoneKey, candidate = {}) {
+  const base = {
+    body_share: Number(candidate?.body_share || 0),
+    spatial_penalty: Number(candidate?.spatial_penalty || 0),
+  };
+  if (zoneKey === "lower_garment") {
+    return {
+      ...base,
+      separator_share: Number(candidate?.separator_share || 0),
+    };
+  }
+  if (zoneKey === "upper_garment") {
+    return {
+      ...base,
+      boundary_share: Number(candidate?.boundary_share || 0),
+      underarm_share: Number(candidate?.underarm_share || 0),
+    };
+  }
+  return base;
+}
+
 export function reconcileSignatureColorV2(zoneKey, zone = {}) {
   if (!GARMENT_ZONES.has(String(zoneKey || ""))) return zone;
   const existing = zone?.signature_color || null;
@@ -72,12 +110,12 @@ export function reconcileSignatureColorV2(zoneKey, zone = {}) {
     };
   }
 
-  if (zoneKey !== "lower_garment") {
+  if (!["lower_garment", "upper_garment"].includes(zoneKey)) {
     return {
       ...zone,
       signature_color_authority_v2: {
         applied: false,
-        decision: "non_lower_zone_passthrough",
+        decision: "zone_without_spatial_signature_policy",
         primary_hex: primaryHex,
         candidate_hex: existingHex,
       },
@@ -86,7 +124,8 @@ export function reconcileSignatureColorV2(zoneKey, zone = {}) {
 
   const candidate = findMatchingColor(zone, existingHex);
   const candidatePct = normalizePct(candidate?.pct ?? candidate?.percentage ?? existing?.pct ?? existing?.percentage);
-  const owned = candidate ? lowerGarmentSecondaryIsOwned(candidate) : false;
+  const owned = candidate ? secondaryIsOwned(zoneKey, candidate) : false;
+  const provenance = provenanceFor(zoneKey, candidate || {});
 
   if (owned && candidatePct >= 0.12) {
     return {
@@ -105,9 +144,7 @@ export function reconcileSignatureColorV2(zoneKey, zone = {}) {
         primary_hex: primaryHex,
         candidate_hex: existingHex,
         candidate_pct: candidatePct,
-        body_share: Number(candidate?.body_share || 0),
-        separator_share: Number(candidate?.separator_share || 0),
-        spatial_penalty: Number(candidate?.spatial_penalty || 0),
+        ...provenance,
       },
     };
   }
@@ -121,9 +158,7 @@ export function reconcileSignatureColorV2(zoneKey, zone = {}) {
       primary_hex: primaryHex,
       candidate_hex: existingHex,
       candidate_pct: candidatePct,
-      body_share: Number(candidate?.body_share || 0),
-      separator_share: Number(candidate?.separator_share || 0),
-      spatial_penalty: Number(candidate?.spatial_penalty || 0),
+      ...provenance,
     },
   };
 }
