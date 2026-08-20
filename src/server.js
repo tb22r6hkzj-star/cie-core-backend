@@ -46,6 +46,7 @@ import { analyzePerceptionV5 } from "./intelligence/perceptionV5/index.js";
 import { analyzePerceptionV6 } from "./intelligence/perceptionV6/index.js";
 import { attachColorEvidenceToZones } from "./intelligence/colorEvidence/index.js";
 import { applyPieceColorOwnershipV1 } from "./intelligence/pieceColorOwnershipV1.js";
+import { buildPublishedGarmentZonesV2 } from "./intelligence/publishedGarmentZonesV2.js";
 import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
 import { mapDinoLabel } from "./engines/ontology/dinoMappings.js";
 import {
@@ -4820,16 +4821,17 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     regions: garmentEvidenceRegions,
     decodedImage,
   });
+  const authoritativeGarmentZones = buildPublishedGarmentZonesV2(garmentZones, colorEvidenceShadowZones);
   const colorEvidenceByZone = Object.fromEntries(
-    Object.entries(colorEvidenceShadowZones || {}).map(([zone, value]) => [zone, value?.color_evidence_v1 || null])
+    Object.entries(authoritativeGarmentZones?.zones || {}).map(([zone, value]) => [zone, value?.color_evidence_v1 || null])
   );
   const garmentAnalysis = inferGarmentAndMaterial({
-  zones: colorEvidenceShadowZones,
+  zones: authoritativeGarmentZones.zones,
   normalizedColors,
   colorEvidenceByZone,
 });
 
-  const reasoningColors = buildPublishedGarmentColorAuthority(garmentZones, normalizedColors);
+  const reasoningColors = buildPublishedGarmentColorAuthority(authoritativeGarmentZones, normalizedColors);
   const reasoningBaseRoles = assignColorRoles(reasoningColors);
   const reasoningColorRoles = enforceStructuralPreservation(reasoningBaseRoles, reasoningColors);
   const scoreBreakdown = computeScoreBreakdown(reasoningColorRoles, reasoningColors);
@@ -4863,7 +4865,7 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     visual_importance: visualImportance,
     visual_intelligence: visualIntelligence,
     visual_intelligence_layer: visualIntelligence,
-    garment_zones: garmentZones,
+    garment_zones: authoritativeGarmentZones,
     piece_color_ownership_v1: pieceColorOwnership.summary,
     perception_v5: perceptionV5,
     perception_v6: perceptionV6,
@@ -4873,8 +4875,8 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
       stages: fullDinoLifecycleTrace,
       change_summary: buildDinoLifecycleChangeSummary(fullDinoLifecycleTrace),
     },
-    segmented_regions: garmentZones.segmented_regions || garmentEvidenceRegions,
-    region_color_analysis: garmentZones.region_color_analysis || [],
+    segmented_regions: authoritativeGarmentZones.segmented_regions || garmentEvidenceRegions,
+    region_color_analysis: authoritativeGarmentZones.region_color_analysis || [],
     detail_colors: visualIntelligence?.body_vs_detail?.detail_colors || [],
     accessory_analysis: (garmentAnalysis?.detected_items || []).filter((item) =>
       ["accessory_jewelry", "eyewear", "bag"].includes(item.type)
@@ -4883,10 +4885,10 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
       outfit: outfitScore,
       best_mode: best.score,
       zones: Object.fromEntries(
-        Object.entries(garmentZones?.zones || {}).map(([k, v]) => [k, Number(v?.confidence || v?.score || 0)])
+        Object.entries(authoritativeGarmentZones?.zones || {}).map(([k, v]) => [k, Number(v?.confidence || v?.score || 0)])
       ),
     },
-    confidence_breakdown: garmentZones?.confidence_breakdown || {},
+    confidence_breakdown: authoritativeGarmentZones?.confidence_breakdown || {},
     material_analysis: garmentAnalysis,
     pipeline: pipeline ? { ...pipeline, garment_zone_source: garmentZoneSource } : {
       sam_enabled: false,
