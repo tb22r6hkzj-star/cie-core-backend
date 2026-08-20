@@ -50,6 +50,7 @@ import { applyLowerGarmentPurityV2 } from "./intelligence/lowerGarmentPurityV2.j
 import { applyUpperGarmentPurityV1 } from "./intelligence/upperGarmentPurityV1.js";
 import { buildPublishedGarmentZonesV2 } from "./intelligence/publishedGarmentZonesV2.js";
 import { applySignatureColorAuthorityV2 } from "./intelligence/signatureColorAuthorityV2.js";
+import { buildSceneOwnershipV1 } from "./intelligence/sceneOwnershipV1.js";
 import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
 import { mapDinoLabel } from "./engines/ontology/dinoMappings.js";
 import {
@@ -4843,7 +4844,15 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
   colorEvidenceByZone,
 });
 
-  const reasoningColors = buildPublishedGarmentColorAuthority(authoritativeGarmentZones, normalizedColors);
+  const sceneOwnership = buildSceneOwnershipV1({
+    authoritativeGarmentZones,
+    garmentAnalysis,
+    normalizedColors,
+  });
+  const fallbackReasoningColors = buildPublishedGarmentColorAuthority(authoritativeGarmentZones, normalizedColors);
+  const reasoningColors = sceneOwnership.outfit_palette.length >= 2
+    ? sceneOwnership.outfit_palette
+    : fallbackReasoningColors;
   const reasoningBaseRoles = assignColorRoles(reasoningColors);
   const reasoningColorRoles = enforceStructuralPreservation(reasoningBaseRoles, reasoningColors);
   const scoreBreakdown = computeScoreBreakdown(reasoningColorRoles, reasoningColors);
@@ -4868,7 +4877,7 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     garment_identity: buildGarmentIdentity(normalizedColors[0], normalizedColors.slice(1, 4)),
     color_roles: reasoningColorRoles,
     color_authority: {
-      source: reasoningColors === normalizedColors ? "global_palette_fallback" : "published_garment_primaries",
+      source: reasoningColors === sceneOwnership.outfit_palette ? "scene_ownership_v1_outfit" : (reasoningColors === normalizedColors ? "global_palette_fallback" : "published_garment_primaries"),
       colors: reasoningColors.map((c) => ({ hex: c.hex, name: c.name || getColorName(c.hex), source_zone: c.source_zone || null, source: c.source || null })),
     },
     style_identity: styleIdentity,
@@ -4878,6 +4887,7 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     visual_intelligence: visualIntelligence,
     visual_intelligence_layer: visualIntelligence,
     garment_zones: authoritativeGarmentZones,
+    scene_ownership_v1: sceneOwnership,
     piece_color_ownership_v1: pieceColorOwnership.summary,
     lower_garment_purity_v2: lowerGarmentPurity.summary,
     upper_garment_purity_v1: upperGarmentPurity.summary,
