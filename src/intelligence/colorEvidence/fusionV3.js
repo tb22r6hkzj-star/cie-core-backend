@@ -1,6 +1,8 @@
 import chroma from "chroma-js";
 
 const AGREEMENT_DELTA_E = 18;
+const PIXEL_LINEAGE = "independent_pixel_sampling";
+const LEGACY_ZONE_LINEAGE = "legacy_zone_pipeline";
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, Number(value) || 0));
@@ -77,6 +79,7 @@ function buildSources({ zoneData = {}, clusters = [], colorEvidence = null } = {
     sources.push({
       id: "finalized_identity",
       kind: "identity",
+      lineage: LEGACY_ZONE_LINEAGE,
       hex: finalizedHex,
       reliability: finalizedReliability(zoneData),
     });
@@ -87,6 +90,7 @@ function buildSources({ zoneData = {}, clusters = [], colorEvidence = null } = {
     sources.push({
       id: "pixel_consensus",
       kind: "pixel",
+      lineage: PIXEL_LINEAGE,
       hex: evidenceHex,
       reliability: pixelReliability(colorEvidence),
     });
@@ -98,6 +102,7 @@ function buildSources({ zoneData = {}, clusters = [], colorEvidence = null } = {
     sources.push({
       id: "raw_primary_cluster",
       kind: "raw_cluster",
+      lineage: LEGACY_ZONE_LINEAGE,
       hex: rawHex,
       reliability: rawClusterReliability(raw),
     });
@@ -127,6 +132,7 @@ function addSourceToGroups(groups, source) {
 
 function scoreGroup(group) {
   const independentKinds = new Set(group.sources.map((source) => source.kind));
+  const independentLineages = new Set(group.sources.map((source) => source.lineage || source.kind));
   const complement = group.sources.reduce((remaining, source) => remaining * (1 - source.reliability * 0.65), 1);
   const score = clamp01(1 - complement);
   const strongest = group.sources.slice().sort((a, b) => b.reliability - a.reliability)[0];
@@ -134,7 +140,10 @@ function scoreGroup(group) {
     ...group,
     winner_hex: strongest.hex,
     score: Number(score.toFixed(3)),
-    independent_source_count: independentKinds.size,
+    independent_source_count: independentLineages.size,
+    independent_kind_count: independentKinds.size,
+    evidence_lineage_count: independentLineages.size,
+    evidence_lineages: [...independentLineages],
     source_ids: group.sources.map((source) => source.id),
   };
 }
@@ -173,6 +182,9 @@ export function fuseColorEvidenceV3({ zoneData = {}, clusters = [], colorEvidenc
     runner_up_score: runnerUp?.score || 0,
     decision_margin: Number(margin.toFixed(3)),
     independent_source_count: winner?.independent_source_count || 0,
+    independent_kind_count: winner?.independent_kind_count || 0,
+    evidence_lineage_count: winner?.evidence_lineage_count || 0,
+    evidence_lineages: winner?.evidence_lineages || [],
     winning_sources: winner?.source_ids || [],
     sources: sources.map((source) => ({
       ...source,
@@ -182,6 +194,9 @@ export function fuseColorEvidenceV3({ zoneData = {}, clusters = [], colorEvidenc
       winner_hex: group.winner_hex,
       score: group.score,
       independent_source_count: group.independent_source_count,
+      independent_kind_count: group.independent_kind_count,
+      evidence_lineage_count: group.evidence_lineage_count,
+      evidence_lineages: group.evidence_lineages,
       source_ids: group.source_ids,
     })),
     policy: {
@@ -189,6 +204,11 @@ export function fuseColorEvidenceV3({ zoneData = {}, clusters = [], colorEvidenc
       supported_score_min: 0.72,
       supported_margin_min: 0.12,
       supported_independent_sources_min: 2,
+      independence_basis: "evidence_lineage",
+      lineage_contract: {
+        independent_pixel_sampling: "independent garment-interior pixel evidence",
+        legacy_zone_pipeline: "finalized identity and raw cluster share one upstream lineage",
+      },
     },
   };
 }
