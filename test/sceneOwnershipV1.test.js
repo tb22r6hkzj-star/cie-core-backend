@@ -9,6 +9,11 @@ function zones() {
         primary_color: { hex: "#935234", pct: 1 },
         dominant_color: { hex: "#935234", pct: 0.98 },
         scene_context_candidates: [{ hex: "#C9A778", pct: 0.22 }],
+        detected_colors: [
+          { hex: "#935234", pct: 0.98 },
+          { hex: "#C17D5A", pct: 0.22 },
+          { hex: "#526455", pct: 0.19 },
+        ],
       },
       lower_garment: {
         primary_color: { hex: "#3F5041", pct: 1 },
@@ -38,10 +43,23 @@ test("separates owned outfit colors from positive scene context", () => {
 test("global-only colors remain unknown rather than being guessed as background", () => {
   const result = buildSceneOwnershipV1({
     authoritativeGarmentZones: zones(),
-    normalizedColors: [{ hex: "#BDA17A", pct: 0.4 }],
+    normalizedColors: [{ hex: "#466A8A", pct: 0.4 }],
   });
   assert.equal(result.scene_palette.length, 1);
-  assert.ok(result.unknown_palette.some((c) => c.hex === "#BDA17A"));
+  assert.ok(result.unknown_palette.some((c) => c.hex === "#466A8A"));
+});
+
+test("raw garment detected colors are not automatically positive outfit ownership", () => {
+  const result = buildSceneOwnershipV1({
+    authoritativeGarmentZones: zones(),
+    normalizedColors: [
+      { hex: "#C17D5A", pct: 0.3 },
+      { hex: "#526455", pct: 0.2 },
+    ],
+  });
+  assert.ok(!result.outfit_palette.some((c) => c.hex === "#C17D5A"));
+  assert.ok(!result.outfit_palette.some((c) => c.hex === "#526455"));
+  assert.equal(result.policy.raw_region_colors_are_positive_outfit_ownership, false);
 });
 
 test("outfit reasoning palette requires positive outfit ownership", () => {
