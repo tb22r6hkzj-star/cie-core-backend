@@ -39,7 +39,7 @@ test("publication V3 replaces contaminated current color when two independent so
   assert.equal(result.source, "color_evidence_v3_fusion");
 });
 
-test("publication V3 confirms an already-correct current resolution instead of rewriting it", () => {
+test("publication V3 preserves an already-correct current resolution when only one upstream lineage supports it", () => {
   const result = evaluateColorPublicationV3({
     zoneData: zone("#27486B", 92),
     clusters: [{ base: "#27486B", pct: 0.82 }],
@@ -47,9 +47,26 @@ test("publication V3 confirms an already-correct current resolution instead of r
     currentResolution: { hex: "#27486B", source: "trusted_finalized_identity" },
   });
 
+  assert.equal(result.action, "preserve_current");
+  assert.equal(result.hex, "#27486B");
+  assert.equal(result.source, "trusted_finalized_identity");
+  assert.equal(result.fusion.evidence_lineage_count, 1);
+  assert.deepEqual(result.fusion.evidence_lineages, ["legacy_zone_pipeline"]);
+});
+
+test("publication V3 confirms an already-correct current resolution when independent pixel evidence agrees", () => {
+  const result = evaluateColorPublicationV3({
+    zoneData: zone("#27486B", 92),
+    clusters: [{ base: "#27486B", pct: 0.82 }],
+    colorEvidence: supportedEvidence("#27486B", { region_purity: 0.96, spread_score: 0.96 }),
+    currentResolution: { hex: "#27486B", source: "trusted_finalized_identity" },
+  });
+
   assert.equal(result.action, "confirm_current");
   assert.equal(result.hex, "#27486B");
   assert.equal(result.source, "trusted_finalized_identity");
+  assert.equal(result.fusion.evidence_lineage_count, 2);
+  assert.ok(result.fusion.winning_sources.includes("pixel_consensus"));
 });
 
 test("publication V3 preserves current resolution when evidence lacks independent agreement", () => {
