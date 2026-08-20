@@ -1,0 +1,36 @@
+name: Piece Color Ownership V1
+
+on:
+  push:
+    branches:
+      - visioncore-piece-color-ownership-v1
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-piece-ownership:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install
+      - name: Run Piece-Level Color Ownership regressions
+        run: NODE_ENV=test node --test test/pieceColorOwnershipV1.test.js
+      - name: Run color-authority compatibility regressions
+        run: NODE_ENV=test node --test test/colorEvidenceV3.test.js test/colorEvidenceV3Publication.test.js test/colorEvidenceV3Handoff.test.js test/sceneBoundaryPurityV1.test.js test/colorEvidenceV2.test.js
+      - name: Validate syntax
+        run: node --check src/server.js && node --check src/intelligence/pieceColorOwnershipV1.js
+      - name: Run full suite serially
+        run: NODE_ENV=test node --test --test-concurrency=1
+      - name: Run full suite normally
+        run: NODE_ENV=test npm test
