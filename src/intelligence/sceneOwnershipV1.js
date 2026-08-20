@@ -52,26 +52,40 @@ function pushUnique(target, entry, threshold = 6) {
   }
 }
 
+function certifiedSignature(zone = {}) {
+  const signature = zone?.signature_color;
+  if (!signature) return null;
+  const state = String(signature?.authority_state || "");
+  if (state === "owned_secondary") return signature;
+  return null;
+}
+
 function collectOutfitOwned(authoritativeGarmentZones = {}, garmentAnalysis = {}) {
   const out = [];
   for (const [zoneKey, zone] of Object.entries(authoritativeGarmentZones?.zones || {})) {
     if (!OUTFIT_ZONES.has(zoneKey)) continue;
+
+    // Scene Ownership V1 is intentionally conservative. Published primary/dominant
+    // colors are positive outfit evidence. Raw region/detected palettes remain
+    // diagnostic unless another layer explicitly certifies ownership.
     const candidates = [
       zone?.primary_color,
       zone?.dominant_color,
-      ...(Array.isArray(zone?.region_colors) ? zone.region_colors : []),
-      ...(Array.isArray(zone?.detected_colors) ? zone.detected_colors : []),
+      certifiedSignature(zone),
     ].filter(Boolean);
+
     for (const candidate of candidates) {
       const normalized = normalizeColorEntry(candidate, {
         ownership: "outfit",
         owner_zone: zoneKey,
-        source: candidate?.source || "published_zone",
+        source: candidate?.source || "published_zone_authority",
       });
       if (normalized) pushUnique(out, normalized);
     }
   }
 
+  // Accessory/item primary and dominant colors are positively owned by their
+  // detected piece; keep them available for outfit-level composition reasoning.
   for (const item of garmentAnalysis?.detected_items || []) {
     if (!OUTFIT_ZONES.has(String(item?.type || ""))) continue;
     const candidates = [item?.primary_color, item?.dominant_color].filter(Boolean);
@@ -79,7 +93,7 @@ function collectOutfitOwned(authoritativeGarmentZones = {}, garmentAnalysis = {}
       const normalized = normalizeColorEntry(candidate, {
         ownership: "outfit",
         owner_zone: item.type,
-        source: candidate?.source || "detected_item",
+        source: candidate?.source || "detected_item_authority",
       });
       if (normalized) pushUnique(out, normalized);
     }
@@ -181,6 +195,7 @@ export function buildSceneOwnershipV1({
       detection_implies_ownership: false,
       ownership_implies_outfit_membership: false,
       scene_context_can_vote_as_garment_truth: false,
+      raw_region_colors_are_positive_outfit_ownership: false,
       unknown_global_colors_can_vote_as_outfit_reasoning: false,
       outfit_reasoning_requires_positive_outfit_ownership: true,
     },
