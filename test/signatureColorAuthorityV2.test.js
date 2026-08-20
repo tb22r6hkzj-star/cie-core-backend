@@ -12,6 +12,16 @@ function lowerZone({ primary = "#4E604F", signature = "#0A0D12", regionColors = 
   };
 }
 
+function upperZone({ primary = "#60321E", signature = "#20110B", regionColors = [] } = {}) {
+  return {
+    hex: primary,
+    primary_color: { hex: primary, pct: 1 },
+    dominant_color: { hex: primary, pct: 0.96 },
+    signature_color: signature ? { hex: signature, pct: 0.56 } : null,
+    region_colors: regionColors,
+  };
+}
+
 test("rejects shadow-heavy lower-garment secondary as signature and falls back to primary", () => {
   const zone = lowerZone({
     regionColors: [
@@ -46,16 +56,38 @@ test("does not demote true black lower-garment primary", () => {
   assert.equal(result.signature_color_authority_v2.decision, "preserve_primary_signature");
 });
 
-test("leaves upper garment signature behavior unchanged until upper spatial purity exists", () => {
-  const upper = {
-    hex: "#60321E",
-    primary_color: { hex: "#60321E" },
-    dominant_color: { hex: "#60321E" },
-    signature_color: { hex: "#20110B" },
-  };
+test("rejects boundary and underarm-heavy upper-garment dark secondary as signature", () => {
+  const upper = upperZone({
+    regionColors: [
+      { hex: "#60321E", pct: 0.91, source: "upper_garment_purity_v1", body_share: 0.79, boundary_share: 0.12, underarm_share: 0.09, spatial_penalty: 1 },
+      { hex: "#20110B", pct: 0.42, source: "upper_garment_purity_v1", body_share: 0.21, boundary_share: 0.49, underarm_share: 0.30, spatial_penalty: 0.42 },
+    ],
+  });
   const result = reconcileSignatureColorV2("upper_garment", upper);
-  assert.equal(result.signature_color.hex, "#20110B");
-  assert.equal(result.signature_color_authority_v2.decision, "non_lower_zone_passthrough");
+  assert.equal(result.signature_color.hex, "#60321E");
+  assert.equal(result.signature_color_authority_v2.decision, "reject_unowned_secondary");
+});
+
+test("preserves genuinely body-supported upper-garment secondary signature", () => {
+  const upper = upperZone({
+    signature: "#D5C2A8",
+    regionColors: [
+      { hex: "#60321E", pct: 0.61, source: "upper_garment_purity_v1", body_share: 0.74, boundary_share: 0.16, underarm_share: 0.10, spatial_penalty: 1 },
+      { hex: "#D5C2A8", pct: 0.31, source: "upper_garment_purity_v1", body_share: 0.58, boundary_share: 0.24, underarm_share: 0.18, spatial_penalty: 1 },
+    ],
+  });
+  const result = reconcileSignatureColorV2("upper_garment", upper);
+  assert.equal(result.signature_color.hex, "#D5C2A8");
+  assert.equal(result.signature_color_authority_v2.decision, "preserve_owned_secondary");
+});
+
+test("does not demote true black upper-garment primary", () => {
+  const upper = upperZone({ primary: "#111111", signature: "#111111", regionColors: [
+    { hex: "#111111", pct: 0.9, source: "upper_garment_purity_v1", body_share: 0.84, boundary_share: 0.10, underarm_share: 0.06, spatial_penalty: 1 },
+  ] });
+  const result = reconcileSignatureColorV2("upper_garment", upper);
+  assert.equal(result.signature_color.hex, "#111111");
+  assert.equal(result.signature_color_authority_v2.decision, "preserve_primary_signature");
 });
 
 test("applies to a zones map without removing non-garment zones", () => {
