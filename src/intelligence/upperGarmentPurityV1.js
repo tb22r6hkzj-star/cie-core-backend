@@ -1,4 +1,5 @@
 import chroma from "chroma-js";
+import { applyGarmentToneStabilityV1 } from "./garmentToneStabilityV1.js";
 
 const UPPER_ZONE = "upper_garment";
 const DINO_SOURCE_TYPES = new Set(["grounding_dino", "dino_detection"]);
@@ -234,12 +235,15 @@ export function applyUpperGarmentPurityV1({ decodedImage = null, regions = [] } 
     };
   });
 
+  const toneStability = applyGarmentToneStabilityV1({ decodedImage, regions: out });
+
   return {
-    regions: out,
+    regions: toneStability.regions,
     summary: {
       available: true,
       version: "upper_garment_purity_v1",
       corrected_region_count: correctedRegionCount,
+      tone_stability: toneStability.summary,
       policy: {
         color_specific_bias: false,
         body_weight: 1,
@@ -248,6 +252,7 @@ export function applyUpperGarmentPurityV1({ decodedImage = null, regions = [] } 
         outer_edge_weight: 0.28,
         deep_underarm_weight: 0.12,
         deep_context_cluster_penalty: 0.42,
+        tone_stability_stage: "garment_tone_stability_v1",
       },
     },
   };
