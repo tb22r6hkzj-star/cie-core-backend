@@ -1,0 +1,34 @@
+name: Lower Garment Purity V2
+
+on:
+  push:
+    branches:
+      - visioncore-lower-garment-purity-v2
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-lower-garment-purity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install
+      - name: Run lower-garment purity regressions
+        run: NODE_ENV=test node --test test/lowerGarmentPurityV2.test.js test/pieceColorOwnershipV1.test.js test/colorEvidenceV3.test.js test/colorEvidenceV3Publication.test.js test/colorEvidenceV3Handoff.test.js test/sceneBoundaryPurityV1.test.js test/publishedGarmentZonesV2.test.js
+      - name: Validate syntax
+        run: node --check src/server.js && node --check src/intelligence/lowerGarmentPurityV2.js
+      - name: Run full suite serially
+        run: NODE_ENV=test node --test --test-concurrency=1
+      - name: Run full suite normally
+        run: NODE_ENV=test npm test
