@@ -48,6 +48,7 @@ import { attachColorEvidenceToZones } from "./intelligence/colorEvidence/index.j
 import { applyPieceColorOwnershipV1 } from "./intelligence/pieceColorOwnershipV1.js";
 import { applyLowerGarmentPurityV2 } from "./intelligence/lowerGarmentPurityV2.js";
 import { buildPublishedGarmentZonesV2 } from "./intelligence/publishedGarmentZonesV2.js";
+import { applySignatureColorAuthorityV2 } from "./intelligence/signatureColorAuthorityV2.js";
 import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
 import { mapDinoLabel } from "./engines/ontology/dinoMappings.js";
 import {
@@ -4826,7 +4827,8 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     regions: garmentEvidenceRegions,
     decodedImage,
   });
-  const authoritativeGarmentZones = buildPublishedGarmentZonesV2(garmentZones, colorEvidenceShadowZones);
+  const signatureAuthorityZones = applySignatureColorAuthorityV2(colorEvidenceShadowZones);
+  const authoritativeGarmentZones = buildPublishedGarmentZonesV2(garmentZones, signatureAuthorityZones);
   const colorEvidenceByZone = Object.fromEntries(
     Object.entries(authoritativeGarmentZones?.zones || {}).map(([zone, value]) => [zone, value?.color_evidence_v1 || null])
   );
