@@ -45,6 +45,7 @@ import { PNG } from "pngjs";
 import { analyzePerceptionV5 } from "./intelligence/perceptionV5/index.js";
 import { analyzePerceptionV6 } from "./intelligence/perceptionV6/index.js";
 import { attachColorEvidenceToZones } from "./intelligence/colorEvidence/index.js";
+import { applyPieceColorOwnershipV1 } from "./intelligence/pieceColorOwnershipV1.js";
 import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
 import { mapDinoLabel } from "./engines/ontology/dinoMappings.js";
 import {
@@ -4693,7 +4694,12 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
   const dedupedDinoRegions = samRegions.length
     ? dinoRegions.filter((region) => !samZones.has(region?.zone))
     : dinoRegions;
-  const garmentEvidenceRegions = samRegions.length ? samRegions.concat(dedupedDinoRegions) : dinoRegions;
+  const rawGarmentEvidenceRegions = samRegions.length ? samRegions.concat(dedupedDinoRegions) : dinoRegions;
+  const pieceColorOwnership = applyPieceColorOwnershipV1({
+    decodedImage,
+    regions: rawGarmentEvidenceRegions,
+  });
+  const garmentEvidenceRegions = pieceColorOwnership.regions;
   const garmentZoneSource = getGarmentZoneSource(samRegions, dedupedDinoRegions);
   const dinoLifecycleTrace = [
     summarizeDinoStageForTrace("analysis.dinoGarmentRegions", dinoGarmentRegions),
@@ -4858,6 +4864,7 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     visual_intelligence: visualIntelligence,
     visual_intelligence_layer: visualIntelligence,
     garment_zones: garmentZones,
+    piece_color_ownership_v1: pieceColorOwnership.summary,
     perception_v5: perceptionV5,
     perception_v6: perceptionV6,
     perception_v6_mode: perceptionV6Mode,
