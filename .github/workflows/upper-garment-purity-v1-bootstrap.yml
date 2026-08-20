@@ -1,0 +1,40 @@
+name: Upper Garment Purity V1 Bootstrap
+
+on:
+  push:
+    branches:
+      - visioncore-upper-garment-purity-v1
+
+permissions:
+  contents: write
+
+jobs:
+  integrate-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: visioncore-upper-garment-purity-v1
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install
+      - name: Apply guarded server integration
+        run: node scripts/apply-upper-garment-purity-v1.mjs
+      - name: Run upper-garment purity regressions
+        run: NODE_ENV=test node --test test/upperGarmentPurityV1.test.js test/signatureColorAuthorityV2.test.js test/lowerGarmentPurityV2.test.js test/pieceColorOwnershipV1.test.js test/colorEvidenceV3.test.js test/colorEvidenceV3Publication.test.js test/colorEvidenceV3Handoff.test.js test/sceneBoundaryPurityV1.test.js test/publishedGarmentZonesV2.test.js
+      - name: Validate syntax
+        run: node --check src/server.js && node --check src/intelligence/upperGarmentPurityV1.js && node --check src/intelligence/signatureColorAuthorityV2.js
+      - name: Commit integration when needed
+        run: |
+          if git diff --quiet -- src/server.js; then
+            echo "Upper Garment Purity V1 integration already present."
+            exit 0
+          fi
+          git config user.name "visioncore-ci"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/server.js
+          git commit -m "feat: integrate upper garment purity v1"
+          git push origin HEAD:visioncore-upper-garment-purity-v1
