@@ -22,8 +22,8 @@ function round3(value) {
   return Math.round(Number(value || 0) * 1000) / 1000;
 }
 
-function normalizeBox(region = {}, imageWidth = 0, imageHeight = 0) {
-  const box = region?.bounding_box || region?.bbox || region?.mask_geometry?.bbox || null;
+function normalizeBox(regionOrBox = {}, imageWidth = 0, imageHeight = 0) {
+  const box = regionOrBox?.bounding_box || regionOrBox?.bbox || regionOrBox?.mask_geometry?.bbox || regionOrBox || null;
   if (!box) return null;
 
   let x = Number(box.x ?? box.left ?? box.x_min);
