@@ -47,6 +47,7 @@ import { analyzePerceptionV6 } from "./intelligence/perceptionV6/index.js";
 import { attachColorEvidenceToZones } from "./intelligence/colorEvidence/index.js";
 import { applyPieceColorOwnershipV1 } from "./intelligence/pieceColorOwnershipV1.js";
 import { applyLowerGarmentPurityV2 } from "./intelligence/lowerGarmentPurityV2.js";
+import { applyUpperGarmentPurityV1 } from "./intelligence/upperGarmentPurityV1.js";
 import { buildPublishedGarmentZonesV2 } from "./intelligence/publishedGarmentZonesV2.js";
 import { applySignatureColorAuthorityV2 } from "./intelligence/signatureColorAuthorityV2.js";
 import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
@@ -4706,7 +4707,11 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     decodedImage,
     regions: pieceColorOwnership.regions,
   });
-  const garmentEvidenceRegions = lowerGarmentPurity.regions;
+  const upperGarmentPurity = applyUpperGarmentPurityV1({
+    decodedImage,
+    regions: lowerGarmentPurity.regions,
+  });
+  const garmentEvidenceRegions = upperGarmentPurity.regions;
   const garmentZoneSource = getGarmentZoneSource(samRegions, dedupedDinoRegions);
   const dinoLifecycleTrace = [
     summarizeDinoStageForTrace("analysis.dinoGarmentRegions", dinoGarmentRegions),
@@ -4875,6 +4880,7 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     garment_zones: authoritativeGarmentZones,
     piece_color_ownership_v1: pieceColorOwnership.summary,
     lower_garment_purity_v2: lowerGarmentPurity.summary,
+    upper_garment_purity_v1: upperGarmentPurity.summary,
     perception_v5: perceptionV5,
     perception_v6: perceptionV6,
     perception_v6_mode: perceptionV6Mode,
