@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   test-v3:
@@ -18,13 +18,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: visioncore-color-evidence-v3-fusion
+          ref: visioncore-scene-ownership-v1
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Install dependencies
         run: npm install
+      - name: Apply guarded Scene Ownership V1 integration
+        run: node scripts/apply-scene-ownership-v1.mjs
+      - name: Run Scene Ownership regressions
+        run: NODE_ENV=test node --test test/sceneOwnershipV1.test.js
+      - name: Commit Scene Ownership integration when needed
+        run: |
+          if git diff --quiet -- src/server.js; then
+            echo "Scene Ownership V1 integration already present."
+          else
+            git config user.name "visioncore-ci"
+            git config user.email "actions@users.noreply.github.com"
+            git add src/server.js
+            git commit -m "feat: integrate scene ownership v1"
+            git push origin HEAD:visioncore-scene-ownership-v1
+          fi
       - name: Diagnose native color distance
         run: |
           node --input-type=module -e "import chroma from 'chroma-js'; console.log(JSON.stringify({version:chroma.version,distance:chroma.distance('#4E604F','#0D131E','lab'),rawHsl:chroma('#0D131E').hsl(),rawLab:chroma('#0D131E').lab(),greenLab:chroma('#4E604F').lab()}))"
