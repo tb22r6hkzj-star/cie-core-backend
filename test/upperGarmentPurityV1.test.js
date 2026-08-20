@@ -51,8 +51,9 @@ test("brown shirt body beats dark neckline, underarm gaps, and lower boundary co
   const result = applyUpperGarmentPurityV1({ decodedImage: img, regions: [upperRegion()] });
   const region = result.regions[0];
   assert.equal(region.color_debug.upper_garment_purity_v1.applied, true);
+  assert.equal(region.color_debug.garment_tone_stability_v1.applied, true);
   assert.ok(chroma.distance(region.dominant_hex, "#60321E", "lab") < 18);
-  assert.equal(region.region_colors[0].source, "upper_garment_purity_v1");
+  assert.equal(region.region_colors[0].source, "garment_tone_stability_v1");
   assert.ok(region.region_colors[0].body_share >= 0.45);
 });
 
