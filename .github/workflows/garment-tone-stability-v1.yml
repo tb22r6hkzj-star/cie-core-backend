@@ -1,0 +1,31 @@
+name: Garment Tone Stability V1
+
+on:
+  push:
+    branches:
+      - visioncore-garment-tone-stability-v1
+  pull_request:
+    paths:
+      - "src/intelligence/garmentToneStabilityV1.js"
+      - "src/intelligence/upperGarmentPurityV1.js"
+      - "test/garmentToneStabilityV1.test.js"
+      - ".github/workflows/garment-tone-stability-v1.yml"
+
+jobs:
+  validate-tone-stability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install
+      - name: Run tone-stability regressions
+        run: NODE_ENV=test node --test test/garmentToneStabilityV1.test.js test/upperGarmentPurityV1.test.js test/signatureColorAuthorityV2.test.js test/lowerGarmentPurityV2.test.js test/pieceColorOwnershipV1.test.js test/colorEvidenceV3.test.js test/colorEvidenceV3Publication.test.js test/colorEvidenceV3Handoff.test.js test/sceneBoundaryPurityV1.test.js test/publishedGarmentZonesV2.test.js
+      - name: Validate syntax
+        run: node --check src/intelligence/garmentToneStabilityV1.js && node --check src/intelligence/upperGarmentPurityV1.js
+      - name: Run full suite serially
+        run: npm test -- --test-concurrency=1
+      - name: Run full suite normally
+        run: npm test
