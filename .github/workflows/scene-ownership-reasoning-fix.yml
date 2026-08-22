@@ -1,0 +1,41 @@
+name: Scene Ownership Reasoning Fix
+
+on:
+  push:
+    branches:
+      - visioncore-scene-ownership-v1
+    paths:
+      - .github/workflows/scene-ownership-reasoning-fix.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: visioncore-scene-ownership-v1
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply guarded server patch
+        run: node scripts/apply-scene-ownership-reasoning-fix.mjs
+      - name: Validate focused Scene Ownership tests and syntax
+        run: |
+          npm install
+          NODE_ENV=test node --test test/sceneOwnershipV1.test.js
+          node --check src/server.js
+          node --check src/intelligence/sceneOwnershipV1.js
+      - name: Commit permanent fix and remove bootstrap artifacts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/server.js
+          git rm scripts/apply-scene-ownership-reasoning-fix.mjs
+          git rm .github/workflows/scene-ownership-reasoning-fix.yml
+          git commit -m "Fix Scene Ownership reasoning palette handoff"
+          git push origin HEAD:visioncore-scene-ownership-v1
