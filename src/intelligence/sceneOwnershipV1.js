@@ -30,13 +30,17 @@ function distance(a, b) {
 }
 
 function normalizeColorEntry(entry = {}, extra = {}) {
-  const hex = safeHex(entry?.hex || entry?.base || entry?.color || "");
+  const isString = typeof entry === "string";
+  const rawColor = isString ? entry : entry?.hex || entry?.base || entry?.color || "";
+  const hex = safeHex(rawColor);
   if (!hex) return null;
   return {
-    ...entry,
+    ...(isString ? {} : entry),
     ...extra,
     hex,
-    pct: Number(entry?.pct ?? entry?.percentage ?? extra?.pct ?? 0) || 0,
+    pct: Number(
+      (isString ? undefined : entry?.pct ?? entry?.percentage) ?? extra?.pct ?? 0
+    ) || 0,
   };
 }
 
@@ -78,7 +82,9 @@ function collectOutfitOwned(authoritativeGarmentZones = {}, garmentAnalysis = {}
       const normalized = normalizeColorEntry(candidate, {
         ownership: "outfit",
         owner_zone: zoneKey,
-        source: candidate?.source || "published_zone_authority",
+        source:
+          (typeof candidate === "object" && candidate?.source) ||
+          "published_zone_authority",
       });
       if (normalized) pushUnique(out, normalized);
     }
@@ -93,7 +99,9 @@ function collectOutfitOwned(authoritativeGarmentZones = {}, garmentAnalysis = {}
       const normalized = normalizeColorEntry(candidate, {
         ownership: "outfit",
         owner_zone: item.type,
-        source: candidate?.source || "detected_item_authority",
+        source:
+          (typeof candidate === "object" && candidate?.source) ||
+          "detected_item_authority",
       });
       if (normalized) pushUnique(out, normalized);
     }
@@ -116,7 +124,9 @@ function collectSceneContext(authoritativeGarmentZones = {}) {
         ownership: "scene",
         owner_zone: "scene_context",
         source_zone: zoneKey,
-        source: candidate?.source || "scene_boundary_context",
+        source:
+          (typeof candidate === "object" && candidate?.source) ||
+          "scene_boundary_context",
       });
       if (normalized) pushUnique(scene, normalized);
     }
@@ -129,7 +139,9 @@ function classifyGlobalColors(normalizedColors = [], outfitPalette = [], scenePa
   for (const color of normalizedColors || []) {
     const normalized = normalizeColorEntry(color, {
       ownership: "unknown",
-      source: color?.source || "global_palette",
+      source:
+        (typeof color === "object" && color?.source) ||
+        "global_palette",
     });
     if (!normalized) continue;
     if (outfitPalette.some((owned) => distance(owned.hex, normalized.hex) <= 10)) continue;
@@ -167,6 +179,23 @@ function reasoningPalette(outfitPalette = []) {
     if (out.length >= 6) break;
   }
   return out;
+}
+
+// Positive ownership always wins, even when only one garment color is available.
+// A second color must never be borrowed from the whole-image palette merely to
+// satisfy a palette-size expectation. The fallback is garment-published evidence
+// only and is used solely when Scene Ownership has no positive outfit evidence.
+export function selectOutfitReasoningPaletteV1(
+  sceneOwnership = {},
+  publishedGarmentPalette = []
+) {
+  const owned = Array.isArray(sceneOwnership?.outfit_palette)
+    ? sceneOwnership.outfit_palette.filter((entry) => entry?.hex)
+    : [];
+  if (owned.length > 0) return owned;
+  return Array.isArray(publishedGarmentPalette)
+    ? publishedGarmentPalette.filter((entry) => entry?.hex)
+    : [];
 }
 
 export function buildSceneOwnershipV1({
