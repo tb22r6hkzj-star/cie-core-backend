@@ -1,0 +1,43 @@
+name: Measure Twice V1
+
+on:
+  pull_request:
+    branches:
+      - visioncore-scene-ownership-v1
+      - main
+    paths:
+      - "src/intelligence/measurementAuthorityV1.js"
+      - "test/measurementAuthorityV1.test.js"
+      - "src/server.js"
+      - ".github/workflows/measure-twice-v1.yml"
+  workflow_dispatch:
+
+jobs:
+  measurement-authority-v1:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Measure Twice V1 regressions
+        run: node --test test/measurementAuthorityV1.test.js
+
+      - name: Scene Ownership regression
+        run: node --test test/sceneOwnershipV1.test.js
+
+      - name: Measurement module syntax
+        run: node --check src/intelligence/measurementAuthorityV1.js
+
+      - name: Server syntax
+        run: node --check src/server.js
