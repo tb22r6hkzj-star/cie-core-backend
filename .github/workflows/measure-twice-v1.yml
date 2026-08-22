@@ -8,8 +8,10 @@ on:
     paths:
       - "src/intelligence/measurementAuthorityV1.js"
       - "src/intelligence/dinoInteriorMeasurementV1.js"
+      - "src/intelligence/pieceColorOwnershipV1.js"
       - "test/measurementAuthorityV1.test.js"
       - "test/dinoInteriorMeasurementV1.test.js"
+      - "test/pieceColorOwnershipV1.test.js"
       - "src/server.js"
       - ".github/workflows/measure-twice-v1.yml"
   workflow_dispatch:
@@ -32,13 +34,13 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Measure Twice V1 regressions
-        run: node --test test/measurementAuthorityV1.test.js test/dinoInteriorMeasurementV1.test.js
+        run: node --test test/measurementAuthorityV1.test.js test/dinoInteriorMeasurementV1.test.js test/pieceColorOwnershipV1.test.js
 
       - name: Scene Ownership regression
         run: node --test test/sceneOwnershipV1.test.js
 
       - name: Measurement module syntax
-        run: node --check src/intelligence/measurementAuthorityV1.js && node --check src/intelligence/dinoInteriorMeasurementV1.js
+        run: node --check src/intelligence/measurementAuthorityV1.js && node --check src/intelligence/dinoInteriorMeasurementV1.js && node --check src/intelligence/pieceColorOwnershipV1.js
 
       - name: Server syntax
         run: node --check src/server.js
