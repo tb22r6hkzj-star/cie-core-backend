@@ -6,6 +6,7 @@ on:
       - visioncore-scene-ownership-v1
     paths:
       - .github/workflows/scene-ownership-reasoning-fix.yml
+      - .scene-ownership-reasoning-fix-trigger
   workflow_dispatch:
 
 permissions:
@@ -37,5 +38,6 @@ jobs:
           git add src/server.js
           git rm scripts/apply-scene-ownership-reasoning-fix.mjs
           git rm .github/workflows/scene-ownership-reasoning-fix.yml
+          git rm .scene-ownership-reasoning-fix-trigger
           git commit -m "Fix Scene Ownership reasoning palette handoff"
           git push origin HEAD:visioncore-scene-ownership-v1
