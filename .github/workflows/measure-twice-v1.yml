@@ -28,27 +28,16 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
       - name: Measure Twice V1 regressions
-        run: node --test test/measurementAuthorityV1.test.js test/dinoInteriorMeasurementV1.test.js test/pieceColorOwnershipV1.test.js
+        run: NODE_ENV=test node --test test/measurementAuthorityV1.test.js test/dinoInteriorMeasurementV1.test.js test/pieceColorOwnershipV1.test.js
 
       - name: Architecture accuracy regressions
-        run: >-
-          node --test
-          test/sceneOwnershipV1.test.js
-          test/sceneBoundaryPurityV1.test.js
-          test/lowerGarmentPurityV2.test.js
-          test/upperGarmentPurityV1.test.js
-          test/garmentToneStabilityV1.test.js
-          test/signatureColorAuthorityV2.test.js
-          test/publishedGarmentZonesV2.test.js
-          test/colorEvidenceV3.test.js
-          test/colorEvidenceV3Publication.test.js
-          test/colorEvidenceV3Handoff.test.js
+        run: NODE_ENV=test node --test test/sceneOwnershipV1.test.js test/garmentToneStabilityV1.test.js test/upperGarmentPurityV1.test.js test/signatureColorAuthorityV2.test.js test/lowerGarmentPurityV2.test.js test/pieceColorOwnershipV1.test.js test/colorEvidenceV3.test.js test/colorEvidenceV3Publication.test.js test/colorEvidenceV3Handoff.test.js test/sceneBoundaryPurityV1.test.js test/publishedGarmentZonesV2.test.js
 
       - name: Measurement module syntax
         run: node --check src/intelligence/measurementAuthorityV1.js && node --check src/intelligence/dinoInteriorMeasurementV1.js && node --check src/intelligence/pieceColorOwnershipV1.js
@@ -57,7 +46,7 @@ jobs:
         run: node --check src/server.js
 
       - name: Full suite serial
-        run: node --test --test-concurrency=1
+        run: NODE_ENV=test node --test --test-concurrency=1
 
       - name: Full suite normal
-        run: node --test
+        run: NODE_ENV=test npm test
