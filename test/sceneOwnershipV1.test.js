@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildSceneOwnershipV1 } from "../src/intelligence/sceneOwnershipV1.js";
+import {
+  buildSceneOwnershipV1,
+  selectOutfitReasoningPaletteV1,
+} from "../src/intelligence/sceneOwnershipV1.js";
 
 function zones() {
   return {
@@ -90,4 +93,47 @@ test("owned accessories remain outfit members instead of scene context", () => {
   });
   assert.ok(result.ownership_map.outfit.some((c) => c.owner_zone === "footwear"));
   assert.ok(result.ownership_map.outfit.some((c) => c.owner_zone === "bag"));
+});
+
+test("one positively owned garment remains the entire reasoning palette", () => {
+  const onePiece = buildSceneOwnershipV1({
+    authoritativeGarmentZones: {
+      zones: {
+        upper_garment: {
+          primary_color: { hex: "#935234", pct: 1 },
+          scene_context_candidates: [{ hex: "#C9A778", pct: 0.8 }],
+        },
+      },
+    },
+    normalizedColors: [
+      { hex: "#935234", pct: 0.35 },
+      { hex: "#C9A778", pct: 0.45 },
+      { hex: "#EEE1CC", pct: 0.2 },
+    ],
+  });
+
+  const selected = selectOutfitReasoningPaletteV1(onePiece, [
+    { hex: "#935234", source: "published_zone_authority" },
+    { hex: "#C9A778", source: "global_palette" },
+  ]);
+
+  assert.deepEqual(selected.map((c) => c.hex), ["#935234"]);
+  assert.equal(selected[0].ownership, "outfit");
+  assert.ok(!selected.some((c) => ["#C9A778", "#EEE1CC"].includes(c.hex)));
+});
+
+test("published string hex values remain measurable positive ownership", () => {
+  const result = buildSceneOwnershipV1({
+    authoritativeGarmentZones: {
+      zones: {
+        upper_garment: {
+          primary_color: "#935234",
+        },
+      },
+    },
+    normalizedColors: [{ hex: "#C9A778", pct: 0.9 }],
+  });
+
+  assert.deepEqual(result.outfit_palette.map((c) => c.hex), ["#935234"]);
+  assert.ok(result.unknown_palette.some((c) => c.hex === "#C9A778"));
 });
