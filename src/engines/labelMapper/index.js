@@ -128,6 +128,30 @@ function isDarkOliveFamily(hex) {
   );
 }
 
+function isWarmBrownBoundaryFamily(hex) {
+  const safe = safeHex(hex);
+  if (!safe) return false;
+
+  const hue = getHue(safe);
+  const saturation = getSat(safe);
+  const lightness = getLight(safe);
+  const [red, green, blue] = chroma(safe).rgb();
+  const greenToRed = red > 0 ? green / red : 0;
+  const blueToGreen = green > 0 ? blue / green : 1;
+
+  // Warm brown garment pixels frequently straddle the nominal red/brown hue
+  // boundary under shadow and directional light. Require a brown-like channel
+  // balance before stabilizing the semantic identity; genuinely red-dominant
+  // samples remain available to the Brick Red rule below.
+  return (
+    hue >= 10 && hue < 22 &&
+    saturation >= 0.28 && saturation <= 0.72 &&
+    lightness >= 0.14 && lightness <= 0.44 &&
+    greenToRed >= 0.42 &&
+    blueToGreen <= 0.72
+  );
+}
+
 function getDirectionalChromaticIdentity(hex) {
   const safe = safeHex(hex);
   if (!safe) return null;
@@ -219,6 +243,7 @@ export function getColorName(hex) {
     if (hue >= 315 || hue < 15) return "Dusty Rose";
   }
 
+  if (isWarmBrownBoundaryFamily(safe)) return "Rich Brown";
   if (hue >= 345 || hue < 8) return lightness < 0.48 ? "Deep Crimson" : "Rose";
   if (hue >= 8 && hue < 18) return lightness < 0.46 ? "Brick Red" : "Coral";
   if (hue >= 315 && hue < 333) return lightness < 0.54 ? "Berry" : "Dusty Rose";
