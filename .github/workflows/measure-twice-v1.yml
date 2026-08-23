@@ -3,7 +3,6 @@ name: Measure Twice V1
 on:
   pull_request:
     branches:
-      - visioncore-scene-ownership-v1
       - main
     paths:
       - "src/intelligence/measurementAuthorityV1.js"
@@ -44,61 +43,6 @@ jobs:
 
       - name: Server syntax
         run: node --check src/server.js
-
-      - name: Serial shard A
-        env:
-          NODE_ENV: test
-        run: find test -maxdepth 1 -type f -name '*.test.js' | sort | grep -Ei '/a[^/]*\.test\.js$' | xargs -r node --test --test-concurrency=1
-
-      - name: Serial shard B
-        env:
-          NODE_ENV: test
-        run: find test -maxdepth 1 -type f -name '*.test.js' | sort | grep -Ei '/b[^/]*\.test\.js$' | xargs -r node --test --test-concurrency=1
-
-      - name: C - Color Authority
-        env:
-          NODE_ENV: test
-        run: find test -maxdepth 1 -type f -name 'colorAuthority*.test.js' | sort | xargs -r node --test --test-concurrency=1
-
-      - name: C - Color Clusters
-        env:
-          NODE_ENV: test
-        run: find test -maxdepth 1 -type f -name 'colorClusters*.test.js' | sort | xargs -r node --test --test-concurrency=1
-
-      - name: C - Color Evidence
-        env:
-          NODE_ENV: test
-        run: find test -maxdepth 1 -type f -name 'colorEvidence*.test.js' | sort | xargs -r node --test --test-concurrency=1
-
-      - name: C - Color Identity
-        env:
-          NODE_ENV: test
-        run: find test -maxdepth 1 -type f -name 'colorIdentity*.test.js' | sort | xargs -r node --test --test-concurrency=1
-
-      - name: C - Other
-        env:
-          NODE_ENV: test
-        run: find test -maxdepth 1 -type f -name 'c*.test.js' | sort | grep -Eiv '/color(Authority|Clusters|Evidence|Identity)' | xargs -r node --test --test-concurrency=1
-
-      - name: Serial shard D
-        env:
-          NODE_ENV: test
-        run: find test -maxdepth 1 -type f -name '*.test.js' | sort | grep -Ei '/d[^/]*\.test\.js$' | xargs -r node --test --test-concurrency=1
-
-      - name: Serial shard E-L
-        env:
-          NODE_ENV: test
-        run: find test -maxdepth 1 -type f -name '*.test.js' | sort | grep -Ei '/[e-l][^/]*\.test\.js$' | xargs -r node --test --test-concurrency=1
-
-      - name: Serial shard M-R
-        env:
-          NODE_ENV: test
-        run: find test -maxdepth 1 -type f -name '*.test.js' | sort | grep -Ei '/[m-r][^/]*\.test\.js$' | xargs -r node --test --test-concurrency=1
-
-      - name: Serial shard S-Z
-        env:
-          NODE_ENV: test
-        run: find test -maxdepth 1 -type f -name '*.test.js' | sort | grep -Ei '/[s-z][^/]*\.test\.js$' | xargs -r node --test --test-concurrency=1
 
       - name: Full suite serial
         run: NODE_ENV=test node --test --test-concurrency=1
