@@ -20,3 +20,14 @@ test("true neutral gray remains neutral", () => {
 test("existing vivid or clear forest green identity is preserved", () => {
   assert.match(getColorName("#284B35"), /Forest Green|Green|Sage/i);
 });
+
+test("warm brown garment shadows remain brown across the red-brown hue boundary", () => {
+  assert.equal(getColorName("#935234"), "Rich Brown");
+  assert.equal(getColorName("#763D25"), "Rich Brown");
+  assert.equal(getColorName("#502817"), "Rich Brown");
+});
+
+test("genuinely red-dominant dark samples remain Brick Red", () => {
+  assert.equal(getColorName("#8B2F24"), "Brick Red");
+  assert.equal(getColorName("#8A3528"), "Brick Red");
+});
