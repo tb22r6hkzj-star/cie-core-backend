@@ -1,10 +1,13 @@
 import chroma from "chroma-js";
+import { measureDinoInteriorPixelsV1 } from "./dinoInteriorMeasurementV1.js";
+import { selectMeasuredColorAuthorityV1 } from "./measurementAuthorityV1.js";
 
 const GARMENT_TARGET_ZONES = new Set(["upper_garment", "lower_garment", "body_garment", "outerwear"]);
 const DINO_SOURCE_TYPES = new Set(["grounding_dino", "dino_detection"]);
 const MIN_PIECE_CONFIDENCE = 0.45;
 const MAX_EXCLUDED_TARGET_RATIO = 0.35;
 const MIN_KEPT_SAMPLE_RATIO = 0.25;
+const DINO_INTERIOR_INSET_RATIO = 0.12;
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, Number(value) || 0));
@@ -166,96 +169,31 @@ function expandBox(box, targetBox, amount = 0.008) {
   return { x, y, right, bottom, width: right - x, height: bottom - y };
 }
 
-function contains(box, x, y) {
-  return !!box && x >= box.x && x <= box.right && y >= box.y && y <= box.bottom;
-}
+function buildMeasurementCandidates(region, interiorMeasurement) {
+  const confidence = normalizeConfidence(region?.confidence);
+  const ownershipState = "owned";
+  const interior = (interiorMeasurement?.colors || []).map((color) => ({
+    ...color,
+    source: "dino_bbox_interior",
+    measurement_source: "dino_bbox_interior",
+    ownership_state: ownershipState,
+    confidence,
+    traceable_to_pixels: true,
+  }));
 
-function bucketOwnedPixels(decodedImage, targetBox, exclusions = []) {
-  const width = Number(decodedImage?.width || 0);
-  const height = Number(decodedImage?.height || 0);
-  const data = decodedImage?.data;
-  if (!width || !height || !data || !targetBox) return null;
+  const rawHex = safeHex(region?.dominant_hex || region?.region_colors?.[0]?.hex || "");
+  const raw = rawHex
+    ? [{
+        hex: rawHex,
+        source: "dino_bbox",
+        measurement_source: "dino_bbox",
+        ownership_state: ownershipState,
+        confidence,
+        traceable_to_pixels: true,
+      }]
+    : [];
 
-  const insetX = targetBox.width * 0.025;
-  const insetY = targetBox.height * 0.025;
-  const x0 = Math.max(0, Math.floor((targetBox.x + insetX) * width));
-  const y0 = Math.max(0, Math.floor((targetBox.y + insetY) * height));
-  const x1 = Math.min(width, Math.ceil((targetBox.right - insetX) * width));
-  const y1 = Math.min(height, Math.ceil((targetBox.bottom - insetY) * height));
-  if (x1 <= x0 || y1 <= y0) return null;
-
-  const pixelArea = (x1 - x0) * (y1 - y0);
-  const stride = Math.max(1, Math.floor(Math.sqrt(pixelArea / 14000)));
-  const buckets = new Map();
-  let totalSamples = 0;
-  let excludedSamples = 0;
-  let keptSamples = 0;
-
-  for (let py = y0; py < y1; py += stride) {
-    for (let px = x0; px < x1; px += stride) {
-      const nx = (px + 0.5) / width;
-      const ny = (py + 0.5) / height;
-      totalSamples += 1;
-      if (exclusions.some((box) => contains(box, nx, ny))) {
-        excludedSamples += 1;
-        continue;
-      }
-      const idx = (py * width + px) * 4;
-      const alpha = Number(data[idx + 3] ?? 255);
-      if (alpha < 32) continue;
-      const r = Number(data[idx] || 0);
-      const g = Number(data[idx + 1] || 0);
-      const b = Number(data[idx + 2] || 0);
-      const key = `${Math.round(r / 20)}_${Math.round(g / 20)}_${Math.round(b / 20)}`;
-      if (!buckets.has(key)) buckets.set(key, { count: 0, r: 0, g: 0, b: 0 });
-      const bucket = buckets.get(key);
-      bucket.count += 1;
-      bucket.r += r;
-      bucket.g += g;
-      bucket.b += b;
-      keptSamples += 1;
-    }
-  }
-
-  return { buckets, totalSamples, excludedSamples, keptSamples };
-}
-
-function buildOwnedColors(sampled, limit = 6) {
-  if (!sampled?.keptSamples) return [];
-  const candidates = [...sampled.buckets.values()]
-    .map((bucket) => ({
-      count: bucket.count,
-      rgb: [
-        Math.round(bucket.r / bucket.count),
-        Math.round(bucket.g / bucket.count),
-        Math.round(bucket.b / bucket.count),
-      ],
-    }))
-    .sort((a, b) => b.count - a.count);
-
-  const clusters = [];
-  for (const candidate of candidates) {
-    const hex = safeHex(chroma(candidate.rgb).hex());
-    if (!hex) continue;
-    const match = clusters.find((cluster) => chroma.distance(cluster.hex, hex, "lab") < 11);
-    if (match) {
-      const nextCount = match.count + candidate.count;
-      match.rgb = [0, 1, 2].map((i) => Math.round((match.rgb[i] * match.count + candidate.rgb[i] * candidate.count) / nextCount));
-      match.count = nextCount;
-      match.hex = safeHex(chroma(match.rgb).hex());
-    } else {
-      clusters.push({ hex, rgb: candidate.rgb, count: candidate.count });
-    }
-  }
-
-  return clusters
-    .sort((a, b) => b.count - a.count)
-    .slice(0, limit)
-    .map((cluster) => ({
-      hex: cluster.hex,
-      pct: round3(cluster.count / sampled.keptSamples),
-      source: "piece_color_ownership_v1",
-    }));
+  return [...interior, ...raw];
 }
 
 export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] } = {}) {
@@ -270,6 +208,7 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
   const height = Number(decodedImage.height || 0);
   const boxes = new Map(regions.map((region) => [region, normalizeOwnershipBox(region, width, height)]));
   let correctedRegionCount = 0;
+  let measuredRegionCount = 0;
   let excludedPieceCount = 0;
 
   const out = regions.map((region) => {
@@ -297,51 +236,77 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
         exclusion_box: expandBox(overlap, targetBox),
       });
     }
-    if (!ownershipClaims.length) return region;
 
     const exclusionBoxes = ownershipClaims.map((claim) => claim.exclusion_box);
-    const sampled = bucketOwnedPixels(decodedImage, targetBox, exclusionBoxes);
-    const keptRatio = sampled?.totalSamples ? sampled.keptSamples / sampled.totalSamples : 0;
-    const ownedColors = keptRatio >= MIN_KEPT_SAMPLE_RATIO ? buildOwnedColors(sampled) : [];
-    if (!ownedColors.length) {
+    const interiorMeasurement = measureDinoInteriorPixelsV1({
+      decodedImage,
+      bbox: targetBox,
+      exclusions: exclusionBoxes,
+      insetRatio: DINO_INTERIOR_INSET_RATIO,
+    });
+    const keptRatio = interiorMeasurement?.sample_count
+      ? interiorMeasurement.sample_count /
+        Math.max(1, interiorMeasurement.sample_count + Number(interiorMeasurement?.excluded_sample_count || 0))
+      : 0;
+    const authority = selectMeasuredColorAuthorityV1(buildMeasurementCandidates(region, interiorMeasurement));
+    const selected = authority.selected;
+
+    if (!interiorMeasurement?.available || !selected || keptRatio < MIN_KEPT_SAMPLE_RATIO) {
       return {
         ...region,
         color_debug: {
           ...(region?.color_debug || {}),
           piece_color_ownership_v1: {
             applied: false,
-            reason: "insufficient_owned_pixels",
+            reason: !interiorMeasurement?.available
+              ? interiorMeasurement?.reason || "interior_measurement_unavailable"
+              : !selected
+                ? "no_publishable_measured_authority"
+                : "insufficient_owned_pixels",
             ownership_claims: ownershipClaims,
-            sample_count: sampled?.totalSamples || 0,
-            excluded_sample_count: sampled?.excludedSamples || 0,
-            kept_sample_count: sampled?.keptSamples || 0,
+            sample_count: interiorMeasurement?.sample_count || 0,
+            excluded_sample_count: interiorMeasurement?.excluded_sample_count || 0,
+            kept_sample_count: interiorMeasurement?.sample_count || 0,
             kept_sample_ratio: round3(keptRatio),
+            measurement_authority_v1: authority,
           },
         },
       };
     }
 
-    correctedRegionCount += 1;
+    measuredRegionCount += 1;
     excludedPieceCount += ownershipClaims.length;
     const rawDominant = safeHex(region?.dominant_hex || region?.region_colors?.[0]?.hex || "");
+    if (rawDominant !== selected.hex || ownershipClaims.length) correctedRegionCount += 1;
+
+    const ownedColors = (interiorMeasurement.colors || []).map((color) => ({
+      ...color,
+      source: "dino_bbox_interior",
+      ownership_state: "owned",
+      measurement_authority: selected.hex === color.hex ? "selected" : "supporting",
+    }));
+
     return {
       ...region,
-      dominant_hex: ownedColors[0].hex,
+      dominant_hex: selected.hex,
       region_colors: ownedColors,
       color_debug: {
         ...(region?.color_debug || {}),
         piece_color_ownership_v1: {
           applied: true,
-          authority: "owned_pixels_after_piece_exclusion",
+          authority: "measure_twice_v1_owned_interior_pixels",
           raw_dominant_hex: rawDominant,
           raw_region_colors: Array.isArray(region?.region_colors) ? region.region_colors : [],
-          owned_dominant_hex: ownedColors[0].hex,
+          owned_dominant_hex: selected.hex,
           owned_region_colors: ownedColors,
           ownership_claims: ownershipClaims,
-          sample_count: sampled.totalSamples,
-          excluded_sample_count: sampled.excludedSamples,
-          kept_sample_count: sampled.keptSamples,
+          sample_count: interiorMeasurement.sample_count,
+          excluded_sample_count: interiorMeasurement.excluded_sample_count || 0,
+          kept_sample_count: interiorMeasurement.sample_count,
           kept_sample_ratio: round3(keptRatio),
+          measurement_source: selected.source,
+          measurement_authority_v1: authority,
+          doctrine: "measure_twice_publish_once",
         },
       },
     };
@@ -353,6 +318,7 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
       available: true,
       version: "piece_color_ownership_v1",
       corrected_region_count: correctedRegionCount,
+      measured_region_count: measuredRegionCount,
       excluded_piece_count: excludedPieceCount,
       policy: {
         target_zones: [...GARMENT_TARGET_ZONES],
@@ -360,7 +326,10 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
         minimum_piece_confidence: MIN_PIECE_CONFIDENCE,
         max_excluded_target_ratio: MAX_EXCLUDED_TARGET_RATIO,
         minimum_kept_sample_ratio: MIN_KEPT_SAMPLE_RATIO,
+        interior_inset_ratio: DINO_INTERIOR_INSET_RATIO,
         invariant: "detected_piece_pixels_cannot_vote_as_neighboring_garment_color",
+        measurement_invariant: "measure_twice_publish_once",
+        dino_bbox_does_not_own_color_authority: true,
       },
     },
   };

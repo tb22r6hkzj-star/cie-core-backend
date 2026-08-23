@@ -67,6 +67,8 @@ test("lower garment owns green pixels after black belt and footwear are excluded
   assert.equal(corrected.dominant_hex, "#4E604F");
   assert.equal(corrected.region_colors[0].hex, "#4E604F");
   assert.equal(corrected.color_debug.piece_color_ownership_v1.applied, true);
+  assert.equal(corrected.color_debug.piece_color_ownership_v1.measurement_source, "dino_bbox_interior");
+  assert.equal(corrected.color_debug.piece_color_ownership_v1.doctrine, "measure_twice_publish_once");
   assert.deepEqual(
     corrected.color_debug.piece_color_ownership_v1.ownership_claims.map((claim) => claim.piece_class).sort(),
     ["belt", "footwear"]
@@ -92,17 +94,35 @@ test("bag pixels are owned by the bag instead of contaminating an upper garment"
   assert.equal(result.regions.find((region) => region.id === "bag").dominant_hex, "#17191D");
 });
 
-test("ownership is spatial rather than color-biased: a black garment remains black when no separate piece overlaps", () => {
+test("ownership is spatial rather than color-biased: a black garment remains black after interior measurement", () => {
   const img = image();
   const pantsBox = { x: 0.30, y: 0.42, width: 0.40, height: 0.50 };
   paint(img, pantsBox, "#0D131E");
   const pants = dinoRegion("pants", "lower_garment", pantsBox, "pants", "#0D131E");
 
   const result = applyPieceColorOwnershipV1({ decodedImage: img, regions: [pants] });
-  const unchanged = result.regions[0];
-  assert.equal(unchanged, pants);
-  assert.equal(unchanged.dominant_hex, "#0D131E");
-  assert.equal(result.summary.corrected_region_count, 0);
+  const measured = result.regions[0];
+  assert.equal(measured.dominant_hex, "#0D131E");
+  assert.equal(measured.color_debug.piece_color_ownership_v1.applied, true);
+  assert.equal(measured.color_debug.piece_color_ownership_v1.measurement_source, "dino_bbox_interior");
+  assert.equal(result.summary.measured_region_count, 1);
+});
+
+test("DINO garment interior measurement corrects a contaminated bbox color even with no overlapping accessory", () => {
+  const img = image();
+  const shirtBox = { x: 0.20, y: 0.12, width: 0.60, height: 0.48 };
+  paint(img, shirtBox, "#935234");
+
+  // Deliberately simulate an upstream broad-box/global contamination read.
+  const shirt = dinoRegion("shirt", "upper_garment", shirtBox, "shirt", "#C9A778");
+  const result = applyPieceColorOwnershipV1({ decodedImage: img, regions: [shirt] });
+  const measured = result.regions[0];
+
+  assert.equal(measured.dominant_hex, "#935234");
+  assert.equal(measured.region_colors[0].hex, "#935234");
+  assert.equal(measured.color_debug.piece_color_ownership_v1.raw_dominant_hex, "#C9A778");
+  assert.equal(measured.color_debug.piece_color_ownership_v1.measurement_authority_v1.selected.hex, "#935234");
+  assert.equal(result.summary.corrected_region_count, 1);
 });
 
 test("oversized accessory detections cannot carve away more than the ownership safety limit", () => {
@@ -114,6 +134,8 @@ test("oversized accessory detections cannot carve away more than the ownership s
   const falseBag = dinoRegion("bag", "bag", hugeBagBox, "bag", "#0D131E");
 
   const result = applyPieceColorOwnershipV1({ decodedImage: img, regions: [shirt, falseBag] });
-  assert.equal(result.regions[0], shirt);
-  assert.equal(result.summary.corrected_region_count, 0);
+  const measured = result.regions[0];
+  assert.equal(measured.dominant_hex, "#60321E");
+  assert.equal(measured.color_debug.piece_color_ownership_v1.ownership_claims.length, 0);
+  assert.equal(result.summary.excluded_piece_count, 0);
 });
