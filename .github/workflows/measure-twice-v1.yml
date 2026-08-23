@@ -45,6 +45,26 @@ jobs:
       - name: Server syntax
         run: node --check src/server.js
 
+      - name: Serial shard A-D
+        env:
+          NODE_ENV: test
+        run: find test -maxdepth 1 -type f -name '*.test.js' | sort | grep -Ei '/[a-d][^/]*\.test\.js$' | xargs -r node --test --test-concurrency=1
+
+      - name: Serial shard E-L
+        env:
+          NODE_ENV: test
+        run: find test -maxdepth 1 -type f -name '*.test.js' | sort | grep -Ei '/[e-l][^/]*\.test\.js$' | xargs -r node --test --test-concurrency=1
+
+      - name: Serial shard M-R
+        env:
+          NODE_ENV: test
+        run: find test -maxdepth 1 -type f -name '*.test.js' | sort | grep -Ei '/[m-r][^/]*\.test\.js$' | xargs -r node --test --test-concurrency=1
+
+      - name: Serial shard S-Z
+        env:
+          NODE_ENV: test
+        run: find test -maxdepth 1 -type f -name '*.test.js' | sort | grep -Ei '/[s-z][^/]*\.test\.js$' | xargs -r node --test --test-concurrency=1
+
       - name: Full suite serial
         run: NODE_ENV=test node --test --test-concurrency=1
 
