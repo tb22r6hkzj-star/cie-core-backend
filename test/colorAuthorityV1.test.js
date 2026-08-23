@@ -18,9 +18,9 @@ const regions=[
  {id:"lower",source_type:"grounding_dino",zone:"lower_garment",label:"pants",segment_label:"pants",confidence:.95,coverage:.4,bounding_box:{x:.25,y:.48,width:.5,height:.42},dominant_hex:"#4E604F",region_colors:[{hex:"#4E604F",pct:.8}]},
 ];
 
-test("published garment primaries become downstream color authority",()=>{
+test("scene-owned published garment primaries become downstream color authority",()=>{
  const r=buildOutfitAnalysis({dominantHex:"#0D131E",topColors:[{hex:"#0D131E",pct:.67},{hex:"#4E604F",pct:.25},{hex:"#60321E",pct:.08}],segmentedRegions:regions,decodedImage:img(),perception_v6_mode:"assist"});
- assert.equal(r.color_authority.source,"published_garment_primaries");
+ assert.equal(r.color_authority.source,"scene_ownership_v1_outfit");
  const authority=r.color_authority.colors.map(c=>c.hex.toUpperCase());
  assert.ok(authority.includes("#60321E"));
  assert.ok(authority.includes("#4E604F"));
