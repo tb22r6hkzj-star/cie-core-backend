@@ -1,0 +1,44 @@
+name: VEF Production V6 Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/evaluation/**"
+      - "test/productionV6EvaluationBridge.test.js"
+      - "test/visionCoreEvaluationFramework.test.js"
+      - ".github/workflows/vef-production-v6-validation.yml"
+  workflow_dispatch:
+
+jobs:
+  vef-production-v6-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Production V6 bridge focused tests
+        run: NODE_ENV=test node --test test/productionV6EvaluationBridge.test.js
+
+      - name: VisionCore Evaluation Framework regressions
+        run: NODE_ENV=test node --test test/visionCoreEvaluationFramework.test.js
+
+      - name: Evaluation module syntax
+        run: node --check src/evaluation/productionV6.js && node --check src/evaluation/index.js
+
+      - name: Full suite serial
+        run: NODE_ENV=test node --test --test-concurrency=1
+
+      - name: Full suite normal
+        run: NODE_ENV=test npm test
