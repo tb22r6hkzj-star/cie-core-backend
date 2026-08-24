@@ -47,9 +47,11 @@ function sampleWeight(sample = {}) {
   return Math.max(0.001, abundance * Math.max(0.25, conf) * sourceAuthority(sample));
 }
 
+const POSITIVE_OWNERSHIP_STATES = new Set(["owned", "outfit", "positive", "confirmed"]);
+
 function owned(sample = {}) {
-  const state = String(sample?.ownership_state || sample?.ownership || "owned").toLowerCase();
-  return !["scene", "background", "unknown", "rejected", "unowned"].includes(state);
+  const state = String(sample?.ownership_state || sample?.ownership || "").toLowerCase();
+  return POSITIVE_OWNERSHIP_STATES.has(state);
 }
 
 function weightedMean(rows, getter) {
@@ -89,7 +91,7 @@ export function estimateGarmentIntrinsicColorV1(samples = []) {
     })
     .filter(Boolean);
 
-  if (!rows.length) return { available: false, version: "garment_color_constancy_v1", reason: "no_owned_measured_colors" };
+  if (!rows.length) return { available: false, version: "garment_color_constancy_v1", reason: "no_explicitly_owned_measured_colors" };
 
   const medoid = weightedMedoid(rows);
   const distances = rows.map((row) => ({ ...row, intrinsic_distance: distance(medoid, row) }));
@@ -136,6 +138,7 @@ export function estimateGarmentIntrinsicColorV1(samples = []) {
     })),
     policy: {
       raw_hexes_are_immutable_evidence: true,
+      explicit_positive_ownership_is_required: true,
       single_hex_cannot_define_material_identity: true,
       luminance_variation_is_discounted: true,
       chromatic_direction_outweighs_brightness: true,
