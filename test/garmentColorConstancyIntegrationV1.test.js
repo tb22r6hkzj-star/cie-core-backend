@@ -18,20 +18,26 @@ const brownShirt = {
 test("shadow mode records intrinsic evidence without changing publication", () => {
   const result = applyGarmentColorConstancyIntegrationV1(brownShirt, { mode: "shadow" });
   assert.equal(result.dominant_hex, "#763D25");
+  assert.equal(result.region_colors.length, 3);
   assert.equal(result.color_debug.garment_color_constancy_v1.applied, false);
   assert.equal(result.color_debug.garment_color_constancy_v1.reason, "shadow_only_no_publication_change");
   assert.ok(result.color_debug.garment_color_constancy_v1.selected_intrinsic_hex);
 });
 
-test("assist mode promotes only a stable measured intrinsic hex", () => {
+test("assist mode promotes one stable measured intrinsic color into the publishable lane", () => {
   const result = applyGarmentColorConstancyIntegrationV1(brownShirt, { mode: "assist" });
   const allowed = new Set(brownShirt.region_colors.map((row) => row.hex));
   assert.equal(result.color_debug.garment_color_constancy_v1.applied, true);
   assert.ok(allowed.has(result.dominant_hex));
   assert.equal(result.dominant_hex, result.color_debug.garment_color_constancy_v1.selected_intrinsic_hex);
+  assert.equal(result.region_colors.length, 1);
+  assert.equal(result.region_colors[0].hex, result.dominant_hex);
+  assert.equal(result.region_colors[0].pct, 1);
+  assert.equal(result.region_colors[0].intrinsic_material_identity, true);
+  assert.equal(result.color_debug.garment_color_constancy_v1.raw_region_colors.length, 3);
 });
 
-test("unrelated green contamination cannot become the brown garment intrinsic identity", () => {
+test("unrelated green contamination stays diagnostic and cannot enter the publishable brown palette", () => {
   const result = applyGarmentColorConstancyIntegrationV1({
     ...brownShirt,
     region_colors: [
@@ -40,9 +46,20 @@ test("unrelated green contamination cannot become the brown garment intrinsic id
     ],
   }, { mode: "assist" });
   assert.notEqual(result.dominant_hex, "#4E604F");
+  assert.equal(result.region_colors.length, 1);
+  assert.notEqual(result.region_colors[0].hex, "#4E604F");
+  assert.ok(result.color_debug.garment_color_constancy_v1.raw_region_colors.some((row) => row.hex === "#4E604F"));
 });
 
-test("non-garment regions are never changed", () => {
+test("same-material light and shadow variants do not publish as separate garment colors", () => {
+  const result = applyGarmentColorConstancyIntegrationV1(brownShirt, { mode: "assist" });
+  const published = new Set(result.region_colors.map((row) => row.hex));
+  assert.equal(published.size, 1);
+  assert.ok(result.color_debug.garment_color_constancy_v1.raw_region_colors.some((row) => row.hex === "#763D25"));
+  assert.ok(result.color_debug.garment_color_constancy_v1.raw_region_colors.some((row) => row.hex === "#502817"));
+});
+
+test("non-garment regions are never promoted", () => {
   const result = applyGarmentColorConstancyIntegrationV1({
     zone: "background",
     dominant_hex: "#123456",
