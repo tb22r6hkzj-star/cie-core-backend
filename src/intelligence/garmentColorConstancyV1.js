@@ -106,6 +106,7 @@ export function estimateGarmentIntrinsicColorV1(samples = []) {
   });
   const lightness = rows.map((row) => row.features.lab.l);
   const lightnessSpread = Math.max(...lightness) - Math.min(...lightness);
+  const minimumMaterialConsensus = 0.85;
 
   return {
     available: true,
@@ -114,7 +115,7 @@ export function estimateGarmentIntrinsicColorV1(samples = []) {
     intrinsic_source_index: medoid.index,
     intrinsic_sample: medoid.sample,
     support_ratio: supportRatio,
-    stable_material_identity: supportRatio >= 0.6 && chromaticitySpread <= 0.08,
+    stable_material_identity: supportRatio >= minimumMaterialConsensus && chromaticitySpread <= 0.08,
     chromaticity_spread: chromaticitySpread,
     lightness_spread: lightnessSpread,
     illumination_variation_detected: lightnessSpread >= 8,
@@ -133,6 +134,8 @@ export function estimateGarmentIntrinsicColorV1(samples = []) {
       chromatic_direction_outweighs_brightness: true,
       intrinsic_hex_must_be_measured_not_invented: true,
       minimum_same_material_distance: 0.045,
+      minimum_material_consensus: minimumMaterialConsensus,
+      distinct_secondary_chromatic_evidence_blocks_single_material_promotion: true,
       multi_window_consensus_receives_higher_measurement_authority: true,
     },
   };
