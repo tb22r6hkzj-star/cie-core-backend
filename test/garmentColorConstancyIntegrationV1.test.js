@@ -15,6 +15,19 @@ const brownShirt = {
   ],
 };
 
+test("off mode performs no intrinsic estimation and changes no publication", () => {
+  const result = applyGarmentColorConstancyIntegrationV1(brownShirt, { mode: "off" });
+  const debug = result.color_debug.garment_color_constancy_v1;
+  assert.equal(result.dominant_hex, "#763D25");
+  assert.equal(result.region_colors.length, 3);
+  assert.equal(debug.mode, "off");
+  assert.equal(debug.applied, false);
+  assert.equal(debug.reason, "disabled");
+  assert.equal(debug.selected_intrinsic_hex, null);
+  assert.equal(debug.intrinsic, null);
+  assert.equal(debug.policy.off_mode_performs_no_intrinsic_estimation, true);
+});
+
 test("shadow mode records intrinsic evidence without changing publication", () => {
   const result = applyGarmentColorConstancyIntegrationV1(brownShirt, { mode: "shadow" });
   assert.equal(result.dominant_hex, "#763D25");
@@ -22,6 +35,7 @@ test("shadow mode records intrinsic evidence without changing publication", () =
   assert.equal(result.color_debug.garment_color_constancy_v1.applied, false);
   assert.equal(result.color_debug.garment_color_constancy_v1.reason, "shadow_only_no_publication_change");
   assert.ok(result.color_debug.garment_color_constancy_v1.selected_intrinsic_hex);
+  assert.ok(result.color_debug.garment_color_constancy_v1.intrinsic);
 });
 
 test("assist mode promotes one stable measured intrinsic color into the publishable lane", () => {
@@ -35,6 +49,20 @@ test("assist mode promotes one stable measured intrinsic color into the publisha
   assert.equal(result.region_colors[0].pct, 1);
   assert.equal(result.region_colors[0].intrinsic_material_identity, true);
   assert.equal(result.color_debug.garment_color_constancy_v1.raw_region_colors.length, 3);
+});
+
+test("assist mode cannot promote samples that lack explicit ownership", () => {
+  const result = applyGarmentColorConstancyIntegrationV1({
+    ...brownShirt,
+    region_colors: brownShirt.region_colors.map(({ ownership_state, ...row }) => row),
+  }, { mode: "assist" });
+  const debug = result.color_debug.garment_color_constancy_v1;
+  assert.equal(debug.applied, false);
+  assert.equal(debug.selected_intrinsic_hex, null);
+  assert.equal(debug.intrinsic.available, false);
+  assert.equal(debug.intrinsic.reason, "no_explicitly_owned_measured_colors");
+  assert.equal(result.dominant_hex, "#763D25");
+  assert.equal(result.region_colors.length, 3);
 });
 
 test("unrelated green contamination stays diagnostic and cannot enter the publishable brown palette", () => {
