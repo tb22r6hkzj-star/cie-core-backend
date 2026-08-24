@@ -94,7 +94,14 @@ export function estimateGarmentIntrinsicColorV1(samples = []) {
   const medoid = weightedMedoid(rows);
   const distances = rows.map((row) => ({ ...row, intrinsic_distance: distance(medoid, row) }));
   const avgDistance = weightedMean(distances, (row) => row.intrinsic_distance);
-  const threshold = Math.max(0.045, Math.min(0.09, avgDistance * 1.8));
+
+  // Dark/light observations of one material can separate substantially in raw
+  // linear-RGB chromaticity even while retaining the same chromatic direction.
+  // Keep a luminance-tolerant family gate, then require overwhelming weighted
+  // family support before publication. Distinct green/beige/red material
+  // evidence remains far outside this gate and therefore blocks promotion.
+  const minimumSameMaterialDistance = 0.16;
+  const threshold = Math.max(minimumSameMaterialDistance, Math.min(0.24, avgDistance * 2.2));
   const family = distances.filter((row) => row.intrinsic_distance <= threshold);
   const totalWeight = rows.reduce((sum, row) => sum + row.weight, 0);
   const familyWeight = family.reduce((sum, row) => sum + row.weight, 0);
@@ -133,7 +140,8 @@ export function estimateGarmentIntrinsicColorV1(samples = []) {
       luminance_variation_is_discounted: true,
       chromatic_direction_outweighs_brightness: true,
       intrinsic_hex_must_be_measured_not_invented: true,
-      minimum_same_material_distance: 0.045,
+      minimum_same_material_distance: minimumSameMaterialDistance,
+      maximum_same_material_distance: 0.24,
       minimum_material_consensus: minimumMaterialConsensus,
       distinct_secondary_chromatic_evidence_blocks_single_material_promotion: true,
       multi_window_consensus_receives_higher_measurement_authority: true,
