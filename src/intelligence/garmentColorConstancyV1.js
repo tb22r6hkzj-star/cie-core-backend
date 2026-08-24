@@ -31,13 +31,20 @@ function describe(hex) {
   };
 }
 
+function sourceAuthority(sample = {}) {
+  const source = String(sample?.source || sample?.measurement_source || "").toLowerCase();
+  if (source === "garment_tone_stability_v1") return 1.6;
+  if (source === "dino_bbox_interior" || source === "owned_interior_pixels" || source === "sam_mask_interior") return 1.15;
+  return 1;
+}
+
 function sampleWeight(sample = {}) {
   const pct = Number(sample?.pct ?? sample?.percentage);
   const pixels = Number(sample?.pixel_count ?? sample?.sample_count);
   const confidence = Number(sample?.confidence);
   const abundance = Number.isFinite(pct) && pct > 0 ? pct : Number.isFinite(pixels) && pixels > 0 ? Math.log1p(pixels) : 1;
   const conf = Number.isFinite(confidence) ? clamp01(confidence > 1 ? confidence / 100 : confidence) : 1;
-  return Math.max(0.001, abundance * Math.max(0.25, conf));
+  return Math.max(0.001, abundance * Math.max(0.25, conf) * sourceAuthority(sample));
 }
 
 function owned(sample = {}) {
@@ -87,7 +94,7 @@ export function estimateGarmentIntrinsicColorV1(samples = []) {
   const medoid = weightedMedoid(rows);
   const distances = rows.map((row) => ({ ...row, intrinsic_distance: distance(medoid, row) }));
   const avgDistance = weightedMean(distances, (row) => row.intrinsic_distance);
-  const threshold = Math.max(0.035, Math.min(0.09, avgDistance * 1.8));
+  const threshold = Math.max(0.045, Math.min(0.09, avgDistance * 1.8));
   const family = distances.filter((row) => row.intrinsic_distance <= threshold);
   const totalWeight = rows.reduce((sum, row) => sum + row.weight, 0);
   const familyWeight = family.reduce((sum, row) => sum + row.weight, 0);
@@ -125,6 +132,8 @@ export function estimateGarmentIntrinsicColorV1(samples = []) {
       luminance_variation_is_discounted: true,
       chromatic_direction_outweighs_brightness: true,
       intrinsic_hex_must_be_measured_not_invented: true,
+      minimum_same_material_distance: 0.045,
+      multi_window_consensus_receives_higher_measurement_authority: true,
     },
   };
 }
