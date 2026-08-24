@@ -13,7 +13,12 @@ export function applyGarmentColorConstancyIntegrationV1(region = {}, { mode = "s
   const samples = Array.isArray(region?.region_colors) ? region.region_colors : [];
   const intrinsic = GARMENT_ZONES.has(zone) ? estimateGarmentIntrinsicColorV1(samples) : { available: false, reason: "non_garment_zone" };
   const oldDominant = region?.dominant_hex || samples?.[0]?.hex || null;
-  const canPromote = resolvedMode === "assist" && intrinsic?.available && intrinsic?.stable_material_identity && intrinsic?.intrinsic_hex;
+  const canPromote = Boolean(
+    resolvedMode === "assist" &&
+    intrinsic?.available &&
+    intrinsic?.stable_material_identity &&
+    intrinsic?.intrinsic_hex
+  );
 
   return {
     ...region,
