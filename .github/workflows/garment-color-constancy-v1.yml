@@ -7,8 +7,10 @@ on:
     paths:
       - "src/intelligence/garmentColorConstancyV1.js"
       - "src/intelligence/garmentColorConstancyIntegrationV1.js"
+      - "src/intelligence/garmentToneStabilityV1.js"
       - "test/garmentColorConstancyV1.test.js"
       - "test/garmentColorConstancyIntegrationV1.test.js"
+      - "test/garmentToneStabilityV1.test.js"
       - ".github/workflows/garment-color-constancy-v1.yml"
   workflow_dispatch:
 
@@ -30,10 +32,10 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Color constancy focused tests
-        run: NODE_ENV=test node --test test/garmentColorConstancyV1.test.js test/garmentColorConstancyIntegrationV1.test.js
+        run: NODE_ENV=test node --test test/garmentColorConstancyV1.test.js test/garmentColorConstancyIntegrationV1.test.js test/garmentToneStabilityV1.test.js
 
       - name: Module syntax
-        run: node --check src/intelligence/garmentColorConstancyV1.js && node --check src/intelligence/garmentColorConstancyIntegrationV1.js
+        run: node --check src/intelligence/garmentColorConstancyV1.js && node --check src/intelligence/garmentColorConstancyIntegrationV1.js && node --check src/intelligence/garmentToneStabilityV1.js
 
       - name: Full suite serial
         run: NODE_ENV=test node --test --test-concurrency=1
