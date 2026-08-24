@@ -41,7 +41,7 @@ test("scene/background colors cannot vote in intrinsic garment identity", () => 
   assert.ok(!r.samples.some((s) => s.hex === "#4E604F" || s.hex === "#C7B497"));
 });
 
-test("genuinely different chromatic evidence is not forced into one material family", () => {
+test("genuinely different chromatic evidence is not forced into one material family or promoted as one material", () => {
   const r = estimateGarmentIntrinsicColorV1([
     { hex: "#935234", pct: 0.45, ownership_state: "owned" },
     { hex: "#763D25", pct: 0.35, ownership_state: "owned" },
@@ -49,6 +49,9 @@ test("genuinely different chromatic evidence is not forced into one material fam
   ]);
   const green = r.samples.find((s) => s.hex === "#284B35");
   assert.equal(green.same_material_family, false);
+  assert.equal(r.stable_material_identity, false);
+  assert.ok(r.support_ratio < r.policy.minimum_material_consensus);
+  assert.equal(r.policy.distinct_secondary_chromatic_evidence_blocks_single_material_promotion, true);
 });
 
 test("intrinsic identity always resolves to an actually measured hex", () => {
