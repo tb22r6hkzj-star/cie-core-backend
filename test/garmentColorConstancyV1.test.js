@@ -18,6 +18,19 @@ test("same brown material remains one stable family across light and shadow", ()
   assert.ok(r.samples.every((s) => s.same_material_family));
 });
 
+test("muted green material remains stable across ordinary light and shadow variation", () => {
+  const samples = [
+    { hex: "#3F5041", pct: 0.55, ownership_state: "owned" },
+    { hex: "#57685B", pct: 0.30, ownership_state: "owned" },
+    { hex: "#1D291F", pct: 0.15, ownership_state: "owned" },
+  ];
+  const r = estimateGarmentIntrinsicColorV1(samples);
+  assert.equal(r.available, true);
+  assert.equal(r.stable_material_identity, true);
+  assert.ok(r.support_ratio >= 0.8);
+  assert.ok(samples.some((s) => s.hex.toUpperCase() === r.intrinsic_hex));
+});
+
 test("scene/background colors cannot vote in intrinsic garment identity", () => {
   const r = estimateGarmentIntrinsicColorV1([
     ...brownShirtSamples,
