@@ -29,10 +29,41 @@ export function applyGarmentColorConstancyIntegrationV1(region = {}, { mode = "s
   const resolvedMode = normalizeMode(mode);
   const zone = String(region?.zone || "");
   const samples = Array.isArray(region?.region_colors) ? region.region_colors : [];
+  const oldDominant = region?.dominant_hex || samples?.[0]?.hex || null;
+
+  if (resolvedMode === "off") {
+    return {
+      ...region,
+      color_debug: {
+        ...(region?.color_debug || {}),
+        garment_color_constancy_v1: {
+          mode: "off",
+          applied: false,
+          previous_dominant_hex: oldDominant,
+          raw_region_colors: samples,
+          publishable_region_colors: samples,
+          selected_intrinsic_hex: null,
+          stable_material_identity: false,
+          support_ratio: 0,
+          chromaticity_spread: 0,
+          lightness_spread: 0,
+          illumination_variation_detected: false,
+          reason: "disabled",
+          intrinsic: null,
+          policy: {
+            off_mode_performs_no_intrinsic_estimation: true,
+            raw_measurements_remain_debug_evidence: true,
+            customer_facing_palette_uses_intrinsic_material_identity_when_stable: true,
+            same_material_light_shadow_variants_do_not_publish_as_separate_colors: true,
+          },
+        },
+      },
+    };
+  }
+
   const intrinsic = GARMENT_ZONES.has(zone)
     ? estimateGarmentIntrinsicColorV1(samples)
     : { available: false, reason: "non_garment_zone" };
-  const oldDominant = region?.dominant_hex || samples?.[0]?.hex || null;
   const canPromote = Boolean(
     resolvedMode === "assist" &&
     intrinsic?.available &&
@@ -61,11 +92,12 @@ export function applyGarmentColorConstancyIntegrationV1(region = {}, { mode = "s
         illumination_variation_detected: !!intrinsic?.illumination_variation_detected,
         reason: canPromote
           ? "stable_owned_intrinsic_material_identity"
-          : resolvedMode !== "assist"
+          : resolvedMode === "shadow"
             ? "shadow_only_no_publication_change"
             : intrinsic?.reason || "intrinsic_identity_not_stable",
         intrinsic,
         policy: {
+          off_mode_performs_no_intrinsic_estimation: true,
           raw_measurements_remain_debug_evidence: true,
           customer_facing_palette_uses_intrinsic_material_identity_when_stable: true,
           same_material_light_shadow_variants_do_not_publish_as_separate_colors: true,
