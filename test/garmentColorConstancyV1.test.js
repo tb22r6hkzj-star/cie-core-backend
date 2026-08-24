@@ -41,6 +41,27 @@ test("scene/background colors cannot vote in intrinsic garment identity", () => 
   assert.ok(!r.samples.some((s) => s.hex === "#4E604F" || s.hex === "#C7B497"));
 });
 
+test("missing ownership cannot vote in intrinsic garment identity", () => {
+  const r = estimateGarmentIntrinsicColorV1([
+    { hex: "#935234", pct: 0.42 },
+    { hex: "#763D25", pct: 0.34 },
+    { hex: "#502817", pct: 0.24 },
+  ]);
+  assert.equal(r.available, false);
+  assert.equal(r.reason, "no_explicitly_owned_measured_colors");
+});
+
+test("only explicit positive ownership states can vote", () => {
+  const r = estimateGarmentIntrinsicColorV1([
+    { hex: "#935234", pct: 0.5, ownership_state: "confirmed" },
+    { hex: "#763D25", pct: 0.5, ownership: "owned" },
+    { hex: "#284B35", pct: 0.9, ownership_state: "unknown" },
+  ]);
+  assert.equal(r.available, true);
+  assert.equal(r.samples.length, 2);
+  assert.equal(r.policy.explicit_positive_ownership_is_required, true);
+});
+
 test("genuinely different chromatic evidence is not forced into one material family or promoted as one material", () => {
   const r = estimateGarmentIntrinsicColorV1([
     { hex: "#935234", pct: 0.45, ownership_state: "owned" },
