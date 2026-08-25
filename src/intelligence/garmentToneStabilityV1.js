@@ -1,4 +1,5 @@
 import chroma from "chroma-js";
+import { applyGarmentColorConstancyToRegionsV1 } from "./garmentColorConstancyIntegrationV1.js";
 
 const TARGET_ZONES = new Set(["upper_garment"]);
 const DINO_SOURCE_TYPES = new Set(["grounding_dino", "dino_detection"]);
@@ -241,13 +242,24 @@ export function applyGarmentToneStabilityV1({ decodedImage = null, regions = [] 
     };
   });
 
+  // Final garment-evidence handoff: once ownership and purity stages have run,
+  // constancy separates immutable raw measurements from the publishable
+  // intrinsic material palette before downstream color evidence sees them.
+  const constancyRegions = applyGarmentColorConstancyToRegionsV1(out, { mode: "assist" });
+  const constancyAppliedCount = constancyRegions.filter((region) => region?.color_debug?.garment_color_constancy_v1?.applied).length;
+
   return {
-    regions: out,
+    regions: constancyRegions,
     summary: {
       available: true,
       version: "garment_tone_stability_v1",
       corrected_region_count: correctedRegionCount,
       unresolved_region_count: unresolvedRegionCount,
+      color_constancy_v1: {
+        mode: "assist",
+        applied_region_count: constancyAppliedCount,
+        handoff: "post_purity_pre_color_evidence",
+      },
       policy: {
         target_zones: [...TARGET_ZONES],
         color_specific_bias: false,
@@ -256,6 +268,7 @@ export function applyGarmentToneStabilityV1({ decodedImage = null, regions = [] 
         minimum_consensus_ratio: MIN_CONSENSUS_RATIO,
         estimator: "interior_window_lab_medoid",
         highlight_shadow_strategy: "trim_each_window_then_require_cross_window_consensus",
+        downstream_color_lane: "constancy_reconciled_publishable_palette",
       },
     },
   };

@@ -85,7 +85,7 @@ test("does not force a tone when interior garment is genuinely split", () => {
   assert.equal(result.reason, "interior_tone_disagreement");
 });
 
-test("updates upper DINO dominant only when stable interior consensus exists", () => {
+test("updates upper DINO dominant and hands a stable intrinsic palette downstream", () => {
   const img = image(120, 120, "#60321E");
   paintWindow(img, SPECS.upper_center, "#B86F4B");
   const regions = [{
@@ -95,20 +95,49 @@ test("updates upper DINO dominant only when stable interior consensus exists", (
     bounding_box: fullBox,
     dominant_hex: "#A45E3E",
     region_colors: [
-      { hex: "#A45E3E", pct: 0.84, source: "upper_garment_purity_v1" },
-      { hex: "#20110B", pct: 0.11, source: "upper_garment_purity_v1" },
+      { hex: "#A45E3E", pct: 0.58, source: "upper_garment_purity_v1", ownership_state: "owned" },
+      { hex: "#60321E", pct: 0.31, source: "upper_garment_purity_v1", ownership_state: "owned" },
+      { hex: "#20110B", pct: 0.11, source: "upper_garment_purity_v1", ownership_state: "owned" },
     ],
   }];
   const result = applyGarmentToneStabilityV1({ decodedImage: img, regions });
   assert.equal(result.summary.corrected_region_count, 1);
-  assert.ok(chroma.distance(result.regions[0].dominant_hex, "#60321E", "lab") < 8);
-  assert.equal(result.regions[0].region_colors[0].source, "garment_tone_stability_v1");
-  assert.ok(result.regions[0].color_debug.garment_tone_stability_v1.consensus_ratio >= 0.6);
+  assert.ok(result.summary.color_constancy_v1.applied_region_count >= 1);
+  assert.equal(result.regions[0].color_debug.garment_color_constancy_v1.applied, true);
+  assert.equal(result.regions[0].region_colors.length, 1);
+  assert.equal(result.regions[0].region_colors[0].intrinsic_material_identity, true);
+  assert.equal(result.regions[0].dominant_hex, result.regions[0].region_colors[0].hex);
+  assert.ok(Array.isArray(result.regions[0].color_debug.garment_color_constancy_v1.raw_region_colors));
+  assert.ok(result.regions[0].color_debug.garment_color_constancy_v1.raw_region_colors.length >= 2);
 });
 
-test("does not modify non-upper zones", () => {
+test("post-purity handoff also reconciles a stable lower garment", () => {
   const img = image();
-  const lower = { zone: "lower_garment", source_type: "grounding_dino", bounding_box: fullBox, dominant_hex: "#3F5041" };
+  const lower = {
+    zone: "lower_garment",
+    source_type: "grounding_dino",
+    bounding_box: fullBox,
+    dominant_hex: "#3F5041",
+    region_colors: [
+      { hex: "#3F5041", pct: 0.55, ownership_state: "owned" },
+      { hex: "#57685B", pct: 0.30, ownership_state: "owned" },
+      { hex: "#1D291F", pct: 0.15, ownership_state: "owned" },
+    ],
+  };
   const result = applyGarmentToneStabilityV1({ decodedImage: img, regions: [lower] });
-  assert.deepEqual(result.regions[0], lower);
+  assert.equal(result.regions[0].color_debug.garment_color_constancy_v1.applied, true);
+  assert.equal(result.regions[0].region_colors.length, 1);
+  assert.equal(result.regions[0].region_colors[0].intrinsic_material_identity, true);
+});
+
+test("non-garment zones are not promoted by color constancy", () => {
+  const img = image();
+  const background = {
+    zone: "background",
+    dominant_hex: "#123456",
+    region_colors: [{ hex: "#654321", pct: 1, ownership_state: "owned" }],
+  };
+  const result = applyGarmentToneStabilityV1({ decodedImage: img, regions: [background] });
+  assert.equal(result.regions[0].dominant_hex, "#123456");
+  assert.equal(result.regions[0].color_debug.garment_color_constancy_v1.applied, false);
 });

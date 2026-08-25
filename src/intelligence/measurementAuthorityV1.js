@@ -29,6 +29,14 @@ function sourcePriority(source) {
   return SOURCE_PRIORITY[String(source || "unknown")] ?? SOURCE_PRIORITY.unknown;
 }
 
+function explicitOwnershipValidation(candidate = {}) {
+  if (candidate?.ownership_validated === true) return true;
+  if (candidate?.ownership_validation?.validated === true) return true;
+  if (candidate?.ownership_validation?.status === "validated") return true;
+  if (candidate?.validation?.ownership_validated === true) return true;
+  return false;
+}
+
 function normalizeMeasurement(candidate = {}) {
   const hex = safeHex(candidate);
   if (!hex) return null;
@@ -49,6 +57,7 @@ function normalizeMeasurement(candidate = {}) {
   );
 
   const positivelyOwned = ["owned", "outfit", "positive", "confirmed"].includes(ownershipState);
+  const ownershipValidated = explicitOwnershipValidation(candidate);
   const globalOnly = source === "global_palette";
 
   const qualityScore =
@@ -57,7 +66,8 @@ function normalizeMeasurement(candidate = {}) {
     Math.round(boundaryRatio * 20) +
     Math.round(confidence * 10) +
     (traceable ? 15 : -35) +
-    (positivelyOwned ? 20 : -20) -
+    (positivelyOwned ? 20 : -20) +
+    (ownershipValidated ? 30 : -30) -
     (globalOnly ? 50 : 0);
 
   return {
@@ -71,6 +81,7 @@ function normalizeMeasurement(candidate = {}) {
     confidence,
     traceable_to_pixels: traceable,
     positively_owned: positivelyOwned,
+    ownership_validated: ownershipValidated,
     quality_score: qualityScore,
   };
 }
@@ -80,11 +91,15 @@ function normalizeMeasurement(candidate = {}) {
  *
  * Measurement is allowed to become publishable garment truth only when:
  * 1) the color is traceable to measured pixels;
- * 2) those pixels are positively owned by the target piece;
- * 3) higher-purity spatial evidence outranks broader fallbacks.
+ * 2) those pixels are positively assigned to the target piece;
+ * 3) that ownership assignment has been explicitly validated by a pixel-level
+ *    ownership process rather than inferred from provenance/source alone;
+ * 4) higher-purity spatial evidence outranks broader fallbacks.
  *
- * Global palette colors remain diagnostic/context evidence and can never win
- * garment measurement authority by themselves.
+ * A detector box, source label, confidence score, or provenance trail can
+ * propose evidence but cannot validate garment ownership by itself.
+ * Unvalidated measurements remain diagnostic evidence and must abstain from
+ * publication.
  */
 export function selectMeasuredColorAuthorityV1(candidates = []) {
   const normalized = (Array.isArray(candidates) ? candidates : [])
@@ -94,6 +109,7 @@ export function selectMeasuredColorAuthorityV1(candidates = []) {
   const publishable = normalized
     .filter((candidate) => candidate.traceable_to_pixels)
     .filter((candidate) => candidate.positively_owned)
+    .filter((candidate) => candidate.ownership_validated)
     .filter((candidate) => candidate.source !== "global_palette")
     .sort((a, b) => {
       if (b.quality_score !== a.quality_score) return b.quality_score - a.quality_score;
@@ -112,6 +128,10 @@ export function selectMeasuredColorAuthorityV1(candidates = []) {
     policy: {
       published_color_must_trace_to_measured_pixels: true,
       positive_piece_ownership_required: true,
+      pixel_ownership_validation_required: true,
+      provenance_alone_cannot_validate_accuracy: true,
+      detector_box_alone_cannot_validate_ownership: true,
+      unvalidated_measurements_must_abstain: true,
       global_palette_can_publish_garment_truth: false,
       higher_purity_spatial_measurement_wins: true,
       reasoning_cannot_invent_replacement_hex: true,

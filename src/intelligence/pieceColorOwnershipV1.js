@@ -5,9 +5,13 @@ import { selectMeasuredColorAuthorityV1 } from "./measurementAuthorityV1.js";
 const GARMENT_TARGET_ZONES = new Set(["upper_garment", "lower_garment", "body_garment", "outerwear"]);
 const DINO_SOURCE_TYPES = new Set(["grounding_dino", "dino_detection"]);
 const MIN_PIECE_CONFIDENCE = 0.45;
+const MIN_SAM_VALIDATOR_CONFIDENCE = 0.55;
+const MIN_SAM_TARGET_OVERLAP = 0.25;
+const MIN_SAM_MASK_OVERLAP = 0.5;
 const MAX_EXCLUDED_TARGET_RATIO = 0.35;
 const MIN_KEPT_SAMPLE_RATIO = 0.25;
 const DINO_INTERIOR_INSET_RATIO = 0.12;
+const GARMENT_SEMANTIC_PATTERN = /\b(shirt|top|tee|t-shirt|polo|sweater|hoodie|jacket|coat|pants|trousers|jeans|shorts|skirt|dress|garment|outerwear)\b/i;
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, Number(value) || 0));
@@ -55,8 +59,8 @@ export function normalizeOwnershipBox(regionOrBox = {}, imageWidth = 0, imageHei
 
   let x = Number(box.x ?? box.left ?? box.x_min);
   let y = Number(box.y ?? box.top ?? box.y_min);
-  let width = Number(box.width);
-  let height = Number(box.height);
+  let width = Number(box.width ?? box.w);
+  let height = Number(box.height ?? box.h);
 
   const xMax = Number(box.x_max ?? box.right);
   const yMax = Number(box.y_max ?? box.bottom);
@@ -169,14 +173,73 @@ function expandBox(box, targetBox, amount = 0.008) {
   return { x, y, right, bottom, width: right - x, height: bottom - y };
 }
 
-function buildMeasurementCandidates(region, interiorMeasurement) {
+function isSemanticallyIdentifiedSamGarment(region = {}) {
+  if (region?.source_type !== "sam_segment" || !GARMENT_TARGET_ZONES.has(String(region?.zone || ""))) return false;
+  if (!region?.mask_url || !region?.mask_geometry) return false;
+  if (normalizeConfidence(region?.confidence) < MIN_SAM_VALIDATOR_CONFIDENCE) return false;
+  const label = String(region?.segment_label || region?.label || "").trim();
+  if (!label || /^segment_?\d+$/i.test(label)) return false;
+  return GARMENT_SEMANTIC_PATTERN.test(label);
+}
+
+function buildValidatedSamCandidates(targetRegion, targetBox, regions = [], boxes = new Map()) {
+  const targetZone = String(targetRegion?.zone || "");
+  const validators = [];
+  const candidates = [];
+
+  for (const samRegion of regions) {
+    if (!isSemanticallyIdentifiedSamGarment(samRegion)) continue;
+    if (String(samRegion?.zone || "") !== targetZone) continue;
+    const samBox = boxes.get(samRegion);
+    if (!samBox) continue;
+    const overlap = intersection(targetBox, samBox);
+    if (!overlap) continue;
+    const targetOverlap = area(overlap) / Math.max(area(targetBox), 1e-6);
+    const maskOverlap = area(overlap) / Math.max(area(samBox), 1e-6);
+    if (targetOverlap < MIN_SAM_TARGET_OVERLAP || maskOverlap < MIN_SAM_MASK_OVERLAP) continue;
+
+    const colors = (Array.isArray(samRegion?.region_colors) ? samRegion.region_colors : [])
+      .map((color) => ({ ...color, hex: safeHex(color?.hex) }))
+      .filter((color) => !!color.hex);
+    if (!colors.length) continue;
+
+    const validator = {
+      validator: "sam_mask_pixel_membership_v1",
+      sam_region_id: samRegion?.id || samRegion?.region_id || null,
+      sam_segment_label: samRegion?.segment_label || samRegion?.label || null,
+      target_zone: targetZone,
+      target_overlap_ratio: round3(targetOverlap),
+      mask_overlap_ratio: round3(maskOverlap),
+      confidence: round3(normalizeConfidence(samRegion?.confidence)),
+      validated: true,
+    };
+    validators.push(validator);
+    for (const color of colors) {
+      candidates.push({
+        ...color,
+        source: "sam_mask_interior",
+        measurement_source: "sam_mask_interior",
+        ownership_state: "owned",
+        ownership_validated: true,
+        ownership_validation: validator,
+        confidence: normalizeConfidence(samRegion?.confidence),
+        traceable_to_pixels: true,
+        interior_ratio: 1,
+      });
+    }
+  }
+
+  return { candidates, validators };
+}
+
+function buildMeasurementCandidates(region, interiorMeasurement, validatedSamCandidates = []) {
   const confidence = normalizeConfidence(region?.confidence);
-  const ownershipState = "owned";
   const interior = (interiorMeasurement?.colors || []).map((color) => ({
     ...color,
     source: "dino_bbox_interior",
     measurement_source: "dino_bbox_interior",
-    ownership_state: ownershipState,
+    ownership_state: "proposed",
+    ownership_validated: false,
     confidence,
     traceable_to_pixels: true,
   }));
@@ -187,13 +250,14 @@ function buildMeasurementCandidates(region, interiorMeasurement) {
         hex: rawHex,
         source: "dino_bbox",
         measurement_source: "dino_bbox",
-        ownership_state: ownershipState,
+        ownership_state: "proposed",
+        ownership_validated: false,
         confidence,
         traceable_to_pixels: true,
       }]
     : [];
 
-  return [...interior, ...raw];
+  return [...validatedSamCandidates, ...interior, ...raw];
 }
 
 export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] } = {}) {
@@ -210,6 +274,7 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
   let correctedRegionCount = 0;
   let measuredRegionCount = 0;
   let excludedPieceCount = 0;
+  let validatedSamRegionCount = 0;
 
   const out = regions.map((region) => {
     const targetZone = String(region?.zone || "");
@@ -248,7 +313,10 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
       ? interiorMeasurement.sample_count /
         Math.max(1, interiorMeasurement.sample_count + Number(interiorMeasurement?.excluded_sample_count || 0))
       : 0;
-    const authority = selectMeasuredColorAuthorityV1(buildMeasurementCandidates(region, interiorMeasurement));
+    const samValidation = buildValidatedSamCandidates(region, targetBox, regions, boxes);
+    const authority = selectMeasuredColorAuthorityV1(
+      buildMeasurementCandidates(region, interiorMeasurement, samValidation.candidates)
+    );
     const selected = authority.selected;
 
     if (!interiorMeasurement?.available || !selected || keptRatio < MIN_KEPT_SAMPLE_RATIO) {
@@ -261,9 +329,10 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
             reason: !interiorMeasurement?.available
               ? interiorMeasurement?.reason || "interior_measurement_unavailable"
               : !selected
-                ? "no_publishable_measured_authority"
+                ? "no_validated_pixel_ownership_authority"
                 : "insufficient_owned_pixels",
             ownership_claims: ownershipClaims,
+            sam_ownership_validators: samValidation.validators,
             sample_count: interiorMeasurement?.sample_count || 0,
             excluded_sample_count: interiorMeasurement?.excluded_sample_count || 0,
             kept_sample_count: interiorMeasurement?.sample_count || 0,
@@ -275,38 +344,48 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
     }
 
     measuredRegionCount += 1;
+    validatedSamRegionCount += samValidation.validators.length;
     excludedPieceCount += ownershipClaims.length;
     const rawDominant = safeHex(region?.dominant_hex || region?.region_colors?.[0]?.hex || "");
     if (rawDominant !== selected.hex || ownershipClaims.length) correctedRegionCount += 1;
 
-    const ownedColors = (interiorMeasurement.colors || []).map((color) => ({
-      ...color,
-      source: "dino_bbox_interior",
+    const publishableColors = authority.publishable.map((color) => ({
+      hex: color.hex,
+      pct: color.pct,
+      percentage: color.percentage,
+      pixel_count: color.pixel_count,
+      source: color.source,
+      measurement_source: color.measurement_source || color.source,
       ownership_state: "owned",
+      ownership_validated: true,
+      ownership_validation: color.ownership_validation || null,
+      confidence: color.confidence,
       measurement_authority: selected.hex === color.hex ? "selected" : "supporting",
     }));
 
     return {
       ...region,
       dominant_hex: selected.hex,
-      region_colors: ownedColors,
+      region_colors: publishableColors,
       color_debug: {
         ...(region?.color_debug || {}),
         piece_color_ownership_v1: {
           applied: true,
-          authority: "measure_twice_v1_owned_interior_pixels",
+          authority: "validated_pixel_membership",
           raw_dominant_hex: rawDominant,
           raw_region_colors: Array.isArray(region?.region_colors) ? region.region_colors : [],
+          proposed_dino_interior_colors: interiorMeasurement.colors || [],
           owned_dominant_hex: selected.hex,
-          owned_region_colors: ownedColors,
+          owned_region_colors: publishableColors,
           ownership_claims: ownershipClaims,
+          sam_ownership_validators: samValidation.validators,
           sample_count: interiorMeasurement.sample_count,
           excluded_sample_count: interiorMeasurement.excluded_sample_count || 0,
           kept_sample_count: interiorMeasurement.sample_count,
           kept_sample_ratio: round3(keptRatio),
           measurement_source: selected.source,
           measurement_authority_v1: authority,
-          doctrine: "measure_twice_publish_once",
+          doctrine: "measure_validate_publish",
         },
       },
     };
@@ -320,16 +399,22 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
       corrected_region_count: correctedRegionCount,
       measured_region_count: measuredRegionCount,
       excluded_piece_count: excludedPieceCount,
+      validated_sam_region_count: validatedSamRegionCount,
       policy: {
         target_zones: [...GARMENT_TARGET_ZONES],
         dino_targets_only: true,
         minimum_piece_confidence: MIN_PIECE_CONFIDENCE,
+        minimum_sam_validator_confidence: MIN_SAM_VALIDATOR_CONFIDENCE,
+        minimum_sam_target_overlap: MIN_SAM_TARGET_OVERLAP,
+        minimum_sam_mask_overlap: MIN_SAM_MASK_OVERLAP,
         max_excluded_target_ratio: MAX_EXCLUDED_TARGET_RATIO,
         minimum_kept_sample_ratio: MIN_KEPT_SAMPLE_RATIO,
         interior_inset_ratio: DINO_INTERIOR_INSET_RATIO,
         invariant: "detected_piece_pixels_cannot_vote_as_neighboring_garment_color",
-        measurement_invariant: "measure_twice_publish_once",
+        measurement_invariant: "measure_validate_publish",
         dino_bbox_does_not_own_color_authority: true,
+        generic_sam_masks_do_not_validate_ownership: true,
+        validated_sam_mask_pixels_can_own_color_authority: true,
       },
     },
   };
