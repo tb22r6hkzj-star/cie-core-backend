@@ -92,6 +92,47 @@ function extractEvidenceChain(result = {}) {
   return zone?.evidence_chain || [];
 }
 
+function normalizedMode(value) {
+  const mode = String(value || "").toLowerCase();
+  if (["multi_color", "multicolor"].includes(mode)) return "multicolor";
+  if (["single_color", "single"].includes(mode)) return "single_color";
+  return mode || null;
+}
+
+function exactMapAccuracy(expected = {}, actual = {}) {
+  const entries = Object.entries(expected || {});
+  if (!entries.length) return 1;
+  return mean(entries.map(([key, value]) => String(actual?.[key] ?? "").toLowerCase() === String(value ?? "").toLowerCase() ? 1 : 0));
+}
+
+function extractZoneLabels(result = {}) {
+  return Object.fromEntries(Object.entries(extractZones(result)).map(([zoneKey, zone]) => [zoneKey, zone?.garment_type || zone?.label || zoneKey]));
+}
+
+function extractColorModes(result = {}) {
+  return Object.fromEntries(Object.entries(extractZones(result)).map(([zoneKey, zone]) => [zoneKey, normalizedMode(zone?.color_mode || zone?.interpretation)]));
+}
+
+function extractPatterns(result = {}) {
+  return Object.fromEntries(Object.entries(extractZones(result)).map(([zoneKey, zone]) => [zoneKey, zone?.pattern || zone?.pattern_type || "unknown"]));
+}
+
+function extractPrimaryColorsByZone(result = {}) {
+  return Object.fromEntries(Object.entries(extractZones(result)).map(([zoneKey, zone]) => [zoneKey, zone?.primary_color?.hex || zone?.dominant_color?.hex || zone?.hex || null]));
+}
+
+function zoneColorAccuracy(expected = {}, actual = {}) {
+  const entries = Object.entries(expected || {});
+  if (!entries.length) return 1;
+  return mean(entries.map(([zone, expectedColor]) => {
+    const expectedHex = expectedColor?.hex || expectedColor;
+    const actualHex = actual?.[zone]?.hex || actual?.[zone];
+    if (!expectedHex || !actualHex) return 0;
+    const distance = labColorDistance(expectedHex, actualHex);
+    return Math.max(0, 1 - distance / 30);
+  }));
+}
+
 function buildDebugArtifacts(result = {}) {
   const zones = extractZones(result);
   return {
@@ -136,6 +177,14 @@ export function evaluateSample(sample, result, profile = {}) {
   const evidenceQuality = expectedEvidence.length
     ? expectedEvidence.filter((stage) => actualEvidence.includes(stage)).length / expectedEvidence.length
     : 1;
+  const garmentIdentityAccuracy = exactMapAccuracy(sample.expected_zone_labels, extractZoneLabels(result));
+  const ownershipAccuracy = objectMetrics.recall;
+  const multicolorAccuracy = exactMapAccuracy(
+    Object.fromEntries(Object.entries(sample.expected_color_mode_by_zone || {}).map(([key, value]) => [key, normalizedMode(value)])),
+    extractColorModes(result)
+  );
+  const patternAccuracy = exactMapAccuracy(sample.expected_pattern_by_zone, extractPatterns(result));
+  const zoneColorFidelity = zoneColorAccuracy(sample.expected_primary_color_by_zone, extractPrimaryColorsByZone(result));
 
   return {
     image_id: sample.image_id,
@@ -143,6 +192,11 @@ export function evaluateSample(sample, result, profile = {}) {
     object_recall: objectMetrics.recall,
     lab_color_distance: dominantDistance,
     color_accuracy: colorAcc,
+    garment_identity_accuracy: garmentIdentityAccuracy,
+    ownership_accuracy: ownershipAccuracy,
+    multicolor_accuracy: multicolorAccuracy,
+    pattern_accuracy: patternAccuracy,
+    zone_color_fidelity: zoneColorFidelity,
     confidence,
     confidence_error: confidenceErr,
     publication_match: publicationMatch,
@@ -167,17 +221,27 @@ export function buildScorecard(perImage = []) {
   const perceptionAccuracy = mean(perImage.map((row) => mean([row.object_precision, row.object_recall])));
   const publicationPrecision = mean(perImage.map((row) => row.publication_match));
   const colorFidelity = mean(perImage.map((row) => row.color_accuracy));
+  const garmentIdentityAccuracy = mean(perImage.map((row) => row.garment_identity_accuracy));
+  const ownershipAccuracy = mean(perImage.map((row) => row.ownership_accuracy));
+  const multicolorAccuracy = mean(perImage.map((row) => row.multicolor_accuracy));
+  const patternAccuracy = mean(perImage.map((row) => row.pattern_accuracy));
+  const zoneColorFidelity = mean(perImage.map((row) => row.zone_color_fidelity));
   const evidenceQuality = mean(perImage.map((row) => row.evidence_quality));
   const consistency = mean(perImage.map((row) => row.decision_consistency));
   const explainability = mean(perImage.map((row) => row.debug_artifacts?.evidence_chain ? 1 : 0));
   const calibration = 1 - Math.min(1, buildCalibration(perImage).expected_calibration_error);
   const averageMs = mean(perImage.map((row) => row.inference_time_ms));
   const performance = averageMs > 0 ? 1 / (1 + averageMs / 1000) : 1;
-  const overall = mean([perceptionAccuracy, publicationPrecision, colorFidelity, evidenceQuality, consistency, explainability, calibration, performance]);
+  const overall = mean([perceptionAccuracy, publicationPrecision, colorFidelity, garmentIdentityAccuracy, ownershipAccuracy, multicolorAccuracy, patternAccuracy, zoneColorFidelity, evidenceQuality, consistency, explainability, calibration, performance]);
   return {
     perception_accuracy: perceptionAccuracy,
     publication_precision: publicationPrecision,
     color_fidelity: colorFidelity,
+    garment_identity_accuracy: garmentIdentityAccuracy,
+    ownership_accuracy: ownershipAccuracy,
+    multicolor_accuracy: multicolorAccuracy,
+    pattern_accuracy: patternAccuracy,
+    zone_color_fidelity: zoneColorFidelity,
     evidence_quality: evidenceQuality,
     consistency,
     explainability,
@@ -286,8 +350,14 @@ export function evaluateQualityGates(report = {}, config = {}) {
   const regressionCount = Number(report?.engine_health?.regression_count || report?.regression_count || 0);
   const averageMs = Number(report?.engine_health?.average_inference_time_ms || report?.performance?.average_inference_time_ms || 0);
   const reliability = Number(report?.scorecard?.overall_reliability || 0);
+  const metricFloors = config.metric_floors && typeof config.metric_floors === "object" ? config.metric_floors : {};
   if (regressionCount > maxRegressions) failures.push({ gate: "regression_count", actual: regressionCount, threshold: maxRegressions });
   if (averageMs > maxAverageMs) failures.push({ gate: "average_inference_time_ms", actual: averageMs, threshold: maxAverageMs });
   if (reliability < minReliability) failures.push({ gate: "overall_reliability", actual: reliability, threshold: minReliability });
+  for (const [metric, thresholdValue] of Object.entries(metricFloors)) {
+    const threshold = Number(thresholdValue);
+    const actual = Number(report?.scorecard?.[metric] ?? 0);
+    if (Number.isFinite(threshold) && actual < threshold) failures.push({ gate: metric, actual, threshold });
+  }
   return { passed: failures.length === 0, failures };
 }

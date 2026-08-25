@@ -51,6 +51,8 @@ import { applyUpperGarmentPurityV1 } from "./intelligence/upperGarmentPurityV1.j
 import { buildPublishedGarmentZonesV2 } from "./intelligence/publishedGarmentZonesV2.js";
 import { applySignatureColorAuthorityV2 } from "./intelligence/signatureColorAuthorityV2.js";
 import { buildSceneOwnershipV1 } from "./intelligence/sceneOwnershipV1.js";
+import { runOpenAISemanticObserverV1 } from "./intelligence/external/openaiSemanticObserverV1.js";
+import { normalizeExternalIntelligenceMode } from "./intelligence/visionCoreExternalIntelligencePolicyV1.js";
 import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
 import { mapDinoLabel } from "./engines/ontology/dinoMappings.js";
 import {
@@ -108,6 +110,27 @@ const MARKET_PERCEPTION_V6_MODE = normalizePerceptionV6Mode(
 // Market safety: headwear perception remains available internally, but customer-facing
 // assist publication stays off until hair-vs-headwear discrimination is validated.
 const MARKET_HEADWEAR_PUBLICATION_ENABLED = marketHeadwearPublicationEnabled(process.env);
+const EXTERNAL_INTELLIGENCE_MODE = normalizeExternalIntelligenceMode(process.env.VISIONCORE_EXTERNAL_INTELLIGENCE_MODE, "off");
+const externalSemanticCache = new Map();
+
+function buildExternalSemanticEvidence(outfitAnalysis = {}) {
+  const zones = outfitAnalysis?.garment_zones?.zones || {};
+  return {
+    pipeline_version: "visioncore_external_handoff_v1",
+    zones: Object.fromEntries(Object.entries(zones).map(([zoneKey, zone]) => [zoneKey, {
+      publication_state: zone?.publication_state || null,
+      garment_type: zone?.garment_type || zone?.label || null,
+      color_mode: zone?.color_mode || zone?.interpretation || null,
+      confidence: zone?.unified_confidence ?? zone?.calibrated_confidence ?? zone?.confidence ?? null,
+    }])),
+  };
+}
+
+function buildExternalCompositeDecision(outfitAnalysis = {}) {
+  const zones = Object.values(outfitAnalysis?.garment_zones?.zones || {}).filter(Boolean);
+  const confirmed = zones.length > 0 && zones.every((zone) => zone?.publication_state === "confirmed" || zone?.publication_decision === "publish");
+  return { publication_state: confirmed ? "confirmed" : "possible" };
+}
 
 /* =========================
    CORS
@@ -7536,6 +7559,26 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       return sendStepError(res, 500, "palette_engine", error);
     }
 
+    const externalSemantic = await runOpenAISemanticObserverV1({
+      mode: EXTERNAL_INTELLIGENCE_MODE,
+      imageUrl: publicUrl,
+      visionCoreEvidence: buildExternalSemanticEvidence(outfitAnalysis),
+      visionCoreDecision: buildExternalCompositeDecision(outfitAnalysis),
+      cache: externalSemanticCache,
+      cacheKey: `${publicUrl}:visioncore_external_handoff_v1:${process.env.OPENAI_SEMANTIC_MODEL || "gpt-5.6-luna"}`,
+    });
+    console.info("[EXTERNAL INTELLIGENCE] semantic observer", {
+      mode: EXTERNAL_INTELLIGENCE_MODE,
+      ok: externalSemantic.ok,
+      skipped: externalSemantic.skipped,
+      cached: externalSemantic.cached,
+      reason: externalSemantic.reason || null,
+      disposition: externalSemantic?.handoff?.disposition || null,
+      publication_changed: externalSemantic?.handoff?.publication_changed || false,
+      latency_ms: externalSemantic.latency_ms || 0,
+      estimated_cost_usd: externalSemantic.estimated_cost_usd || 0,
+    });
+
     return res.json({
       success: true,
       engine: "V2",
@@ -7564,6 +7607,16 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         pipeline: {
           ...analysis.pipeline,
           lower_sampling_version: LOWER_SAMPLING_VERSION,
+        },
+        external_intelligence: {
+          mode: EXTERNAL_INTELLIGENCE_MODE,
+          ok: externalSemantic.ok,
+          skipped: externalSemantic.skipped,
+          cached: externalSemantic.cached || false,
+          reason: externalSemantic.reason || null,
+          disposition: externalSemantic?.handoff?.disposition || null,
+          publication_changed: false,
+          authority_owner: "visioncore",
         },
       },
       summary:
