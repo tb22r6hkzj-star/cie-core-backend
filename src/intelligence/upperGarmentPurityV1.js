@@ -235,10 +235,17 @@ export function applyUpperGarmentPurityV1({ decodedImage = null, regions = [] } 
     };
   });
 
-  const toneStability = applyGarmentToneStabilityV1({ decodedImage, regions: out });
+  const upperRegions = out.filter((region) => String(region?.zone || "") === UPPER_ZONE);
+  const toneStability = applyGarmentToneStabilityV1({ decodedImage, regions: upperRegions });
+  let upperIndex = 0;
+  const reconciledRegions = out.map((region) => (
+    String(region?.zone || "") === UPPER_ZONE
+      ? toneStability.regions[upperIndex++]
+      : region
+  ));
 
   return {
-    regions: toneStability.regions,
+    regions: reconciledRegions,
     summary: {
       available: true,
       version: "upper_garment_purity_v1",

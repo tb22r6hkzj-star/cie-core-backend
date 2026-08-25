@@ -245,11 +245,7 @@ export function applyGarmentToneStabilityV1({ decodedImage = null, regions = [] 
   // Final garment-evidence handoff: once ownership and purity stages have run,
   // constancy separates immutable raw measurements from the publishable
   // intrinsic material palette before downstream color evidence sees them.
-  const constancyRegions = out.map((region) => (
-    TARGET_ZONES.has(String(region?.zone || ""))
-      ? applyGarmentColorConstancyToRegionsV1([region], { mode: "assist" })[0]
-      : region
-  ));
+  const constancyRegions = applyGarmentColorConstancyToRegionsV1(out, { mode: "assist" });
   const constancyAppliedCount = constancyRegions.filter((region) => region?.color_debug?.garment_color_constancy_v1?.applied).length;
 
   return {
