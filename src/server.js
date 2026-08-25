@@ -1592,13 +1592,26 @@ function isMateriallyDistinctGarmentColor(primaryHex, secondaryHex) {
   return (
     hueSeparation >= 18 ||
     saturationSeparation >= 0.25 ||
-    lightnessSeparation >= 0.32 ||
-    (primaryNeutral !== secondaryNeutral && lightnessSeparation >= 0.16) ||
+    (getLight(secondary) - getLight(primary) >= 0.32) ||
+    (primaryNeutral !== secondaryNeutral && Math.max(getSat(primary), getSat(secondary)) >= 0.25 && lightnessSeparation >= 0.16) ||
     (primaryNeutral && secondaryNeutral && lightnessSeparation >= 0.28)
   );
 }
 
-function buildGarmentPublicationAuthorityV1(zoneKey, zoneData = {}, regionColors = []) {
+function matchesOtherGarmentPrimary(primaryHex, secondaryHex, otherGarmentPrimaryHexes = []) {
+  const primary = safeHex(primaryHex || "");
+  const secondary = safeHex(secondaryHex || "");
+  if (!primary || !secondary) return false;
+  const primaryDistance = colorDistanceLab(primary, secondary);
+  return (Array.isArray(otherGarmentPrimaryHexes) ? otherGarmentPrimaryHexes : []).some((hex) => {
+    const otherPrimary = safeHex(hex || "");
+    if (!otherPrimary) return false;
+    const otherDistance = colorDistanceLab(otherPrimary, secondary);
+    return otherDistance <= 12 && otherDistance + 8 < primaryDistance;
+  });
+}
+
+function buildGarmentPublicationAuthorityV1(zoneKey, zoneData = {}, regionColors = [], context = {}) {
   if (!isGarmentZoneKey(zoneKey)) {
     return { applied: false, palette: regionColors, owned_secondary_count: 0 };
   }
@@ -1608,9 +1621,14 @@ function buildGarmentPublicationAuthorityV1(zoneKey, zoneData = {}, regionColors
   const intrinsic = rows.find((color) => color?.intrinsic_material_identity === true);
   const primary = intrinsic || rows.find((color) => dominantHex && colorDistanceLab(color?.hex || color?.base, dominantHex) < 6) || rows[0] || zoneData;
   const primaryHex = safeHex(primary?.hex || primary?.base || dominantHex || "");
+  let suppressedCrossZonePrimaryCount = 0;
   const ownedSecondaries = rows.filter((color) => {
     const hex = safeHex(color?.hex || color?.base || "");
     if (!hex || !primaryHex || !isMateriallyDistinctGarmentColor(primaryHex, hex)) return false;
+    if (matchesOtherGarmentPrimary(primaryHex, hex, context?.otherGarmentPrimaryHexes)) {
+      suppressedCrossZonePrimaryCount += 1;
+      return false;
+    }
     return hasExplicitColorOwnership(color) || hasSpatialGarmentOwnership(zoneKey, color);
   });
 
@@ -1622,6 +1640,7 @@ function buildGarmentPublicationAuthorityV1(zoneKey, zoneData = {}, regionColors
     owned_secondary_count: ownedSecondaries.length,
     raw_color_count: rows.length,
     suppressed_unowned_color_count: Math.max(0, rows.length - palette.length),
+    suppressed_cross_zone_primary_count: suppressedCrossZonePrimaryCount,
     raw_evidence_is_diagnostic_only: true,
   };
 }
@@ -1727,7 +1746,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     };
   }
 
-  const garmentPublicationAuthority = buildGarmentPublicationAuthorityV1(zoneKey, zoneData, regionColors);
+  const garmentPublicationAuthority = buildGarmentPublicationAuthorityV1(zoneKey, zoneData, regionColors, context);
   if (garmentPublicationAuthority.applied) {
     regionColors = garmentPublicationAuthority.palette;
     debugContext.garment_publication_authority_v1 = garmentPublicationAuthority;
@@ -2983,6 +3002,20 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     summarizeDinoStageForTrace("segmentedByZone.accessory_jewelry", segmentedByZone.accessory_jewelry || []),
   ];
   const missedZoneDebug = [];
+  const garmentPrimaryHexesByZone = Object.fromEntries(
+    ["upper_garment", "lower_garment"].map((garmentZone) => {
+      const candidates = (segmentedByZone[garmentZone] || []).flatMap((region) => {
+        const colors = Array.isArray(region?.region_colors) ? region.region_colors : [];
+        const intrinsic = colors.find((color) => color?.intrinsic_material_identity === true);
+        return [
+          intrinsic?.hex || intrinsic?.base,
+          region?.dominant_hex || region?.hex,
+          colors[0]?.hex || colors[0]?.base,
+        ].map((hex) => safeHex(hex || "")).filter(Boolean);
+      });
+      return [garmentZone, [...new Set(candidates)]];
+    })
+  );
 
   for (const [zoneKey, fallbackColor] of Object.entries(zoneMap)) {
     const zoneRegions = segmentedByZone[zoneKey] || [];
@@ -3222,6 +3255,9 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         selectedDinoRegionColors: Array.isArray(dinoPrimaryRegion?.region_colors) ? dinoPrimaryRegion.region_colors : [],
         refinedRegionColors,
         rawDinoRegionColors,
+        otherGarmentPrimaryHexes: Object.entries(garmentPrimaryHexesByZone)
+          .filter(([garmentZone]) => garmentZone !== zoneKey)
+          .flatMap(([, hexes]) => hexes),
         evidence,
       }
     );
