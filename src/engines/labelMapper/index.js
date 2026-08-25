@@ -187,6 +187,7 @@ export function getColorName(hex) {
   const lightness = getLight(safe);
   const chromaMagnitude = getChromaMagnitudeFromLab(getLab(safe));
   const directionalChromaticIdentity = getDirectionalChromaticIdentity(safe);
+  const lab = getLab(safe);
 
   if (isDarkOliveFamily(safe)) return "Deep Olive";
   if (directionalChromaticIdentity) return directionalChromaticIdentity;
@@ -220,6 +221,15 @@ export function getColorName(hex) {
   }
 
   if (hue >= 345 || hue < 8) return lightness < 0.48 ? "Deep Crimson" : "Rose";
+  // Warm earth browns can sit near the old red/orange hue boundary. When the
+  // yellow component is at least as strong as the red component, keep the
+  // human label in the brown family instead of contradicting the taxonomy.
+  if (
+    hue >= 8 && hue < 18 &&
+    saturation <= 0.68 &&
+    lightness >= 0.18 && lightness < 0.50 &&
+    Number(lab.b || 0) >= Number(lab.a || 0) * 0.9
+  ) return "Rich Brown";
   if (hue >= 8 && hue < 18) return lightness < 0.46 ? "Brick Red" : "Coral";
   if (hue >= 315 && hue < 333) return lightness < 0.54 ? "Berry" : "Dusty Rose";
   if (hue >= 333 && hue < 345) return lightness < 0.52 ? "Muted Lip Rose" : "Soft Blush";

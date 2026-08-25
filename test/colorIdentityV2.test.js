@@ -20,3 +20,8 @@ test("true neutral gray remains neutral", () => {
 test("existing vivid or clear forest green identity is preserved", () => {
   assert.match(getColorName("#284B35"), /Forest Green|Green|Sage/i);
 });
+
+test("warm earth brown measurements are never mislabeled as Brick Red", () => {
+  assert.equal(getColorName("#763D25"), "Rich Brown");
+  assert.equal(getColorName("#935234"), "Rich Brown");
+});

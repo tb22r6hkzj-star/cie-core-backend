@@ -1549,6 +1549,58 @@ function buildConfidenceBreakdown({
   };
 }
 
+function hasExplicitColorOwnership(color = {}) {
+  const state = String(color?.ownership_state || color?.ownership || "").toLowerCase();
+  return color?.ownership_validated === true && ["owned", "outfit", "positive", "confirmed"].includes(state);
+}
+
+function hasSpatialGarmentOwnership(zoneKey, color = {}) {
+  const source = String(color?.source || color?.measurement_source || "");
+  const bodyShare = Number(color?.body_share);
+  const spatialPenalty = Number(color?.spatial_penalty);
+  if (!Number.isFinite(bodyShare) || !Number.isFinite(spatialPenalty)) return false;
+  if (zoneKey === "upper_garment" && source === "upper_garment_purity_v1") {
+    const boundaryShare = Number(color?.boundary_share);
+    const underarmShare = Number(color?.underarm_share);
+    return Number.isFinite(boundaryShare) && Number.isFinite(underarmShare) &&
+      bodyShare >= 0.45 && boundaryShare <= 0.42 && underarmShare <= 0.28 && spatialPenalty >= 0.8;
+  }
+  if (zoneKey === "lower_garment" && source === "lower_garment_purity_v2") {
+    const separatorShare = Number(color?.separator_share);
+    return Number.isFinite(separatorShare) &&
+      bodyShare >= 0.45 && separatorShare <= 0.32 && spatialPenalty >= 0.8;
+  }
+  return false;
+}
+
+function buildGarmentPublicationAuthorityV1(zoneKey, zoneData = {}, regionColors = []) {
+  if (!isGarmentZoneKey(zoneKey)) {
+    return { applied: false, palette: regionColors, owned_secondary_count: 0 };
+  }
+
+  const dominantHex = safeHex(zoneData?.hex || "");
+  const rows = (Array.isArray(regionColors) ? regionColors : []).filter((color) => safeHex(color?.hex || color?.base || ""));
+  const intrinsic = rows.find((color) => color?.intrinsic_material_identity === true);
+  const primary = intrinsic || rows.find((color) => dominantHex && colorDistanceLab(color?.hex || color?.base, dominantHex) < 6) || rows[0] || zoneData;
+  const primaryHex = safeHex(primary?.hex || primary?.base || dominantHex || "");
+  const ownedSecondaries = rows.filter((color) => {
+    const hex = safeHex(color?.hex || color?.base || "");
+    if (!hex || !primaryHex || colorDistanceLab(hex, primaryHex) < 10) return false;
+    return hasExplicitColorOwnership(color) || hasSpatialGarmentOwnership(zoneKey, color);
+  });
+
+  const palette = primaryHex ? [{ ...primary, hex: primaryHex }, ...ownedSecondaries] : rows;
+  return {
+    applied: true,
+    palette,
+    primary_hex: primaryHex,
+    owned_secondary_count: ownedSecondaries.length,
+    raw_color_count: rows.length,
+    suppressed_unowned_color_count: Math.max(0, rows.length - palette.length),
+    raw_evidence_is_diagnostic_only: true,
+  };
+}
+
 function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColors = [], useRegionOnly = false, context = {}) {
   const fallbackName = zoneData?.name || titleCase(String(zoneKey || "unknown").replace(/_/g, " "));
   const debugContext = {
@@ -1650,6 +1702,12 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     };
   }
 
+  const garmentPublicationAuthority = buildGarmentPublicationAuthorityV1(zoneKey, zoneData, regionColors);
+  if (garmentPublicationAuthority.applied) {
+    regionColors = garmentPublicationAuthority.palette;
+    debugContext.garment_publication_authority_v1 = garmentPublicationAuthority;
+  }
+
   const accessoryDinoRegionColors = isAccessoryDinoPaletteZone(zoneKey) && Array.isArray(context?.selectedDinoRegionColors)
     ? context.selectedDinoRegionColors
     : [];
@@ -1670,7 +1728,11 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   const clusters = buildColorClusters(fallbackSet);
   debugContext.filtered_cluster_count = clusters.length;
   const regionCoverage = clamp01(regionColors.reduce((sum, c) => sum + Number(c?.pct || 0), 0));
-  const lowSignalRegion = useRegionOnly && regionCoverage < 0.3 && clusters.length < 2;
+  const lowSignalRegion =
+    useRegionOnly &&
+    regionCoverage < 0.3 &&
+    clusters.length < 2 &&
+    !garmentPublicationAuthority.applied;
   const sortedByLight = clusters.slice().sort((a, b) => getLight(a.base) - getLight(b.base));
   const darkestCluster = sortedByLight[0];
   const lightestCluster = sortedByLight[sortedByLight.length - 1];
@@ -1852,6 +1914,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   const rawDinoMulticolorReason =
     isDinoPreservedZone &&
     (isGarmentZoneKey(zoneKey) || zoneKey === "footwear") &&
+    (!isGarmentZoneKey(zoneKey) || garmentPublicationAuthority.owned_secondary_count > 0) &&
     rawDinoColorModeRead.reason
       ? `raw_dino_${rawDinoColorModeRead.reason}`
       : null;
