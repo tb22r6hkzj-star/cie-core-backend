@@ -50,6 +50,8 @@ test("green lower garment survives black belt, shoe bands, and central dark sepa
   assert.ok(zone.region_colors.length > 0);
   assert.ok(zone.region_colors[0].body_share >= 0.5);
   assert.ok(zone.color_debug.lower_garment_purity_v2.center_separator_weight > 0);
+  assert.ok(zone.color_debug.garment_color_constancy_v1);
+  assert.equal(result.summary.color_constancy_v1.handoff, "post_lower_purity_pre_upper_purity");
 });
 
 test("true black pants remain black when darkness is distributed across the garment body", () => {

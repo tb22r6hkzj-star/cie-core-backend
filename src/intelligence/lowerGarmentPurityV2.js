@@ -1,4 +1,5 @@
 import chroma from "chroma-js";
+import { applyGarmentColorConstancyIntegrationV1 } from "./garmentColorConstancyIntegrationV1.js";
 
 const LOWER_ZONE = "lower_garment";
 const DINO_SOURCE_TYPES = new Set(["grounding_dino", "dino_detection"]);
@@ -235,12 +236,26 @@ export function applyLowerGarmentPurityV2({ decodedImage = null, regions = [] } 
     };
   });
 
+  const constancyRegions = out.map((region) => (
+    String(region?.zone || "") === LOWER_ZONE
+      ? applyGarmentColorConstancyIntegrationV1(region, { mode: "assist" })
+      : region
+  ));
+  const constancyAppliedCount = constancyRegions.filter(
+    (region) => region?.color_debug?.garment_color_constancy_v1?.applied
+  ).length;
+
   return {
-    regions: out,
+    regions: constancyRegions,
     summary: {
       available: true,
       version: "lower_garment_purity_v2",
       corrected_region_count: correctedRegionCount,
+      color_constancy_v1: {
+        mode: "assist",
+        applied_region_count: constancyAppliedCount,
+        handoff: "post_lower_purity_pre_upper_purity",
+      },
       policy: {
         color_specific_bias: false,
         body_weight: 1,
