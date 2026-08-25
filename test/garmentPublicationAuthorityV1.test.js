@@ -111,3 +111,39 @@ test("owned light and shadow shades of one brown material do not create multicol
   assert.equal(result.color_mode, "single_color");
   assert.deepEqual(result.detected_colors.map((color) => color.hex), ["#935234"]);
 });
+
+test("another garment primary cannot publish as this garment's secondary", () => {
+  const palette = [
+    { hex: "#935234", pct: 0.82, source: "upper_garment_purity_v1", body_share: 0.74, boundary_share: 0.08, underarm_share: 0.04, spatial_penalty: 1 },
+    { hex: "#526455", pct: 0.18, source: "upper_garment_purity_v1", body_share: 0.48, boundary_share: 0.18, underarm_share: 0.06, spatial_penalty: 1 },
+  ];
+  const result = inferZoneColorRead(
+    "upper_garment",
+    { hex: "#935234", name: "Rich Brown", pct: 0.82, score: 83, confidence: 83 },
+    [],
+    palette,
+    true,
+    { otherGarmentPrimaryHexes: ["#3F5041"] }
+  );
+
+  assert.equal(result.color_mode, "single_color");
+  assert.deepEqual(result.detected_colors.map((color) => color.hex), ["#935234"]);
+  assert.equal(result._debug.garment_publication_authority_v1.suppressed_cross_zone_primary_count, 1);
+});
+
+test("dark same-hue lower-garment evidence remains shading, not Jet Black material", () => {
+  const palette = [
+    { hex: "#3F5041", pct: 0.55, source: "lower_garment_purity_v2", body_share: 0.72, separator_share: 0.08, spatial_penalty: 1 },
+    { hex: "#0D130E", pct: 0.40, source: "lower_garment_purity_v2", body_share: 0.54, separator_share: 0.18, spatial_penalty: 1 },
+  ];
+  const result = inferZoneColorRead(
+    "lower_garment",
+    { hex: "#3F5041", name: "Muted Forest Green", pct: 0.55, score: 59, confidence: 59 },
+    [],
+    palette,
+    true
+  );
+
+  assert.equal(result.color_mode, "single_color");
+  assert.deepEqual(result.detected_colors.map((color) => color.hex), ["#3F5041"]);
+});
