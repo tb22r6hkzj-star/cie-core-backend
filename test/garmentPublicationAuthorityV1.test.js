@@ -147,3 +147,22 @@ test("dark same-hue lower-garment evidence remains shading, not Jet Black materi
   assert.equal(result.color_mode, "single_color");
   assert.deepEqual(result.detected_colors.map((color) => color.hex), ["#3F5041"]);
 });
+
+test("belt and footwear black cannot publish as a lower-garment secondary", () => {
+  const palette = [
+    { hex: "#3F5041", pct: 0.64, source: "lower_garment_purity_v2", body_share: 0.72, separator_share: 0.08, spatial_penalty: 1 },
+    { hex: "#0A0D12", pct: 0.36, source: "lower_garment_purity_v2", body_share: 0.52, separator_share: 0.18, spatial_penalty: 1 },
+  ];
+  const result = inferZoneColorRead(
+    "lower_garment",
+    { hex: "#3F5041", name: "Muted Forest Green", pct: 0.64, score: 59, confidence: 59 },
+    [],
+    palette,
+    true,
+    { otherOwnedPiecePrimaryHexes: ["#0D131E", "#101114"] }
+  );
+
+  assert.equal(result.color_mode, "single_color");
+  assert.deepEqual(result.detected_colors.map((color) => color.hex), ["#3F5041"]);
+  assert.equal(result._debug.garment_publication_authority_v1.suppressed_owned_piece_primary_count, 1);
+});

@@ -1622,11 +1622,16 @@ function buildGarmentPublicationAuthorityV1(zoneKey, zoneData = {}, regionColors
   const primary = intrinsic || rows.find((color) => dominantHex && colorDistanceLab(color?.hex || color?.base, dominantHex) < 6) || rows[0] || zoneData;
   const primaryHex = safeHex(primary?.hex || primary?.base || dominantHex || "");
   let suppressedCrossZonePrimaryCount = 0;
+  let suppressedOwnedPiecePrimaryCount = 0;
   const ownedSecondaries = rows.filter((color) => {
     const hex = safeHex(color?.hex || color?.base || "");
     if (!hex || !primaryHex || !isMateriallyDistinctGarmentColor(primaryHex, hex)) return false;
     if (matchesOtherGarmentPrimary(primaryHex, hex, context?.otherGarmentPrimaryHexes)) {
       suppressedCrossZonePrimaryCount += 1;
+      return false;
+    }
+    if (matchesOtherGarmentPrimary(primaryHex, hex, context?.otherOwnedPiecePrimaryHexes)) {
+      suppressedOwnedPiecePrimaryCount += 1;
       return false;
     }
     return hasExplicitColorOwnership(color) || hasSpatialGarmentOwnership(zoneKey, color);
@@ -1641,6 +1646,7 @@ function buildGarmentPublicationAuthorityV1(zoneKey, zoneData = {}, regionColors
     raw_color_count: rows.length,
     suppressed_unowned_color_count: Math.max(0, rows.length - palette.length),
     suppressed_cross_zone_primary_count: suppressedCrossZonePrimaryCount,
+    suppressed_owned_piece_primary_count: suppressedOwnedPiecePrimaryCount,
     raw_evidence_is_diagnostic_only: true,
   };
 }
@@ -3002,9 +3008,9 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     summarizeDinoStageForTrace("segmentedByZone.accessory_jewelry", segmentedByZone.accessory_jewelry || []),
   ];
   const missedZoneDebug = [];
-  const garmentPrimaryHexesByZone = Object.fromEntries(
-    ["upper_garment", "lower_garment"].map((garmentZone) => {
-      const candidates = (segmentedByZone[garmentZone] || []).flatMap((region) => {
+  const piecePrimaryHexesByZone = Object.fromEntries(
+    ["upper_garment", "lower_garment", "footwear", "accessory_jewelry", "bag"].map((pieceZone) => {
+      const candidates = (segmentedByZone[pieceZone] || []).flatMap((region) => {
         const colors = Array.isArray(region?.region_colors) ? region.region_colors : [];
         const intrinsic = colors.find((color) => color?.intrinsic_material_identity === true);
         return [
@@ -3013,7 +3019,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
           colors[0]?.hex || colors[0]?.base,
         ].map((hex) => safeHex(hex || "")).filter(Boolean);
       });
-      return [garmentZone, [...new Set(candidates)]];
+      return [pieceZone, [...new Set(candidates)]];
     })
   );
 
@@ -3255,8 +3261,11 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         selectedDinoRegionColors: Array.isArray(dinoPrimaryRegion?.region_colors) ? dinoPrimaryRegion.region_colors : [],
         refinedRegionColors,
         rawDinoRegionColors,
-        otherGarmentPrimaryHexes: Object.entries(garmentPrimaryHexesByZone)
-          .filter(([garmentZone]) => garmentZone !== zoneKey)
+        otherGarmentPrimaryHexes: Object.entries(piecePrimaryHexesByZone)
+          .filter(([pieceZone]) => ["upper_garment", "lower_garment"].includes(pieceZone) && pieceZone !== zoneKey)
+          .flatMap(([, hexes]) => hexes),
+        otherOwnedPiecePrimaryHexes: Object.entries(piecePrimaryHexesByZone)
+          .filter(([pieceZone]) => ["footwear", "accessory_jewelry", "bag"].includes(pieceZone))
           .flatMap(([, hexes]) => hexes),
         evidence,
       }
