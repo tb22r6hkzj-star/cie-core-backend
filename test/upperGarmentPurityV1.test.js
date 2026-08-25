@@ -53,8 +53,12 @@ test("brown shirt body beats dark neckline, underarm gaps, and lower boundary co
   assert.equal(region.color_debug.upper_garment_purity_v1.applied, true);
   assert.equal(region.color_debug.garment_tone_stability_v1.applied, true);
   assert.ok(chroma.distance(region.dominant_hex, "#60321E", "lab") < 18);
-  assert.equal(region.region_colors[0].source, "garment_color_constancy_v1");
-  assert.equal(region.region_colors[0].measurement_source, "garment_tone_stability_v1");
+  assert.equal(region.region_colors[0].source, "garment_tone_stability_v1");
+  assert.equal(region.color_debug.garment_color_constancy_v1.applied, false);
+  assert.equal(
+    region.color_debug.garment_color_constancy_v1.reason,
+    "no_explicitly_owned_measured_colors"
+  );
   assert.ok(region.region_colors[0].body_share >= 0.45);
 });
 
