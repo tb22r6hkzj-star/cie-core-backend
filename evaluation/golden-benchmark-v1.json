@@ -1,0 +1,46 @@
+{
+  "schema_version": "visioncore_golden_catalog_v1",
+  "dataset_id": "visioncore-golden-benchmark-v1",
+  "status": "collection_in_progress",
+  "minimum_adjudicated_images": 100,
+  "promotion_minimums": {
+    "overall_reliability": 0.9,
+    "garment_identity_accuracy": 0.92,
+    "ownership_accuracy": 0.95,
+    "zone_color_fidelity": 0.9,
+    "multicolor_accuracy": 0.95,
+    "pattern_accuracy": 0.9,
+    "regression_count": 0
+  },
+  "annotation_policy": {
+    "minimum_annotators": 2,
+    "adjudicator_required_on_disagreement": true,
+    "uncertain_is_valid_ground_truth": true,
+    "single_reference_image_cannot_promote_a_release": true
+  },
+  "required_cells": [
+    { "id": "solid-simple-light", "minimum": 8, "axes": ["solid", "simple_background", "daylight"] },
+    { "id": "solid-busy-light", "minimum": 8, "axes": ["solid", "busy_background", "daylight"] },
+    { "id": "solid-indoor-warm", "minimum": 8, "axes": ["solid", "indoor", "warm_light"] },
+    { "id": "solid-low-light", "minimum": 8, "axes": ["solid", "low_light", "shadow"] },
+    { "id": "stripe-check", "minimum": 10, "axes": ["striped_or_checked", "multicolor"] },
+    { "id": "print-graphic", "minimum": 10, "axes": ["print_or_graphic", "multicolor"] },
+    { "id": "color-block", "minimum": 8, "axes": ["color_block", "multicolor"] },
+    { "id": "layered-overlap", "minimum": 10, "axes": ["layered", "overlap"] },
+    { "id": "accessory-boundary", "minimum": 10, "axes": ["belt", "footwear", "bag_or_jewelry", "ownership_conflict"] },
+    { "id": "neutral-extremes", "minimum": 8, "axes": ["black_white_gray", "shadow_highlight"] },
+    { "id": "camera-and-skin-diversity", "minimum": 12, "axes": ["multiple_skin_tones", "multiple_phone_cameras"] }
+  ],
+  "seed_cases": [
+    {
+      "image_id": "brown-shirt-green-trousers-reference-v1",
+      "annotation_status": "adjudicated",
+      "benchmark_axes": ["solid", "daylight", "belt", "footwear", "ownership_conflict"],
+      "expected_zone_labels": { "upper_garment": "shirt", "lower_garment": "trousers" },
+      "expected_color_mode_by_zone": { "upper_garment": "single_color", "lower_garment": "single_color" },
+      "expected_pattern_by_zone": { "upper_garment": "solid", "lower_garment": "solid" },
+      "expected_primary_color_by_zone": { "upper_garment": "#935234", "lower_garment": "#3F5041" },
+      "ground_truth_notes": "Black belongs to belt and footwear, not either garment palette. Source image remains outside the repository until consent and retention handling are finalized."
+    }
+  ]
+}

@@ -32,6 +32,13 @@ export function normalizeBenchmarkSample(sample = {}) {
     expected_evidence_chain: asArray(sample?.expected_evidence_chain).map(String),
     expected_dominant_color: sample?.expected_dominant_color ?? null,
     expected_secondary_colors: asArray(sample?.expected_secondary_colors),
+    expected_zone_labels: sample?.expected_zone_labels && typeof sample.expected_zone_labels === "object" ? { ...sample.expected_zone_labels } : {},
+    expected_color_mode_by_zone: sample?.expected_color_mode_by_zone && typeof sample.expected_color_mode_by_zone === "object" ? { ...sample.expected_color_mode_by_zone } : {},
+    expected_pattern_by_zone: sample?.expected_pattern_by_zone && typeof sample.expected_pattern_by_zone === "object" ? { ...sample.expected_pattern_by_zone } : {},
+    expected_primary_color_by_zone: sample?.expected_primary_color_by_zone && typeof sample.expected_primary_color_by_zone === "object" ? { ...sample.expected_primary_color_by_zone } : {},
+    benchmark_axes: asArray(sample?.benchmark_axes).map(String),
+    annotation_status: ["planned", "annotated", "adjudicated"].includes(sample?.annotation_status) ? sample.annotation_status : "planned",
+    annotator_count: Math.max(0, Number(sample?.annotator_count || 0)),
     ground_truth_notes: sample?.ground_truth_notes ? String(sample.ground_truth_notes) : null,
     metadata: sample?.metadata && typeof sample.metadata === "object" ? { ...sample.metadata } : {},
   };
