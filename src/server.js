@@ -1573,6 +1573,31 @@ function hasSpatialGarmentOwnership(zoneKey, color = {}) {
   return false;
 }
 
+function isMateriallyDistinctGarmentColor(primaryHex, secondaryHex) {
+  const primary = safeHex(primaryHex || "");
+  const secondary = safeHex(secondaryHex || "");
+  if (!primary || !secondary) return false;
+  const labDistance = colorDistanceLab(primary, secondary);
+  if (labDistance < 18) return false;
+
+  const hueSeparation = hueDistance(primary, secondary);
+  const saturationSeparation = Math.abs(getSat(primary) - getSat(secondary));
+  const lightnessSeparation = Math.abs(getLight(primary) - getLight(secondary));
+  const primaryNeutral = getSat(primary) < 0.14;
+  const secondaryNeutral = getSat(secondary) < 0.14;
+
+  // Same-direction chromatic shades are illumination/tone evidence, not proof
+  // of a second material. Neutral-vs-chromatic contrast or a strong neutral
+  // lightness split can still establish a genuinely distinct material.
+  return (
+    hueSeparation >= 18 ||
+    saturationSeparation >= 0.25 ||
+    lightnessSeparation >= 0.32 ||
+    (primaryNeutral !== secondaryNeutral && lightnessSeparation >= 0.16) ||
+    (primaryNeutral && secondaryNeutral && lightnessSeparation >= 0.28)
+  );
+}
+
 function buildGarmentPublicationAuthorityV1(zoneKey, zoneData = {}, regionColors = []) {
   if (!isGarmentZoneKey(zoneKey)) {
     return { applied: false, palette: regionColors, owned_secondary_count: 0 };
@@ -1585,7 +1610,7 @@ function buildGarmentPublicationAuthorityV1(zoneKey, zoneData = {}, regionColors
   const primaryHex = safeHex(primary?.hex || primary?.base || dominantHex || "");
   const ownedSecondaries = rows.filter((color) => {
     const hex = safeHex(color?.hex || color?.base || "");
-    if (!hex || !primaryHex || colorDistanceLab(hex, primaryHex) < 10) return false;
+    if (!hex || !primaryHex || !isMateriallyDistinctGarmentColor(primaryHex, hex)) return false;
     return hasExplicitColorOwnership(color) || hasSpatialGarmentOwnership(zoneKey, color);
   });
 
@@ -1718,6 +1743,7 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   const candidateColors = regionColors.length ? regionColors : useRegionOnly ? [] : normalizedColors;
   const zoneColors = candidateColors.filter((c) => {
     if (!c?.hex || !baseHex) return false;
+    if (garmentPublicationAuthority.applied) return true;
     const dist = colorDistanceLab(c.hex, baseHex);
     if (dist < 14) return true;
     if (Number(c?.pct || 0) >= 0.18 && dist < 20) return true;
@@ -2030,7 +2056,12 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   const zoneConfidence = Math.round(
     clamp100(Number(zoneData?.score || 0) * 0.55 + Number(zoneData?.confidence || 0) * 0.45)
   );
-  const useRawDinoMulticolorRead = !preserveDominantAccessoryIdentity && mode === "multicolor" && rawDinoMulticolorDetected && rawDinoMeaningfulClusters.length;
+  const useRawDinoMulticolorRead =
+    !isGarmentZoneKey(zoneKey) &&
+    !preserveDominantAccessoryIdentity &&
+    mode === "multicolor" &&
+    rawDinoMulticolorDetected &&
+    rawDinoMeaningfulClusters.length;
   const colorReadClusters = useRawDinoMulticolorRead
     ? rawDinoMeaningfulClusters
     : mode === "multicolor" && meaningfulClusters.length

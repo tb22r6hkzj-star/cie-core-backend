@@ -62,3 +62,52 @@ test("a spatially owned garment-body secondary remains eligible for publication"
   assert.equal(result._debug.garment_publication_authority_v1.owned_secondary_count, 1);
   assert.ok(result.detected_colors.some((color) => color.hex === "#D5C2A8"));
 });
+
+test("one owned secondary never reopens the entire raw DINO garment palette", () => {
+  const palette = [
+    { hex: "#935234", pct: 0.58, source: "upper_garment_purity_v1", body_share: 0.75, boundary_share: 0.08, underarm_share: 0.05, spatial_penalty: 1 },
+    { hex: "#D5C2A8", pct: 0.21, source: "upper_garment_purity_v1", body_share: 0.65, boundary_share: 0.12, underarm_share: 0.08, spatial_penalty: 1 },
+    { hex: "#526455", pct: 0.19 },
+    { hex: "#1E0D07", pct: 0.11 },
+  ];
+  const result = inferZoneColorRead(
+    "upper_garment",
+    { hex: "#935234", name: "Rich Brown", pct: 0.58, score: 88, confidence: 88 },
+    [],
+    palette,
+    true,
+    {
+      preserveDinoZoneColor: true,
+      preservedDinoHex: "#935234",
+      selectedDinoRegionColors: palette,
+      rawDinoRegionColors: palette,
+      zoneColorSource: "dino_primary",
+      evidence: { coverage: 0.8, weighted_confidence: 0.88, color_count: 4 },
+    }
+  );
+
+  const published = result.detected_colors.map((color) => color.hex);
+  assert.ok(published.includes("#935234"));
+  assert.ok(published.includes("#D5C2A8"));
+  assert.ok(!published.includes("#526455"));
+  assert.ok(!published.includes("#1E0D07"));
+});
+
+test("owned light and shadow shades of one brown material do not create multicolor", () => {
+  const palette = [
+    { hex: "#935234", pct: 0.56, ownership_state: "owned", ownership_validated: true },
+    { hex: "#763D25", pct: 0.27, ownership_state: "owned", ownership_validated: true },
+    { hex: "#502817", pct: 0.17, ownership_state: "owned", ownership_validated: true },
+  ];
+  const result = inferZoneColorRead(
+    "upper_garment",
+    { hex: "#935234", name: "Rich Brown", pct: 0.56, score: 90, confidence: 90 },
+    [],
+    palette,
+    true,
+    { preserveDinoZoneColor: true, preservedDinoHex: "#935234", rawDinoRegionColors: palette, zoneColorSource: "dino_primary" }
+  );
+
+  assert.equal(result.color_mode, "single_color");
+  assert.deepEqual(result.detected_colors.map((color) => color.hex), ["#935234"]);
+});
