@@ -24,6 +24,10 @@ test("normalizes common garment and accessory names", () => {
   assert.equal(normalizeSemanticPieceV1("trousers"), "lower_garment");
   assert.equal(normalizeSemanticPieceV1("loafers"), "footwear");
   assert.equal(normalizeSemanticPieceV1("necklace"), "accessory_jewelry");
+  assert.equal(normalizeSemanticPieceV1("short sleeve collared button front shirt"), "upper_garment");
+  assert.equal(normalizeSemanticPieceV1("straight-leg trousers"), "lower_garment");
+  assert.equal(normalizeSemanticPieceV1("loafer-style footwear"), "footwear");
+  assert.equal(normalizeSemanticPieceV1("layered necklaces"), "accessory_jewelry");
 });
 
 test("semantic-only belt remains unpublished pending spatial confirmation", () => {
@@ -46,6 +50,14 @@ test("external contradiction flags false eyewear without mutating published anal
   assert.equal(result.candidates[0].status, "conflict_review_candidate");
   assert.deepEqual(outfitAnalysis, before);
   assert.equal(outfitAnalysis.garment_analysis.detected_items[0].dominant_color.hex, "#935234");
+});
+
+test("comprehensive semantic inventory omission flags possible false eyewear without suppressing it", () => {
+  const result = reconcile([{ action: "support", piece: "short sleeve shirt", zone: "upper body", confidence: 0.99 }]);
+  const eyewear = result.candidates.find((candidate) => candidate.piece === "eyewear");
+  assert.equal(eyewear.status, "semantic_inventory_omission_review");
+  assert.equal(result.publication_changed, false);
+  assert.ok(outfitAnalysis.garment_analysis.detected_items.some((item) => item.type === "eyewear"));
 });
 
 test("lower garment support cannot replace VisionCore color evidence", () => {
