@@ -27,7 +27,14 @@ function cleanToken(value) {
 
 export function normalizeSemanticPieceV1(value) {
   const token = cleanToken(value);
-  return PIECE_ALIASES[token] || token || null;
+  if (PIECE_ALIASES[token]) return PIECE_ALIASES[token];
+  if (/(shirt|polo|blouse|sweater|hoodie|top)/.test(token)) return "upper_garment";
+  if (/(trouser|pants|jeans|shorts|skirt)/.test(token)) return "lower_garment";
+  if (/(shoe|loafer|sneaker|boot|footwear|heel|sandal)/.test(token)) return "footwear";
+  if (/(watch|necklace|jewel|chain|pendant|earring|ear_stud|bracelet|ring)/.test(token)) return "accessory_jewelry";
+  if (/(eyewear|glasses|sunglasses)/.test(token)) return "eyewear";
+  if (/(belt)/.test(token)) return "belt";
+  return token || null;
 }
 
 function evidenceTokens(value = {}) {
@@ -90,6 +97,20 @@ export function reconcileExternalSemanticsV1({ handoff = {}, outfitAnalysis = {}
     };
   });
 
+  const semanticallyAddressed = new Set(candidates.map((candidate) => candidate.piece).filter(Boolean));
+  for (const item of outfitAnalysis?.garment_analysis?.detected_items || []) {
+    const piece = normalizeSemanticPieceV1(item?.type);
+    if (!piece || semanticallyAddressed.has(piece)) continue;
+    candidates.push({
+      piece,
+      proposed_zone: item?.type || null,
+      action: "inventory_omission",
+      semantic_confidence: Number(handoff?.semantic_observation?.overall_confidence || 0),
+      spatial_evidence: spatialEvidenceFor(piece, outfitAnalysis),
+      status: "semantic_inventory_omission_review",
+    });
+  }
+
   return {
     version: "semantic_reconciliation_v1",
     mode: handoff?.mode || "off",
@@ -98,6 +119,7 @@ export function reconcileExternalSemanticsV1({ handoff = {}, outfitAnalysis = {}
     corroborated_count: candidates.filter((candidate) => candidate.status === "corroborated_shadow_candidate").length,
     spatial_confirmation_required_count: candidates.filter((candidate) => candidate.status === "semantic_only_requires_spatial_confirmation").length,
     conflict_count: candidates.filter((candidate) => candidate.status === "conflict_review_candidate").length,
+    inventory_omission_review_count: candidates.filter((candidate) => candidate.status === "semantic_inventory_omission_review").length,
     publication_changed: false,
     color_changed: false,
   };
