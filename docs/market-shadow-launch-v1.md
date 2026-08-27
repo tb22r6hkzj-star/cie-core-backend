@@ -4,6 +4,8 @@
 
 The market build activates external semantic intelligence in `shadow` by default. OpenAI can identify garment/accessory types, patterns, material cues, and possible ownership conflicts. It cannot change VisionCore color math, masks, garment ownership, scores, or publication.
 
+Semantic observations pass through `semantic_reconciliation_v1`: only VisionCore spatial evidence can corroborate an item, semantic-only items remain unpublished, and contradictions are logged for review without mutating the original result.
+
 Poor captures with a `retake` disposition do not call OpenAI. Missing or invalid OpenAI credentials skip cleanly and preserve the core VisionCore result.
 
 ## Protected production configuration
