@@ -53,6 +53,7 @@ import { applySignatureColorAuthorityV2 } from "./intelligence/signatureColorAut
 import { buildSceneOwnershipV1 } from "./intelligence/sceneOwnershipV1.js";
 import { runOpenAISemanticObserverV1 } from "./intelligence/external/openaiSemanticObserverV1.js";
 import { reconcileExternalSemanticsV1 } from "./intelligence/external/semanticReconciliationV1.js";
+import { attachBeltLocalizationV1 } from "./intelligence/beltLocalizationV1.js";
 import { normalizeExternalIntelligenceMode } from "./intelligence/visionCoreExternalIntelligencePolicyV1.js";
 import { evaluateCaptureQualityV1 } from "./intelligence/captureQualityGateV1.js";
 import { buildConsumerEvidenceV1 } from "./intelligence/consumerEvidenceV1.js";
@@ -4862,11 +4863,11 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
   const inputDinoRegions = inputSegmentedRegions.filter(
     (region) => region?.source_type === "grounding_dino" || region?.source_type === "dino_detection"
   );
-  const dinoRegions = dedupeDinoRegionsByZoneAndOverlap(
+  const dinoRegions = attachBeltLocalizationV1(dedupeDinoRegionsByZoneAndOverlap(
     [...inputDinoRegions, ...(Array.isArray(dinoGarmentRegions) ? dinoGarmentRegions : [])].filter(
       (region, idx, arr) => idx === arr.findIndex((candidate) => candidate?.id === region?.id && candidate?.segment_label === region?.segment_label && candidate?.zone === region?.zone)
     )
-  );
+  ), samRegions);
   const samZones = new Set(samRegions.map((region) => region?.zone).filter((zone) => zone && zone !== "unknown"));
   const dedupedDinoRegions = samRegions.length
     ? dinoRegions.filter((region) => !samZones.has(region?.zone))
@@ -4884,7 +4885,18 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     decodedImage,
     regions: lowerGarmentPurity.regions,
   });
-  const garmentEvidenceRegions = upperGarmentPurity.regions;
+  const beltLocalizationCandidates = dinoRegions
+    .filter((region) => region?.belt_localization)
+    .map((region) => ({
+      region_id: region.id || null,
+      label: region.label || region.segment_label || "belt",
+      object_type: "belt",
+      confidence: Number(region.confidence || 0),
+      ...region.belt_localization,
+    }));
+  const garmentEvidenceRegions = upperGarmentPurity.regions.filter(
+    (region) => !(region?.object_type === "belt" && region?.shadow_only === true)
+  );
   const garmentZoneSource = getGarmentZoneSource(samRegions, dedupedDinoRegions);
   const dinoLifecycleTrace = [
     summarizeDinoStageForTrace("analysis.dinoGarmentRegions", dinoGarmentRegions),
@@ -5063,6 +5075,14 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     piece_color_ownership_v1: pieceColorOwnership.summary,
     lower_garment_purity_v2: lowerGarmentPurity.summary,
     upper_garment_purity_v1: upperGarmentPurity.summary,
+    belt_localization_v1: {
+      version: "belt_localization_v1",
+      mode: "shadow",
+      candidates: beltLocalizationCandidates,
+      validated_count: beltLocalizationCandidates.filter((candidate) => candidate.validated).length,
+      publication_changed: false,
+      color_changed: false,
+    },
     perception_v5: perceptionV5,
     perception_v6: perceptionV6,
     perception_v6_mode: perceptionV6Mode,
@@ -5772,7 +5792,7 @@ const DEFAULT_REPLICATE_GROUNDING_DINO_VERSION =
   "efd10a8ddc57ea28773327e881ce95e20cc1d734c589f7dd01d2036921ed78aa";
 const DEFAULT_GROUNDING_DINO_QUERY =
   process.env.GROUNDING_DINO_QUERY ||
-  "person. hat. bag. shoes. boots. sneakers. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. accessory.";
+  "person. hat. bag. shoes. boots. sneakers. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. belt. waist belt. belt buckle. accessory.";
 
 function getSamPredictionsUrl(modelId = DEFAULT_REPLICATE_SAM_MODEL) {
   const configured = String(process.env.REPLICATE_SAM_MODEL_PREDICTIONS_URL || "").trim();
@@ -6073,6 +6093,9 @@ function buildDinoSegmentedRegions(detections = []) {
         label: detection?.label || mapping.label || "object",
         category: mapping.category || "piece",
         zone: mapping.zone,
+        display_zone_label: mapping.display_zone_label || null,
+        accessory_type: mapping.accessory_type || null,
+        object_type: mapping.object_type || null,
         confidence,
         source_type: "grounding_dino",
         bbox,
