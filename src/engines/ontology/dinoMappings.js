@@ -212,7 +212,16 @@ export const DINO_LABEL_MAPPINGS = [
     object_type: 'watch',
     confidence_floor: 0,
   },
-  ...['belt', 'scarf', 'accessory', 'accessories'].map((label) => ({
+  ...['belt', 'waist belt', 'belt buckle', 'waistband belt'].map((label) => ({
+    label,
+    category: 'accessory',
+    zone: 'accessory_jewelry',
+    display_zone_label: 'Belt',
+    accessory_type: 'belt',
+    object_type: 'belt',
+    confidence_floor: 0.55,
+  })),
+  ...['scarf', 'accessory', 'accessories'].map((label) => ({
     label,
     category: 'accessory',
     zone: 'accessory_jewelry',
