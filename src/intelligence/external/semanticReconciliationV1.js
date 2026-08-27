@@ -57,6 +57,14 @@ function evidenceSupportsPiece(piece, value = {}) {
 }
 
 function spatialEvidenceFor(piece, outfitAnalysis = {}) {
+  if (piece === "belt") {
+    const belt = (outfitAnalysis?.belt_localization_v1?.candidates || []).find((candidate) => candidate?.validated === true);
+    return {
+      supported: Boolean(belt),
+      source: belt ? "dino_sam_belt_localization_v1" : null,
+      confidence: Number(belt?.confidence || 0),
+    };
+  }
   const items = outfitAnalysis?.garment_analysis?.detected_items || [];
   const zones = Object.entries(outfitAnalysis?.garment_zones?.zones || {}).map(([zone, value]) => ({ zone, ...value }));
   const regions = outfitAnalysis?.segmented_regions || [];
