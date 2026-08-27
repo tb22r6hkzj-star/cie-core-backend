@@ -44,6 +44,21 @@ test("SAM or DINO spatial support produces a corroborated shadow candidate", () 
   assert.equal(result.candidates[0].status, "corroborated_shadow_candidate");
 });
 
+test("belt support requires a validated DINO plus SAM localization record", () => {
+  const withBelt = structuredClone(outfitAnalysis);
+  withBelt.belt_localization_v1 = {
+    candidates: [{ object_type: "belt", confidence: 82, validated: true }],
+  };
+  const result = reconcileExternalSemanticsV1({
+    handoff: { mode: "shadow", semantic_observation: { claims: [{ action: "support", piece: "belt", confidence: 0.96 }] } },
+    outfitAnalysis: withBelt,
+  });
+  assert.equal(result.candidates[0].status, "corroborated_shadow_candidate");
+  assert.equal(result.candidates[0].spatial_evidence.source, "dino_sam_belt_localization_v1");
+  assert.equal(result.publication_changed, false);
+  assert.equal(result.color_changed, false);
+});
+
 test("external contradiction flags false eyewear without mutating published analysis", () => {
   const before = structuredClone(outfitAnalysis);
   const result = reconcile([{ action: "contradict", piece: "eyewear", zone: "face", confidence: 0.99 }]);
