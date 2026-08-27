@@ -86,6 +86,12 @@ function estimateModelCost(model, usage = {}) {
   return input * rates.input / 1_000_000 + output * rates.output / 1_000_000;
 }
 
+function semanticTimeoutMs(value = process.env.OPENAI_SEMANTIC_TIMEOUT_MS) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 30_000;
+  return Math.min(60_000, Math.max(5_000, Math.round(parsed)));
+}
+
 export async function runOpenAISemanticObserverV1({
   mode = "off",
   apiKey = process.env.OPENAI_API_KEY,
@@ -93,6 +99,7 @@ export async function runOpenAISemanticObserverV1({
   visionCoreEvidence = {},
   visionCoreDecision = {},
   model = process.env.OPENAI_SEMANTIC_MODEL || "gpt-5.6-luna",
+  timeoutMs = process.env.OPENAI_SEMANTIC_TIMEOUT_MS,
   fetchImpl = globalThis.fetch,
   cache = null,
   cacheKey = null,
@@ -105,7 +112,7 @@ export async function runOpenAISemanticObserverV1({
 
   const request = buildOpenAISemanticRequestV1({ imageUrl, visionCoreEvidence, model });
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeout = setTimeout(() => controller.abort(), semanticTimeoutMs(timeoutMs));
   const startedAt = Date.now();
   try {
     const response = await fetchImpl("https://api.openai.com/v1/responses", {

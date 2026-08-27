@@ -58,6 +58,28 @@ test("provider failure fails open to VisionCore", async () => {
   assert.equal(result.handoff.authority_owner, "visioncore");
 });
 
+test("semantic timeout is bounded and still fails open", async () => {
+  let aborted = false;
+  const result = await runOpenAISemanticObserverV1({
+    mode: "shadow",
+    apiKey: "test-key",
+    imageUrl: "https://example.test/outfit.jpg",
+    timeoutMs: 1,
+    fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => {
+        aborted = true;
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      });
+    }),
+  });
+  assert.equal(aborted, true);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "external_timeout");
+  assert.equal(result.fail_open, true);
+});
+
 test("image-hash cache prevents repeat model calls", async () => {
   let calls = 0;
   const cache = new Map();
