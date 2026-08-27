@@ -1,7886 +1,2200 @@
-// src/server.js
-// FULL REWRITE â€” VisionCore backend
-//
-// ROUTES
-// âœ… GET  /
-// âœ… GET  /health
-// âœ… GET  /api/debug/status
-// âœ… POST /api/images/transform
-// âœ… POST /api/recommendations
-// âœ… POST /api/retrieval/preview
-//
-// FEATURES
-// âœ… Multer-hardened uploads
-// âœ… Cloudinary upload + color analysis
-// âœ… Pixelcut background removal with timeout handling
-// âœ… V2 palette engine
-// âœ… Outfit scoring
-// âœ… Style identity system
-// âœ… Mode-aware suggested adjustments
-// âœ… Retrieval intent
-// âœ… Shopping assist
-// âœ… Human color naming across ALL surfaced colors
-// âœ… Premium / luxury naming vocabulary
-// âœ… Step-based errors
-// âœ… LAB / perceptual intelligence layer added safely
-// âœ… Visual importance layer added safely
-// âœ… Structural Color Intelligence (SCI) added safely
-//
-// REQUIRED ENV
-// - CLOUDINARY_CLOUD_NAME
-// - CLOUDINARY_API_KEY
-// - CLOUDINARY_API_SECRET
-// - PIXELCUT_API_KEY
-// - PIXELCUT_ENDPOINT
-// - AMAZON_PARTNER_TAG (optional)
-
-import express from "express";
-import cors from "cors";
-import multer from "multer";
-import dotenv from "dotenv";
-import { v2 as cloudinary } from "cloudinary";
-import chroma from "chroma-js";
-import jpeg from "jpeg-js";
-import { PNG } from "pngjs";
-import { analyzePerceptionV5 } from "./intelligence/perceptionV5/index.js";
-import { analyzePerceptionV6 } from "./intelligence/perceptionV6/index.js";
-import { attachColorEvidenceToZones } from "./intelligence/colorEvidence/index.js";
-import { applyPieceColorOwnershipV1 } from "./intelligence/pieceColorOwnershipV1.js";
-import { applyLowerGarmentPurityV2 } from "./intelligence/lowerGarmentPurityV2.js";
-import { applyUpperGarmentPurityV1 } from "./intelligence/upperGarmentPurityV1.js";
-import { buildPublishedGarmentZonesV2 } from "./intelligence/publishedGarmentZonesV2.js";
-import { applySignatureColorAuthorityV2 } from "./intelligence/signatureColorAuthorityV2.js";
-import { buildSceneOwnershipV1 } from "./intelligence/sceneOwnershipV1.js";
-import { runOpenAISemanticObserverV1 } from "./intelligence/external/openaiSemanticObserverV1.js";
-import { normalizeExternalIntelligenceMode } from "./intelligence/visionCoreExternalIntelligencePolicyV1.js";
-import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
-import { mapDinoLabel } from "./engines/ontology/dinoMappings.js";
-import {
-  buildNamedHex,
-  buildNamedHexes,
-  getColorName,
-  normalizeCategoryLabel,
-  normalizeModeLabel,
-} from "./engines/labelMapper/index.js";
-import {
-  deriveStyleIdentity as deriveStyleIdentityFromStyleIdentity,
-} from "./engines/styleIdentity/index.js";
-import { inferAccessoryDisplayMetadata } from "./ui/accessoryDisplay.js";
-import {
-  marketHeadwearPublicationEnabled,
-  shouldPublishMarketAccessoryIdentity,
-} from "./ui/marketPublicationPolicy.js";
-import {
-  CATEGORY_COMPATIBILITY,
-  CATEGORY_SEARCH_KEYWORDS,
-  CATEGORY_SUBTYPES,
-} from "./engines/ontology/garmentTaxonomy.js";
-import {
-  OCCASION_IDS,
-  OCCASION_CATEGORIES,
-  OCCASION_MODES,
-} from "./engines/ontology/occasionOntology.js";
-
-let scoreEngine = null;
-try {
-  scoreEngine = await import("./engines/score/index.js");
-} catch (error) {
-  console.warn("Score engine unavailable; using legacy scoring fallback.", error?.message || error);
-}
-
-dotenv.config();
-
-const app = express();
-const PORT = process.env.PORT || 10000;
-const PIXELCUT_TIMEOUT_MS = 45000;
-const LOWER_SAMPLING_VERSION = "multi_window_v1";
-const PERCEPTION_V6_MODES = new Set(["shadow", "assist", "authoritative"]);
-
-function normalizePerceptionV6Mode(value, fallback = "shadow") {
-  const requested = String(value || "").trim().toLowerCase();
-  if (PERCEPTION_V6_MODES.has(requested)) return requested;
-  return PERCEPTION_V6_MODES.has(fallback) ? fallback : "shadow";
-}
-
-const MARKET_PERCEPTION_V6_MODE = normalizePerceptionV6Mode(
-  process.env.PERCEPTION_V6_MODE,
-  "assist"
-);
-
-// Market safety: headwear perception remains available internally, but customer-facing
-// assist publication stays off until hair-vs-headwear discrimination is validated.
-const MARKET_HEADWEAR_PUBLICATION_ENABLED = marketHeadwearPublicationEnabled(process.env);
-const EXTERNAL_INTELLIGENCE_MODE = normalizeExternalIntelligenceMode(process.env.VISIONCORE_EXTERNAL_INTELLIGENCE_MODE, "off");
-const externalSemanticCache = new Map();
-
-function buildExternalSemanticEvidence(outfitAnalysis = {}) {
-  const zones = outfitAnalysis?.garment_zones?.zones || {};
-  return {
-    pipeline_version: "visioncore_external_handoff_v1",
-    zones: Object.fromEntries(Object.entries(zones).map(([zoneKey, zone]) => [zoneKey, {
-      publication_state: zone?.publication_state || null,
-      garment_type: zone?.garment_type || zone?.label || null,
-      color_mode: zone?.color_mode || zone?.interpretation || null,
-      confidence: zone?.unified_confidence ?? zone?.calibrated_confidence ?? zone?.confidence ?? null,
-    }])),
-  };
-}
-
-function buildExternalCompositeDecision(outfitAnalysis = {}) {
-  const zones = Object.values(outfitAnalysis?.garment_zones?.zones || {}).filter(Boolean);
-  const confirmed = zones.length > 0 && zones.every((zone) => zone?.publication_state === "confirmed" || zone?.publication_decision === "publish");
-  return { publication_state: confirmed ? "confirmed" : "possible" };
-}
-
-/* =========================
-   CORS
-========================= */
-app.use(
-  cors({
-    origin: "*",
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-API-KEY"],
-  })
-);
-app.options("*", cors());
-
-/* =========================
-   BODY PARSING
-========================= */
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true }));
-
-/* =========================
-   MULTER
-========================= */
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
-});
-
-/* =========================
-   CLOUDINARY
-========================= */
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-  secure: true,
-});
-
-/* =========================
-   BASIC ROUTES
-========================= */
-app.get("/", (_req, res) => {
-  res.json({ ok: true, service: "cie-core-backend" });
-});
-
-app.get("/health", (_req, res) => {
-  res.json({ ok: true });
-});
-
-app.get("/api/debug/status", (_req, res) => {
-  res.json({
-    ok: true,
-    service: "cie-core-backend",
-    port: PORT,
-    env: {
-      CLOUDINARY_CLOUD_NAME: !!process.env.CLOUDINARY_CLOUD_NAME,
-      CLOUDINARY_API_KEY: !!process.env.CLOUDINARY_API_KEY,
-      CLOUDINARY_API_SECRET: !!process.env.CLOUDINARY_API_SECRET,
-      PIXELCUT_API_KEY: !!process.env.PIXELCUT_API_KEY,
-      PIXELCUT_ENDPOINT: !!process.env.PIXELCUT_ENDPOINT,
-      AMAZON_PARTNER_TAG: !!process.env.AMAZON_PARTNER_TAG,
-    },
-  });
-});
-
-/* =========================
-   ERROR HELPERS
-========================= */
-function sendStepError(res, status, step, error, extra = {}) {
-  return res.status(status).json({
-    success: false,
-    step,
-    error: error?.message || String(error) || "Unknown error",
-    ...extra,
-  });
-}
-
-/* =========================
-   GENERIC HELPERS
-========================= */
-function clamp01(x) {
-  return Math.max(0, Math.min(1, x));
-}
-
-function clamp100(x) {
-  return Math.max(0, Math.min(100, x));
-}
-
-function round2(x) {
-  return Math.round(Number(x || 0) * 100) / 100;
-}
-
-function safeHex(hex) {
-  try {
-    return chroma(hex).hex().toUpperCase();
-  } catch {
-    return null;
-  }
-}
-
-function avg(nums) {
-  const clean = (nums || []).filter((n) => Number.isFinite(n));
-  if (!clean.length) return 0;
-  return clean.reduce((a, b) => a + b, 0) / clean.length;
-}
-
-function uniqHexes(arr) {
-  const seen = new Set();
-  const out = [];
-  for (const hex of arr || []) {
-    const safe = safeHex(hex);
-    if (!safe) continue;
-    if (seen.has(safe)) continue;
-    seen.add(safe);
-    out.push(safe);
-  }
-  return out;
-}
-
-function titleCase(value) {
-  const s = String(value || "").trim().toLowerCase();
-  return s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
-}
-
-function normalizeText(value) {
-  return String(value || "").trim().toLowerCase();
-}
-
-function getHue(hex) {
-  try {
-    const [h] = chroma(hex).hsl();
-    return Number.isFinite(h) ? h : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function getSat(hex) {
-  try {
-    const [, s] = chroma(hex).hsl();
-    return clamp01(s || 0);
-  } catch {
-    return 0;
-  }
-}
-
-function getLight(hex) {
-  try {
-    const [, , l] = chroma(hex).hsl();
-    return clamp01(l || 0);
-  } catch {
-    return 0;
-  }
-}
-
-function isBlueHue(h) {
-  return h >= 205 && h <= 252;
-}
-
-function isNavyCandidate(hex) {
-  const safe = safeHex(hex);
-  if (!safe) return false;
-  const h = getHue(safe);
-  const s = getSat(safe);
-  const l = getLight(safe);
-  const traits = getPerceptualTraits(safe);
-  const chromaMagnitude = Number(traits?.chroma_magnitude || 0);
-
-  if (!isBlueHue(h)) return false;
-  if (l < 0.28 && (s < 0.2 || chromaMagnitude < 22)) return false;
-  return s >= 0.18 && chromaMagnitude >= 20;
-}
-
-function isDarkOliveFamily(hex) {
-  const safe = safeHex(hex);
-  if (!safe) return false;
-
-  const hue = getHue(safe);
-  const saturation = getSat(safe);
-  const lightness = getLight(safe);
-  const [red, green, blue] = chroma(safe).rgb();
-  const greenHighestOrTied = green >= red && green >= blue;
-
-  return (
-    lightness < 0.18 &&
-    hue >= 60 &&
-    hue < 105 &&
-    saturation >= 0.06 &&
-    greenHighestOrTied
-  );
-}
-
-
-function hueDistance(a, b) {
-  const ha = getHue(a);
-  const hb = getHue(b);
-  const d = Math.abs(ha - hb);
-  return Math.min(d, 360 - d);
-}
-
-function colorDistanceLab(a, b) {
-  try {
-    return chroma.distance(a, b, "lab");
-  } catch {
-    return 0;
-  }
-}
-
-function topNColorsByPct(topColors, n = 5) {
-  return (topColors || [])
-    .slice()
-    .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0))
-    .slice(0, n)
-    .map((x) => x.hex)
-    .filter(Boolean);
-}
-
-function rotateHue(hex, deg) {
-  const c = chroma(hex);
-  const [h, s, l] = c.hsl();
-  const hh = ((h || 0) + deg + 360) % 360;
-  return chroma.hsl(hh, clamp01(s || 0), clamp01(l || 0)).hex().toUpperCase();
-}
-
-function setTone(hex, { sMul = 1, lMul = 1, lAdd = 0, sAdd = 0 } = {}) {
-  const c = chroma(hex);
-  let [h, s, l] = c.hsl();
-  h = Number.isFinite(h) ? h : 0;
-  s = clamp01((s || 0) * sMul + sAdd);
-  l = clamp01((l || 0) * lMul + lAdd);
-  return chroma.hsl(h, s, l).hex().toUpperCase();
-}
-
-/* =========================
-   LAB / PERCEPTUAL HELPERS
-========================= */
-function getLab(hex) {
-  try {
-    const [l, a, b] = chroma(hex).lab();
-    return {
-      l: round2(l),
-      a: round2(a),
-      b: round2(b),
-    };
-  } catch {
-    return {
-      l: 0,
-      a: 0,
-      b: 0,
-    };
-  }
-}
-
-function getChromaMagnitudeFromLab(lab) {
-  const a = Number(lab?.a || 0);
-  const b = Number(lab?.b || 0);
-  return round2(Math.sqrt(a * a + b * b));
-}
-
-function getPerceptualTraits(hex) {
-  const safe = safeHex(hex);
-  if (!safe) {
-    return {
-      depth: "mid",
-      temperature: "balanced",
-      bias: "neutral",
-      intensity: "balanced",
-      chroma_magnitude: 0,
-    };
-  }
-
-  const lab = getLab(safe);
-  const chromaMagnitude = getChromaMagnitudeFromLab(lab);
-
-  let depth = "mid";
-  if (lab.l < 30) depth = "deep";
-  else if (lab.l > 75) depth = "light";
-
-  let temperature = "balanced";
-  if (lab.a >= 8 || lab.b >= 8) temperature = "warm";
-  else if (lab.a <= -8 || lab.b <= -8) temperature = "cool";
-
-  let bias = "neutral";
-  if (Math.abs(lab.a) > Math.abs(lab.b)) {
-    if (lab.a > 8) bias = "red";
-    else if (lab.a < -8) bias = "green";
-  } else {
-    if (lab.b > 8) bias = "yellow";
-    else if (lab.b < -8) bias = "blue";
-  }
-
-  let intensity = "balanced";
-  if (chromaMagnitude < 18) intensity = "muted";
-  else if (chromaMagnitude > 55) intensity = "vivid";
-
-  return {
-    depth,
-    temperature,
-    bias,
-    intensity,
-    chroma_magnitude: chromaMagnitude,
-  };
-}
-
-
-const COLOR_IDENTITY_TRANSLATIONS = {
-  "Graphite": "Cool Gray",
-  "Deep Crimson": "Dark Red",
-  "Soft Linen": "Off White",
-  "Warm Sand": "Golden Beige",
-  "Cognac": "Caramel Brown",
-  "Forest Green": "Dark Green",
-  "Deep Navy": "Dark Blue",
-  "Deep Olive": "Olive Green",
-  "Rose": "Red-Pink",
-  "Graphite Black": "Dark Gray",
-};
-
-function getColorIdentityTone(name, traits = {}) {
-  const text = String(name || "").toLowerCase();
-  if (text.includes("deep") || text.includes("dark") || text.includes("black") || traits.depth === "deep") return "deep";
-  if (text.includes("soft") || text.includes("muted") || traits.intensity === "muted") return "soft";
-  if (text.includes("light") || text.includes("linen") || traits.depth === "light") return "light";
-  if (text.includes("vivid") || text.includes("bright") || traits.intensity === "vivid") return "vivid";
-  if (text.includes("warm") || traits.temperature === "warm") return "warm";
-  if (text.includes("cool") || traits.temperature === "cool") return "cool";
-  return traits.depth || "balanced";
-}
-
-function getEverydayColorFamily(hex, classification = null, traits = null) {
-  const safe = safeHex(hex);
-  if (!safe) return "neutral";
-  const meta = classification || classifyColorV2(safe);
-  const perceptual = traits || getPerceptualTraits(safe);
-  const light = getLight(safe);
-  const sat = getSat(safe);
-  const lane = meta?.lane || "other";
-
-  if (sat < 0.12) {
-    if (light < 0.18) return "black";
-    if (light > 0.82) return "white";
-    return "gray";
-  }
-  if (lane === "cyan") return "blue-green";
-  if (meta?.family === "earth" && ["orange", "yellow"].includes(lane)) return "brown";
-  if (lane === "pink") return "pink";
-  if (lane && lane !== "other") return lane;
-  return perceptual?.bias || meta?.family || "neutral";
-}
-
-function titleEverydayFamily(family) {
-  return String(family || "neutral")
-    .split("-")
-    .map((part) => titleCase(part))
-    .join("-");
-}
-
-function generateColorIdentityTranslation({ name, hex, family, tone, traits = {} }) {
-  const text = String(name || "").toLowerCase();
-  const everydayFamily = family || getEverydayColorFamily(hex, null, traits);
-  const familyLabel = titleEverydayFamily(everydayFamily);
-
-  if (text.includes("taupe")) return "Brown Gray";
-  if (text.includes("teal")) return tone === "deep" ? "Dark Blue-Green" : "Blue-Green";
-  if (text.includes("olive")) return tone === "deep" ? "Olive Green" : tone === "soft" ? "Soft Green" : "Green";
-  if (text.includes("linen") || text.includes("ivory") || text.includes("cream")) return "Off White";
-  if (text.includes("navy")) return "Dark Blue";
-  if (text.includes("crimson") || text.includes("burgundy")) return tone === "deep" ? "Dark Red" : "Red";
-  if (text.includes("cognac")) return "Caramel Brown";
-  if (text.includes("sand") || text.includes("beige")) return traits.temperature === "warm" || text.includes("warm") ? "Golden Beige" : "Beige";
-
-  if (tone === "deep") return `Dark ${familyLabel}`;
-  if (tone === "soft" || tone === "muted") return `Soft ${familyLabel}`;
-  if (tone === "light") return everydayFamily === "white" ? "Off White" : `Light ${familyLabel}`;
-  return familyLabel;
-}
-
-function buildColorIdentity({ name, hex, family = null, tone = null, perceptual = null } = {}) {
-  const safe = safeHex(hex);
-  const visionName = String(name || (safe ? getColorName(safe) : "Unknown")).trim();
-  const classification = safe ? classifyColorV2(safe) : null;
-  const traits = perceptual || (safe ? getPerceptualTraits(safe) : {});
-  const identityFamily = family || getEverydayColorFamily(safe, classification, traits);
-  const identityTone = tone || getColorIdentityTone(visionName, traits);
-  const translation = COLOR_IDENTITY_TRANSLATIONS[visionName] || generateColorIdentityTranslation({
-    name: visionName,
-    hex: safe,
-    family: identityFamily,
-    tone: identityTone,
-    traits,
-  });
-
-  return {
-    name: visionName,
-    translation,
-    family: identityFamily,
-    tone: identityTone,
-  };
-}
-
-function withColorIdentity(color) {
-  if (!color) return color;
-  const hex = safeHex(color?.hex || color?.base);
-  const name = color?.name || (hex ? getColorName(hex) : "Unknown");
-  return {
-    ...color,
-    color_identity: color.color_identity || buildColorIdentity({
-      name,
-      hex,
-      family: color?.family,
-      tone: color?.tone,
-      perceptual: color?.perceptual || color?.perceptual_traits,
-    }),
-  };
-}
-
-function buildColorIdentitySummary(identity, role = "dominant color family") {
-  if (!identity?.name) return null;
-  return `${identity.name} (${identity.translation}) is the ${role}.`;
-}
-
-function buildGarmentIdentity(primaryColor, secondaryColors = []) {
-  const primaryIdentity = primaryColor?.color_identity || withColorIdentity(primaryColor)?.color_identity || null;
-  return {
-    primary_identity: primaryIdentity ? {
-      name: primaryIdentity.name,
-      translation: primaryIdentity.translation,
-    } : null,
-    secondary_identities: (secondaryColors || [])
-      .map((color) => color?.color_identity || withColorIdentity(color)?.color_identity)
-      .filter(Boolean)
-      .map((identity) => ({ name: identity.name, translation: identity.translation })),
-  };
-}
-
-/* =========================
-   COLOR PROFILES
-========================= */
-function buildColorProfile(hex, pct = 0) {
-  const safe = safeHex(hex);
-  if (!safe) return null;
-
-  const classification = classifyColorV2(safe);
-  const lab = getLab(safe);
-  const traits = getPerceptualTraits(safe);
-
-  return withColorIdentity({
-    hex: safe,
-    name: getColorName(safe),
-    pct: round2(pct),
-    hue: round2(getHue(safe)),
-    sat: round2(getSat(safe)),
-    light: round2(getLight(safe)),
-    lab,
-    perceptual: traits,
-    family: classification.family,
-    lane: classification.lane,
-    vivid: classification.vivid,
-    color_identity: buildColorIdentity({
-      name: getColorName(safe),
-      hex: safe,
-      family: getEverydayColorFamily(safe, classification, traits),
-      perceptual: traits,
-    }),
-  });
-}
-
-function isGarmentZoneKey(zoneKey) {
-  return ["upper_garment", "lower_garment", "outerwear", "body_garment"].includes(zoneKey);
-}
-
-function compactColorRead(color) {
-  const safe = safeHex(color?.hex || color?.base);
-  if (!safe) return null;
-  const read = {
-    hex: safe,
-    name: color?.name || getColorName(safe),
-    pct: round2(color?.pct || 0),
-  };
-  if (color?.display_pct !== undefined) {
-    read.display_pct = round2(normalizeColorPct(color.display_pct));
-    read.percentage = formatColorPct(read.display_pct);
-  } else if (color?.percentage !== undefined) {
-    read.percentage = color.percentage;
-  }
-  return withColorIdentity(read);
-}
-
-function joinHumanList(values = []) {
-  const clean = values.map((v) => String(v || "").trim()).filter(Boolean);
-  if (clean.length <= 1) return clean[0] || "";
-  if (clean.length === 2) return `${clean[0]} and ${clean[1]}`;
-  return `${clean.slice(0, -1).join(", ")}, and ${clean[clean.length - 1]}`;
-}
-
-function colorIsSoftNeutral(color) {
-  const hex = safeHex(color?.hex || color?.base);
-  if (!hex) return false;
-  const classification = classifyColorV2(hex);
-  const traits = getPerceptualTraits(hex);
-  return classification.family === "neutral" || Number(traits.chroma_magnitude || 0) < 22;
-}
-
-function buildColorStory(primaryColor, secondaryColors = [], accentColors = []) {
-  if (!primaryColor?.name) return null;
-
-  const secondaryNames = secondaryColors.map((c) => c.name).filter(Boolean);
-  const accentNames = accentColors.map((c) => c.name).filter(Boolean);
-  const mainNames = [primaryColor.name, ...secondaryNames].filter(Boolean);
-
-  if (!secondaryNames.length && !accentNames.length) {
-    return `This garment is primarily ${primaryColor.name}.`;
-  }
-
-  const mainPhrase = joinHumanList(mainNames);
-  if (!accentNames.length) {
-    return `This garment combines ${mainPhrase}.`;
-  }
-
-  const allAccentsAreNeutral = accentColors.length > 0 && accentColors.every(colorIsSoftNeutral);
-  const accentPhrase = allAccentsAreNeutral
-    ? "soft neutral accents"
-    : `${joinHumanList(accentNames)} accents`;
-
-  return `This garment combines ${mainPhrase} with ${accentPhrase}.`;
-}
-
-function buildGarmentColorProfile({ zoneKey, mode, dominantColor, supportColors = [], accentColors = [] }) {
-  if (!isGarmentZoneKey(zoneKey) || !["multicolor", "multi_color"].includes(mode)) return {};
-
-  const primaryColor = compactColorRead(dominantColor);
-  if (!primaryColor) return {};
-
-  const secondaryColors = (supportColors || []).map(compactColorRead).filter(Boolean);
-  const accents = (accentColors || []).map(compactColorRead).filter(Boolean);
-
-  return {
-    primary_color: primaryColor,
-    secondary_colors: secondaryColors,
-    accent_colors: accents,
-    color_story: buildColorStory(primaryColor, secondaryColors, accents),
-  };
-}
-
-function normalizeColorPct(pct = 0) {
-  const value = Number(pct || 0);
-  if (!Number.isFinite(value) || value <= 0) return 0;
-  return value > 1 ? value / 100 : value;
-}
-
-function formatColorPct(pct = 0) {
-  return `${Math.round(normalizeColorPct(pct) * 100)}%`;
-}
-
-function compactRegionColor(color) {
-  const hex = safeHex(color?.hex || color?.base);
-  if (!hex) return null;
-  const pct = round2(normalizeColorPct(color?.pct));
-  return withColorIdentity({
-    hex,
-    name: color?.name || getColorName(hex),
-    pct,
-    percentage: formatColorPct(pct),
-  });
-}
-
-function deriveSignatureColorDisplayRead(zoneRead = {}, zoneKey = "") {
-  const displayWorthyPct = ["bag", "footwear", "accessory_jewelry", "eyewear"].includes(zoneKey) ? 0.1 : 0.12;
-  const distinctDistance = 14;
-  const dominantHex = safeHex(zoneRead?.dominant_color?.hex || "");
-  const primaryHex = safeHex(zoneRead?.primary_color?.hex || "");
-  const anchorHex = primaryHex || dominantHex;
-  const regionColors = Array.isArray(zoneRead?.region_colors)
-    ? zoneRead.region_colors.map(compactRegionColor).filter(Boolean)
-    : [];
-  const isDistinctFromAnchor = (color) => {
-    const hex = safeHex(color?.hex || "");
-    if (!hex || !anchorHex) return false;
-    if (hex === anchorHex) return false;
-    return colorDistanceLab(hex, anchorHex) >= distinctDistance;
-  };
-  const toSignatureColor = (color, source, reason) => {
-    const hex = safeHex(color?.hex || "");
-    if (!hex) return null;
-    return {
-      hex,
-      name: color?.name || getColorName(hex),
-      reason,
-      source,
-      display_only: true,
-    };
-  };
-
-  const secondaryRegionColor = regionColors
-    .slice(1)
-    .find((color) => normalizeColorPct(color?.pct) >= displayWorthyPct && isDistinctFromAnchor(color));
-  if (secondaryRegionColor) {
-    return toSignatureColor(
-      secondaryRegionColor,
-      "region_colors",
-      "Meaningful secondary color from finalized region_colors."
-    );
-  }
-
-  const topRegionColor = regionColors[0];
-  if (
-    topRegionColor &&
-    normalizeColorPct(topRegionColor?.pct) >= displayWorthyPct &&
-    primaryHex &&
-    dominantHex &&
-    primaryHex !== dominantHex &&
-    safeHex(topRegionColor.hex) !== primaryHex &&
-    colorDistanceLab(topRegionColor.hex, primaryHex) >= distinctDistance
-  ) {
-    return toSignatureColor(
-      topRegionColor,
-      "region_colors",
-      "Distinct finalized region color provides display-only style identity."
-    );
-  }
-
-  if (dominantHex && primaryHex && dominantHex !== primaryHex && colorDistanceLab(dominantHex, primaryHex) >= distinctDistance) {
-    return toSignatureColor(
-      zoneRead.dominant_color,
-      "dominant_color",
-      "Dominant color differs from finalized primary color and is useful as display-only context."
-    );
-  }
-
-  const identity = zoneRead?.dominant_color?.color_identity || zoneRead?.primary_color?.color_identity || null;
-  const identityName = String(identity?.name || "").trim();
-  const identityHex = safeHex(identity?.hex || dominantHex || primaryHex || "");
-  const readName = String(zoneRead?.dominant_color?.name || zoneRead?.primary_color?.name || "").trim();
-  if (identityHex && identityName && readName && identityName.toLowerCase() !== readName.toLowerCase()) {
-    return {
-      hex: identityHex,
-      name: identityName,
-      reason: "Finalized color_identity adds display-only style context.",
-      source: "color_identity",
-      display_only: true,
-    };
-  }
-
-  return null;
-}
-
-
-function getColorSummaryName(color = {}) {
-  const hex = safeHex(color?.hex || color?.base);
-  return String(color?.name || (hex ? getColorName(hex) : "Unknown")).trim();
-}
-
-function mergeColorSummaryFamilies(colors = []) {
-  const groups = new Map();
-  for (const color of colors || []) {
-    const compact = compactRegionColor(color);
-    if (!compact?.name) continue;
-    const key = compact.name.toLowerCase();
-    const existing = groups.get(key);
-    const pct = normalizeColorPct(compact.pct);
-    if (existing) {
-      existing.pct = round2(normalizeColorPct(existing.pct) + pct);
-      existing.percentage = formatColorPct(existing.pct);
-      if (pct > Number(existing._topPct || 0)) {
-        existing.hex = compact.hex;
-        existing.color_identity = compact.color_identity;
-        existing._topPct = pct;
-      }
-    } else {
-      groups.set(key, { ...compact, pct, percentage: formatColorPct(pct), _topPct: pct });
-    }
-  }
-  const mergedColors = Array.from(groups.values());
-  const totalPct = mergedColors.reduce((sum, color) => sum + normalizeColorPct(color?.pct), 0);
-  return mergedColors
-    .map(({ _topPct, ...color }) => {
-      const displayPct = totalPct > 0 ? normalizeColorPct(color.pct) / totalPct : 0;
-      return withColorIdentity({
-        ...color,
-        display_pct: round2(displayPct),
-        percentage: formatColorPct(displayPct),
-      });
-    })
-    .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
-}
-
-function mergeColorReadSummaryFamilies(colors = []) {
-  return mergeColorSummaryFamilies(colors).map(compactColorRead).filter(Boolean);
-}
-
-function mergeClusterSummaryFamilies(clusters = []) {
-  return mergeColorSummaryFamilies((clusters || []).map((c) => ({
-    hex: c?.base || c?.hex,
-    name: c?.name || getDominantClusterInputName(c) || getColorSummaryName(c),
-    pct: c?.pct,
-  })));
-}
-
-function shouldPreserveDominantAccessoryColor(zoneKey, clusters = []) {
-  if (!["accessory_jewelry", "bag", "eyewear", "headwear"].includes(zoneKey)) return false;
-  const sorted = (clusters || [])
-    .filter((c) => safeHex(c?.base || c?.hex))
-    .map((c) => ({ ...c, pct: normalizeColorPct(c?.pct) }))
-    .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
-  const topPct = Number(sorted?.[0]?.pct || 0);
-  const secondPct = Number(sorted?.[1]?.pct || 0);
-  return topPct >= 0.75 && topPct >= secondPct * 2;
-}
-
-function getDominantClusterInputName(cluster) {
-  const colors = Array.isArray(cluster?.colors) ? cluster.colors : [];
-  let best = null;
-  for (const color of colors) {
-    const name = typeof color?.name === "string" ? color.name.trim() : "";
-    if (!name) continue;
-    const pct = normalizeColorPct(color?.pct);
-    if (!best || pct > best.pct) best = { name, pct };
-  }
-  return best?.name || null;
-}
-
-function buildPreservedAccessoryColor(cluster, fallback = {}) {
-  const hex = safeHex(cluster?.base || fallback?.hex || fallback?.base);
-  if (!hex) return null;
-  const name = getDominantClusterInputName(cluster) || fallback?.name || getColorName(hex);
-  return withColorIdentity({
-    hex,
-    name,
-    pct: round2(cluster?.pct ?? fallback?.pct ?? 0),
-  });
-}
-
-function getZoneColorMode(clusters = []) {
-  const sorted = (clusters || [])
-    .filter((c) => safeHex(c?.base || c?.hex))
-    .map((c) => ({ ...c, pct: normalizeColorPct(c?.pct) }))
-    .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
-  const topPct = Number(sorted?.[0]?.pct || 0);
-  const secondPct = Number(sorted?.[1]?.pct || 0);
-  const meaningfulCount = sorted.filter((c) => Number(c?.pct || 0) >= 0.08).length;
-  const reason = sorted.length > 0 && topPct < 0.55
-    ? "top_pct_lt_0_55"
-    : secondPct >= 0.18
-      ? "second_pct_gte_0_18"
-      : meaningfulCount >= 3
-        ? "three_colors_pct_gte_0_08"
-        : null;
-  return {
-    color_mode: reason ? "multi_color" : "single_color",
-    reason,
-    topPct,
-    secondPct,
-    meaningfulCount,
-  };
-}
-
-function buildEvidenceSummary(colorMode, clusters = [], source = null) {
-  const summaryColors = mergeClusterSummaryFamilies(clusters);
-  const primary = summaryColors?.[0] || null;
-  const secondary = summaryColors.slice(1, 4);
-  if (!primary) return "No reliable color evidence for this zone.";
-  const sourcePhrase = source ? ` from ${source}` : "";
-  if (colorMode === "multi_color") {
-    const support = secondary.map((c) => `${c.name} (${c.percentage})`);
-    return `Primary ${primary.name} (${primary.percentage})${support.length ? ` supported by ${joinHumanList(support)}` : ""}${sourcePhrase}.`;
-  }
-  return `Primary ${primary.name} (${primary.percentage}) is the dominant zone read${sourcePhrase}.`;
-}
-
-function isAccessoryDinoPaletteZone(zoneKey) {
-  return ["accessory_jewelry", "bag", "belt", "eyewear", "headwear", "scarf", "scarves"].includes(zoneKey);
-}
-
-function getAccessoryDetectedColorName(color = {}) {
-  const hex = safeHex(color?.hex || color?.base);
-  if (!hex) return color?.name || "Unknown";
-  const traits = getPerceptualTraits(hex);
-  if (
-    !isNavyCandidate(hex) &&
-    getLight(hex) < 0.24 &&
-    Number(traits?.chroma_magnitude || 0) < 22
-  ) {
-    return getBlackNuanceLabel(hex);
-  }
-  return color?.name || getColorName(hex);
-}
-
-function buildAccessoryDinoDetectedPalette(regionColors = []) {
-  return (Array.isArray(regionColors) ? regionColors : [])
-    .map((color) => compactRegionColor({
-      ...color,
-      name: getAccessoryDetectedColorName(color),
-    }))
-    .filter(Boolean);
-}
-
-function splitAccessoryDetectedPaletteRoles(detectedPalette = []) {
-  const rows = Array.isArray(detectedPalette) ? detectedPalette : [];
-  return {
-    primary: rows[0] ? compactColorRead(rows[0]) : null,
-    secondary: rows.slice(1).filter((color) => normalizeColorPct(color?.pct) > 0).map(compactColorRead).filter(Boolean),
-    accent: rows.slice(1).filter((color) => normalizeColorPct(color?.pct) <= 0).map(compactColorRead).filter(Boolean),
-  };
-}
-
-function isAccessoryDisplayPaletteZone(zoneKey) {
-  return ["accessory_jewelry", "bag", "belt", "eyewear", "headwear"].includes(zoneKey);
-}
-
-function isBrownFamilyHex(hex) {
-  const safe = safeHex(hex);
-  if (!safe) return false;
-  const hue = getHue(safe);
-  const sat = getSat(safe);
-  const light = getLight(safe);
-  return hue >= 8 && hue <= 55 && sat >= 0.22 && light >= 0.08 && light <= 0.62;
-}
-
-function preserveAccessoryRawPalette(colors = []) {
-  return (Array.isArray(colors) ? colors : [])
-    .map((color) => {
-      const hex = safeHex(color?.hex || color?.base);
-      if (!hex) return null;
-      return {
-        ...color,
-        hex,
-        name: getAccessoryDetectedColorName({ ...color, hex }),
-        pct: color?.pct,
-      };
-    })
-    .filter(Boolean);
-}
-
-function accessoryPaletteContaminationReason(color = {}) {
-  const hex = safeHex(color?.hex || color?.base);
-  if (!hex) return "invalid_hex";
-  const pct = normalizeColorPct(color?.pct);
-  if (pct <= 0) return null;
-  if (isBrownFamilyHex(hex)) return null;
-  const hue = getHue(hex);
-  const sat = getSat(hex);
-  const light = getLight(hex);
-  if (light >= 0.86 && sat <= 0.2) return "highlight_or_glare";
-  if (hue >= 8 && hue <= 55 && sat >= 0.12 && sat <= 0.55 && light >= 0.48 && light <= 0.86) {
-    return "skin_or_beige_contamination";
-  }
-  return null;
-}
-
-function filterAccessoryDisplayPalette(colors = []) {
-  const kept = [];
-  const rejected = [];
-  for (const color of buildAccessoryDinoDetectedPalette(colors)) {
-    const reason = accessoryPaletteContaminationReason(color);
-    if (reason) rejected.push({ hex: color.hex, pct: color.pct, reason });
-    else kept.push(color);
-  }
-  return { kept, rejected };
-}
-
-function selectAccessoryDisplayPalette({ refinedCrop = [], candidateRegion = [], rawDino = [], detector = [], fallback = [] } = {}) {
-  const sources = [
-    ["refined_crop", refinedCrop],
-    ["candidate_region", candidateRegion],
-    ["raw_dino", rawDino],
-    ["detector", detector],
-    ["fallback", fallback],
-  ];
-  const source_trace = [];
-  for (const [source, colors] of sources) {
-    const { kept, rejected } = filterAccessoryDisplayPalette(colors);
-    source_trace.push({ source, input_count: Array.isArray(colors) ? colors.length : 0, surviving_count: kept.length, rejected });
-    if (kept.length) {
-      return {
-        palette: kept,
-        selected_source: source,
-        trace: {
-          selected_source: source,
-          precedence: ["refined_crop", "candidate_region", "raw_dino", "detector", "fallback"],
-          reason_not_replaced: "higher_priority_confirmed_values_are_authoritative",
-          sources: source_trace,
-        },
-      };
-    }
-  }
-  return {
-    palette: [],
-    selected_source: null,
-    trace: {
-      selected_source: null,
-      precedence: ["refined_crop", "candidate_region", "raw_dino", "detector", "fallback"],
-      reason_not_replaced: "no_publishable_accessory_palette_survived",
-      sources: source_trace,
-    },
-  };
-}
-
-
-function normalizeConfidencePercent(value) {
-  const n = Number(value || 0);
-  if (!Number.isFinite(n)) return 0;
-  return n <= 1 ? clamp100(n * 100) : clamp100(n);
-}
-
-function calibrateConfidence(value, { evidenceWeight = 1, floor = 1, ceiling = 99 } = {}) {
-  const normalized = normalizeConfidencePercent(value);
-  const weighted = normalized * clamp01(Number(evidenceWeight || 0));
-  return Math.round(Math.max(floor, Math.min(ceiling, weighted)));
-}
-
-function displayPaletteEvidenceWeight(source) {
-  if (source === "refined_crop") return 1;
-  if (source === "candidate_region") return 0.95;
-  if (source === "raw_dino") return 0.88;
-  if (source === "detector") return 0.8;
-  return 0.7;
-}
-
-function calibrateDisplayColorConfidence({
-  zoneConfidence = 0,
-  colorPct = 0,
-  sourceConfidence = 0,
-  evidenceWeight = 1,
-} = {}) {
-  const zone = normalizeConfidencePercent(zoneConfidence) / 100;
-  const pct = clamp01(normalizeColorPct(colorPct));
-  const source = normalizeConfidencePercent(sourceConfidence) / 100;
-  const combined = (zone * 0.55 + pct * 0.30 + source * 0.15) * 100;
-  return calibrateConfidence(combined, { evidenceWeight, floor: 1, ceiling: 99 });
-}
-
-function withDisplayColorConfidence(color, context = {}) {
-  if (!color) return color;
-  return {
-    ...color,
-    confidence: calibrateDisplayColorConfidence({
-      zoneConfidence: context.zoneConfidence,
-      colorPct: color?.pct,
-      sourceConfidence: context.sourceConfidence,
-      evidenceWeight: context.evidenceWeight,
-    }),
-  };
-}
-
-function buildContaminationEvidenceScore({ dominant = null, regionCoverage = 0, suppressionGates = {} } = {}) {
-  const hex = safeHex(dominant?.base || dominant?.hex || "");
-  const pct = clamp01(normalizeColorPct(dominant?.pct));
-  const hue = hex ? getHue(hex) : 0;
-  const sat = hex ? getSat(hex) : 0;
-  const light = hex ? getLight(hex) : 0;
-  const skinLike = hex && !isBrownFamilyHex(hex) && hue >= 8 && hue <= 55 && sat >= 0.12 && sat <= 0.55 && light >= 0.42 && light <= 0.88 ? 1 : 0;
-  const highlightLike = hex && light >= 0.82 && sat <= 0.22 ? 1 : 0;
-  const neutralWeak = suppressionGates?.isNeutralContamination ? 1 : 0;
-  const lowSignal = suppressionGates?.lowSignalRegion ? 1 : 0;
-  const weakDominant = suppressionGates?.isWeakDominantEvidence ? 1 : 0;
-  const legacySkinGate = suppressionGates?.jewelrySkinContamination ? 1 : 0;
-  const lackOfCoverage = clamp01(1 - Number(regionCoverage || 0));
-  const components = {
-    skin_like: round2(skinLike * 0.34),
-    highlight_like: round2(highlightLike * 0.24),
-    neutral_weak: round2(neutralWeak * 0.12),
-    low_signal: round2(lowSignal * 0.08),
-    weak_dominant: round2(weakDominant * 0.08),
-    legacy_skin_gate: round2(legacySkinGate * 0.08),
-    low_coverage: round2(lackOfCoverage * (1 - pct) * 0.06),
-  };
-  const total = round2(Object.values(components).reduce((sum, value) => sum + Number(value || 0), 0));
-  return { total, components };
-}
-
-function flattenRejectedDisplayAlternatives(trace = null) {
-  return (trace?.sources || []).flatMap((sourceRow) =>
-    (sourceRow?.rejected || []).map((candidate) => ({
-      source: sourceRow.source,
-      hex: candidate.hex || null,
-      pct: candidate.pct ?? null,
-      rejection_reason: candidate.reason || "not_selected",
-    }))
-  );
-}
-
-function buildRawDinoColorClusters(regionColors = []) {
-  const clusters = [];
-
-  for (const color of regionColors || []) {
-    const hex = safeHex(color?.hex);
-    if (!hex) continue;
-
-    const pct = normalizeColorPct(color?.pct);
-    if (pct <= 0) continue;
-
-    let placed = false;
-    for (const cluster of clusters) {
-      const sameHueFamily = hueDistance(hex, cluster.base) <= 18;
-      const bothNeutral = getSat(hex) < 0.16 && getSat(cluster.base) < 0.16;
-      if (colorDistanceLab(hex, cluster.base) < 10 && (sameHueFamily || bothNeutral)) {
-        cluster.colors.push(color);
-        cluster.weight += pct;
-        if (pct > Number(cluster.topPct || 0)) {
-          cluster.base = hex;
-          cluster.topPct = pct;
-        }
-        placed = true;
-        break;
-      }
-    }
-
-    if (!placed) {
-      clusters.push({
-        base: hex,
-        colors: [color],
-        weight: pct,
-        topPct: pct,
-      });
-    }
-  }
-
-  return clusters
-    .map((cluster) => ({
-      ...cluster,
-      pct: round2(cluster.weight),
-    }))
-    .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
-}
-
-/* =========================
-   VISUAL IMPORTANCE LAYER
-========================= */
-function isNearWhite(hex) {
-  const safe = safeHex(hex);
-  if (!safe) return false;
-  const lab = getLab(safe);
-  const chromaMagnitude = getChromaMagnitudeFromLab(lab);
-  return lab.l >= 78 && chromaMagnitude <= 22;
-}
-
-function isNearBlack(hex) {
-  const safe = safeHex(hex);
-  if (!safe) return false;
-  const lab = getLab(safe);
-  const chromaMagnitude = getChromaMagnitudeFromLab(lab);
-  return lab.l <= 26 && chromaMagnitude <= 20;
-}
-
-function buildVisualImportance(hex, pct = 0) {
-  const safe = safeHex(hex);
-  if (!safe) return null;
-
-  const lab = getLab(safe);
-  const traits = getPerceptualTraits(safe);
-  const classification = classifyColorV2(safe);
-
-  const light = getLight(safe);
-  const sat = getSat(safe);
-  const chromaMagnitude = Number(traits.chroma_magnitude || 0);
-
-  const highlightStrength = isNearWhite(safe)
-    ? clamp100((lab.l - 72) * 2.2 + (22 - Math.min(chromaMagnitude, 22)) * 1.5)
-    : 0;
-
-  const shadowStrength = isNearBlack(safe)
-    ? clamp100((30 - lab.l) * 2.6 + (20 - Math.min(chromaMagnitude, 20)) * 1.4)
-    : 0;
-
-  const accentStrength = clamp100(
-    Math.min(40, chromaMagnitude * 0.6) +
-      Math.min(34, sat * 38) +
-      Math.min(26, Math.abs(lab.a) * 0.32 + Math.abs(lab.b) * 0.24)
-  );
-
-  const contrastPotential = Math.round(
-    clamp100(
-      highlightStrength * 0.42 +
-        shadowStrength * 0.42 +
-        accentStrength * 0.32 +
-        Number(pct || 0) * 12
-    )
-  );
-
-  const visualWeight = Math.round(
-    clamp100(
-      Number(pct || 0) * 62 +
-        highlightStrength * 0.38 +
-        shadowStrength * 0.38 +
-        accentStrength * 0.26
-    )
-  );
-
-  return {
-    hex: safe,
-    pct: round2(pct),
-    highlight_strength: Math.round(highlightStrength),
-    shadow_strength: Math.round(shadowStrength),
-    accent_strength: Math.round(accentStrength),
-    contrast_potential: contrastPotential,
-    visual_weight: visualWeight,
-    role_hint:
-      highlightStrength >= 60
-        ? "highlight"
-        : shadowStrength >= 60
-          ? "shadow"
-          : accentStrength >= 52
-            ? "accent"
-            : "body",
-    family: classification.family,
-    lane: classification.lane,
-    light: round2(light),
-    sat: round2(sat),
-    lab,
-    perceptual: traits,
-  };
-}
-
-function collectImportantColors(topColors, dominantHex) {
-  const sourceHexes = uniqHexes([dominantHex, ...topNColorsByPct(topColors, 8)]);
-  const out = [];
-
-  for (const hex of sourceHexes) {
-    const pct = Number(topColors?.find((x) => safeHex(x?.hex) === hex)?.pct || 0);
-    const importance = buildVisualImportance(hex, pct);
-    if (!importance) continue;
-    out.push({
-      hex,
-      name: getColorName(hex),
-      pct: round2(pct),
-      importance,
-      lab: importance.lab,
-      perceptual: importance.perceptual,
-    });
-  }
-
-  const sortedByImportance = [...out].sort(
-    (a, b) => Number(b?.importance?.visual_weight || 0) - Number(a?.importance?.visual_weight || 0)
-  );
-
-  const sortedByContrast = [...out].sort(
-    (a, b) => Number(b?.importance?.contrast_potential || 0) - Number(a?.importance?.contrast_potential || 0)
-  );
-
-  return {
-    important_colors: sortedByImportance.slice(0, 6),
-    contrast_colors: sortedByContrast.slice(0, 4),
-  };
-}
-
-function mergeDominantAndImportantColors(topColors, dominantHex) {
-  const dominantPool = uniqHexes([dominantHex, ...topNColorsByPct(topColors, 6)]);
-  const { important_colors } = collectImportantColors(topColors, dominantHex);
-
-  const mergedHexes = uniqHexes([
-    ...dominantPool,
-    ...important_colors.map((x) => x.hex),
-  ]);
-
-  return mergedHexes.slice(0, 8).map((hex, idx) => {
-    const pct =
-      idx === 0
-        ? Math.max(0.3, Number(topColors?.find((x) => safeHex(x?.hex) === hex)?.pct || 0) || 0.3)
-        : Number(topColors?.find((x) => safeHex(x?.hex) === hex)?.pct || 0);
-
-    const profile = buildColorProfile(hex, pct);
-    const importance = buildVisualImportance(hex, pct);
-
-    return {
-      hex: profile.hex,
-      name: profile.name,
-      pct: profile.pct,
-      hue: profile.hue,
-      sat: profile.sat,
-      light: profile.light,
-      lab: profile.lab,
-      perceptual: profile.perceptual,
-      family: profile.family,
-      lane: profile.lane,
-      vivid: profile.vivid,
-      color_identity: profile.color_identity,
-      importance,
-    };
-  });
-}
-
-/* =========================
-   STRUCTURAL COLOR INTELLIGENCE
-========================= */
-function classifyStructuralRole(color) {
-  const labL = Number(color?.lab?.l || 0);
-  const chroma = Number(color?.perceptual?.chroma_magnitude || 0);
-  const importance = Number(color?.importance?.visual_weight || 0);
-  const highlightStrength = Number(color?.importance?.highlight_strength || 0);
-  const shadowStrength = Number(color?.importance?.shadow_strength || 0);
-
-  if (labL > 80 && chroma < 25 && (importance > 35 || highlightStrength > 45)) {
-    return "highlight";
-  }
-
-  if (labL < 28 && chroma < 25 && (importance > 35 || shadowStrength > 45)) {
-    return "shadow";
-  }
-
-  if (importance > 65 && chroma < 30) {
-    return "graphic";
-  }
-
-  if (chroma > 40 || color?.vivid) {
-    return "accent";
-  }
-
-  if (importance > 30) {
-    return "trim";
-  }
-
-  return "body";
-}
-/* =========================
-   VISUAL INTELLIGENCE LAYER
-========================= */
-
-function classifySurfaceRole(color, dominantHex = null) {
-  const hex = safeHex(color?.hex);
-  if (!hex) return "body";
-
-  const pct = Number(color?.pct || 0);
-  const labL = Number(color?.lab?.l || 0);
-  const chromaMagnitude = Number(color?.perceptual?.chroma_magnitude || 0);
-  const visualWeight = Number(color?.importance?.visual_weight || 0);
-  const contrastPotential = Number(color?.importance?.contrast_potential || 0);
-  const highlightStrength = Number(color?.importance?.highlight_strength || 0);
-  const shadowStrength = Number(color?.importance?.shadow_strength || 0);
-  const accentStrength = Number(color?.importance?.accent_strength || 0);
-  const structuralRole = normalizeText(color?.structural_role || "body");
-
-  const dominantDist = dominantHex ? colorDistanceLab(hex, dominantHex) : 0;
-
-  if (highlightStrength >= 60 && pct <= 0.3) return "highlight_trim";
-  if (shadowStrength >= 60 && pct <= 0.35) return "shadow_structure";
-
-  if (
-    contrastPotential >= 70 &&
-    accentStrength >= 50 &&
-    pct <= 0.18 &&
-    dominantDist >= 15
-  ) {
-    return "graphic_detail";
-  }
-// ðŸ”¥ NEW: differentiate large light vs dark surfaces
-if (pct >= 0.22 && visualWeight >= 40 && labL > 60) {
-  return "light_field";
-}
-
-if (pct >= 0.22 && visualWeight >= 40 && labL < 40) {
-  return "dark_field";
-}
-  if (pct >= 0.22 && visualWeight >= 40 && structuralRole === "body") {
-    return "body_fabric";
-  }
-
-  if (pct <= 0.15 && chromaMagnitude <= 25) {
-    return "trim";
-  }
-
-  if (accentStrength >= 50 && pct <= 0.12) {
-    return "micro_accent";
-  }
-
-  return "body";
-}
-
-function buildVisualZones(colors = []) {
-  const sorted = [...colors].sort(
-    (a, b) => Number(b?.importance?.visual_weight || 0) - Number(a?.importance?.visual_weight || 0)
-  );
-
-  return {
-    dominant: sorted[0] || null,
-    secondary: sorted[1] || null,
-    highlight: sorted.find((c) => c.importance?.highlight_strength > 50) || null,
-    shadow: sorted.find((c) => c.importance?.shadow_strength > 50) || null,
-    accent: sorted.find((c) => c.importance?.accent_strength > 50) || null,
-  };
-}
-
-function separateGraphicVsBody(colors = [], dominantHex = null) {
-  const body = [];
-  const detail = [];
-
-  for (const c of colors) {
-    const role = classifySurfaceRole(c, dominantHex);
-
-    const item = {
-      hex: c.hex,
-      name: c.name,
-      pct: c.pct,
-      surface_role: role,
-    };
-
-    if (role === "graphic_detail" || role === "micro_accent") {
-      detail.push(item);
-    } else {
-      body.push(item);
-    }
-  }
-
-  return {
-    body_colors: body,
-    detail_colors: detail,
-  };
-}
-
-function deriveDominantReadOrder(colors = [], dominantHex = null) {
-  const ranked = colors
-    .map((c) => {
-      const weight = Number(c?.importance?.visual_weight || 0);
-      const contrast = Number(c?.importance?.contrast_potential || 0);
-      const pct = Number(c?.pct || 0);
-
-      let score = weight * 0.5 + contrast * 0.3 + pct * 40;
-
-      return {
-        hex: c.hex,
-        name: c.name,
-        score,
-      };
-    })
-    .sort((a, b) => b.score - a.score);
-
-  return {
-    first: ranked[0] || null,
-    second: ranked[1] || null,
-    third: ranked[2] || null,
-  };
-}
-
-function buildVisualIntelligence({ dominantHex, normalizedColors = [], colorRoles = [] }) {
-  const zones = buildVisualZones(normalizedColors);
-  const bodyVsDetail = separateGraphicVsBody(normalizedColors, dominantHex);
-  const readOrder = deriveDominantReadOrder(normalizedColors, dominantHex);
-
-  const dominantBody =
-    bodyVsDetail.body_colors[0] || readOrder.first || null;
-
-  return {
-    dominant_visual_read: readOrder.first,
-    dominant_body_color: dominantBody,
-    visual_zones: zones,
-    body_vs_detail: bodyVsDetail,
-    dominant_read_order: readOrder,
-    composition_summary: dominantBody
-      ? `${dominantBody.name} is driving the main visual read`
-      : "No clear dominant visual read",
-  };
-}
-/* =========================
-   GARMENT ZONE SCAFFOLD
-========================= */
-
-function buildZoneCandidate(color, zone, score) {
-  if (!color?.hex) return null;
-
-  return withColorIdentity({
-    zone,
-    hex: color.hex,
-    name: color.name || getColorName(color.hex),
-    pct: round2(color.pct || 0),
-    score: Math.round(score || 0),
-    structural_role: color.structural_role || "body",
-    surface_role: classifySurfaceRole(color),
-    family: color.family || classifyColorV2(color.hex).family,
-    importance: color.importance || null,
-  });
-}
-
-function buildSegmentedColorObject({
-  color,
-  zone,
-  role,
-  sourceType = "global_palette",
-  segmentLabel = null,
-  confidence = 0,
-}) {
-  const safe = safeHex(color?.hex);
-  if (!safe) return null;
-
-  const lab = getLab(safe);
-  const hsl = chroma(safe).hsl();
-
-  return withColorIdentity({
-    hex: safe,
-    name: getColorName(safe),
-    LAB: {
-      l: round2(lab.l),
-      a: round2(lab.a),
-      b: round2(lab.b),
-    },
-    perceptual_traits: getPerceptualTraits(safe),
-    HSL: {
-      h: round2(Number.isFinite(hsl?.[0]) ? hsl[0] : 0),
-      s: round2(hsl?.[1] || 0),
-      l: round2(hsl?.[2] || 0),
-    },
-    role: role || "body",
-    zone: zone || "unknown",
-    confidence: Math.round(clamp100(confidence || 0)),
-    source_type: sourceType,
-    segment_label: segmentLabel || zone || "unknown",
-    pct: round2(color?.pct || 0),
-  });
-}
-
-function getBlackNuanceLabel(hex) {
-  const light = getLight(hex);
-  if (light < 0.12) return "Jet Black";
-  if (light < 0.18) return "Deep Black";
-  return "Graphite Black";
-}
-
-
-function buildConfidenceBreakdown({
-  sourceConfidence = 0,
-  regionCoverage = 0,
-  weightedRegionConfidence = 0,
-  colorCount = 0,
-  dominantPct = 0,
-  clusterCount = 0,
-  multicolorDetected = false,
-  suppressionGates = {},
-  computedScore = 0,
-  finalConfidence = 0,
-} = {}) {
-  return {
-    source_confidence: Math.round(clamp100(Number(sourceConfidence || 0))),
-    region_coverage: round2(Number(regionCoverage || 0)),
-    weighted_region_confidence: round2(Number(weightedRegionConfidence || 0)),
-    color_count: Number(colorCount || 0),
-    dominant_pct: round2(Number(dominantPct || 0)),
-    cluster_count: Number(clusterCount || 0),
-    multicolor_detected: Boolean(multicolorDetected),
-    suppression_gates: suppressionGates || {},
-    computed_score: Math.round(clamp100(Number(computedScore || 0))),
-    final_confidence: Math.round(clamp100(Number(finalConfidence || 0))),
-  };
-}
-
-function hasExplicitColorOwnership(color = {}) {
-  const state = String(color?.ownership_state || color?.ownership || "").toLowerCase();
-  return color?.ownership_validated === true && ["owned", "outfit", "positive", "confirmed"].includes(state);
-}
-
-function hasSpatialGarmentOwnership(zoneKey, color = {}) {
-  const source = String(color?.source || color?.measurement_source || "");
-  const bodyShare = Number(color?.body_share);
-  const spatialPenalty = Number(color?.spatial_penalty);
-  if (!Number.isFinite(bodyShare) || !Number.isFinite(spatialPenalty)) return false;
-  if (zoneKey === "upper_garment" && source === "upper_garment_purity_v1") {
-    const boundaryShare = Number(color?.boundary_share);
-    const underarmShare = Number(color?.underarm_share);
-    return Number.isFinite(boundaryShare) && Number.isFinite(underarmShare) &&
-      bodyShare >= 0.45 && boundaryShare <= 0.42 && underarmShare <= 0.28 && spatialPenalty >= 0.8;
-  }
-  if (zoneKey === "lower_garment" && source === "lower_garment_purity_v2") {
-    const separatorShare = Number(color?.separator_share);
-    return Number.isFinite(separatorShare) &&
-      bodyShare >= 0.45 && separatorShare <= 0.32 && spatialPenalty >= 0.8;
-  }
-  return false;
-}
-
-function isMateriallyDistinctGarmentColor(primaryHex, secondaryHex) {
-  const primary = safeHex(primaryHex || "");
-  const secondary = safeHex(secondaryHex || "");
-  if (!primary || !secondary) return false;
-  const labDistance = colorDistanceLab(primary, secondary);
-  if (labDistance < 18) return false;
-
-  const hueSeparation = hueDistance(primary, secondary);
-  const saturationSeparation = Math.abs(getSat(primary) - getSat(secondary));
-  const lightnessSeparation = Math.abs(getLight(primary) - getLight(secondary));
-  const primaryNeutral = getSat(primary) < 0.14;
-  const secondaryNeutral = getSat(secondary) < 0.14;
-
-  // Same-direction chromatic shades are illumination/tone evidence, not proof
-  // of a second material. Neutral-vs-chromatic contrast or a strong neutral
-  // lightness split can still establish a genuinely distinct material.
-  return (
-    hueSeparation >= 18 ||
-    saturationSeparation >= 0.25 ||
-    (getLight(secondary) - getLight(primary) >= 0.32) ||
-    (primaryNeutral !== secondaryNeutral && Math.max(getSat(primary), getSat(secondary)) >= 0.25 && lightnessSeparation >= 0.16) ||
-    (primaryNeutral && secondaryNeutral && lightnessSeparation >= 0.28)
-  );
-}
-
-function matchesOtherGarmentPrimary(primaryHex, secondaryHex, otherGarmentPrimaryHexes = []) {
-  const primary = safeHex(primaryHex || "");
-  const secondary = safeHex(secondaryHex || "");
-  if (!primary || !secondary) return false;
-  const primaryDistance = colorDistanceLab(primary, secondary);
-  return (Array.isArray(otherGarmentPrimaryHexes) ? otherGarmentPrimaryHexes : []).some((hex) => {
-    const otherPrimary = safeHex(hex || "");
-    if (!otherPrimary) return false;
-    const otherDistance = colorDistanceLab(otherPrimary, secondary);
-    return otherDistance <= 12 && otherDistance + 8 < primaryDistance;
-  });
-}
-
-function buildGarmentPublicationAuthorityV1(zoneKey, zoneData = {}, regionColors = [], context = {}) {
-  if (!isGarmentZoneKey(zoneKey)) {
-    return { applied: false, palette: regionColors, owned_secondary_count: 0 };
-  }
-
-  const dominantHex = safeHex(zoneData?.hex || "");
-  const rows = (Array.isArray(regionColors) ? regionColors : []).filter((color) => safeHex(color?.hex || color?.base || ""));
-  const intrinsic = rows.find((color) => color?.intrinsic_material_identity === true);
-  const primary = intrinsic || rows.find((color) => dominantHex && colorDistanceLab(color?.hex || color?.base, dominantHex) < 6) || rows[0] || zoneData;
-  const primaryHex = safeHex(primary?.hex || primary?.base || dominantHex || "");
-  let suppressedCrossZonePrimaryCount = 0;
-  let suppressedOwnedPiecePrimaryCount = 0;
-  const ownedSecondaries = rows.filter((color) => {
-    const hex = safeHex(color?.hex || color?.base || "");
-    if (!hex || !primaryHex || !isMateriallyDistinctGarmentColor(primaryHex, hex)) return false;
-    if (matchesOtherGarmentPrimary(primaryHex, hex, context?.otherGarmentPrimaryHexes)) {
-      suppressedCrossZonePrimaryCount += 1;
-      return false;
-    }
-    if (matchesOtherGarmentPrimary(primaryHex, hex, context?.otherOwnedPiecePrimaryHexes)) {
-      suppressedOwnedPiecePrimaryCount += 1;
-      return false;
-    }
-    return hasExplicitColorOwnership(color) || hasSpatialGarmentOwnership(zoneKey, color);
-  });
-
-  const palette = primaryHex ? [{ ...primary, hex: primaryHex }, ...ownedSecondaries] : rows;
-  return {
-    applied: true,
-    palette,
-    primary_hex: primaryHex,
-    owned_secondary_count: ownedSecondaries.length,
-    raw_color_count: rows.length,
-    suppressed_unowned_color_count: Math.max(0, rows.length - palette.length),
-    suppressed_cross_zone_primary_count: suppressedCrossZonePrimaryCount,
-    suppressed_owned_piece_primary_count: suppressedOwnedPiecePrimaryCount,
-    raw_evidence_is_diagnostic_only: true,
-  };
-}
-
-function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColors = [], useRegionOnly = false, context = {}) {
-  const fallbackName = zoneData?.name || titleCase(String(zoneKey || "unknown").replace(/_/g, " "));
-  const debugContext = {
-    zone_color_source: context?.zoneColorSource || (regionColors.length ? "cluster" : "fallback"),
-    preserved_dino_hex: safeHex(context?.preservedDinoHex || "") || null,
-    suppression_gates: {
-      lowSignalRegion: false,
-      isWeakDominantEvidence: false,
-      isNeutralContamination: false,
-      footwearSignalWeak: false,
-      jewelrySkinContamination: false,
-    },
-    strong_signal_overrides: {
-      eyewearStrongSignal: false,
-      furTrimStrongSignal: false,
-    },
-    unknown_reason: null,
-    multicolor_detected: false,
-    multicolor_reason: null,
-    meaningful_color_count: 0,
-    multicolor_source: null,
-    raw_dino_meaningful_color_count: 0,
-    raw_dino_multicolor_reason: null,
-    filtered_cluster_count: 0,
-    accessory_jewelry_identity_trace: null,
-    preserveDinoZoneColor: Boolean(context?.preserveDinoZoneColor),
-    preservedDinoHex: safeHex(context?.preservedDinoHex || "") || null,
-    dominant: { base: null },
-    dominantCluster: { base: null },
-    dominantReadCluster: { base: null },
-    dominantColor: { hex: null },
-    primaryColor: { hex: null },
-    dominant_color_selection: {
-      preserved_dino_hex: null,
-      selected_cluster_hex: null,
-      matched_preserved_cluster: false,
-      reason: null,
-    },
-    dino_primary_region_selection: context?.dinoPrimaryRegionSelection || null,
-  };
-  const contextEvidence = context?.evidence || {};
-  const sourceConfidence = Number(zoneData?.confidence || 0);
-  const computedScoreForBreakdown = Number(zoneData?.score || 0);
-
-  if (!zoneData?.hex) {
-    debugContext.unknown_reason = "zone_data_missing_hex";
-    return {
-      mode: "single",
-      cluster_count: 0,
-      interpretation: "unknown",
-      display_label: fallbackName,
-      color_mode: "single_color",
-      dominant_color: null,
-      primary_color: null,
-      support_colors: [],
-      secondary_colors: [],
-      accent_colors: [],
-      region_colors: [],
-      evidence_summary: "No reliable color evidence for this zone.",
-      confidence: 0,
-      confidence_breakdown: buildConfidenceBreakdown({
-        sourceConfidence,
-        regionCoverage: contextEvidence.coverage,
-        weightedRegionConfidence: contextEvidence.weighted_confidence,
-        colorCount: contextEvidence.color_count || regionColors.length,
-        computedScore: computedScoreForBreakdown,
-        finalConfidence: 0,
-        suppressionGates: debugContext.suppression_gates,
-      }),
-      _debug: debugContext,
-    };
-  }
-  if (zoneKey === "eyewear" && !regionColors.length) {
-    debugContext.unknown_reason = "eyewear_requires_region_colors";
-    return {
-      mode: "single",
-      cluster_count: 0,
-      interpretation: "unknown",
-      display_label: fallbackName,
-      color_mode: "single_color",
-      dominant_color: null,
-      primary_color: null,
-      support_colors: [],
-      secondary_colors: [],
-      accent_colors: [],
-      region_colors: [],
-      evidence_summary: "No reliable color evidence for this zone.",
-      confidence: 0,
-      confidence_breakdown: buildConfidenceBreakdown({
-        sourceConfidence,
-        regionCoverage: contextEvidence.coverage,
-        weightedRegionConfidence: contextEvidence.weighted_confidence,
-        colorCount: contextEvidence.color_count || regionColors.length,
-        computedScore: computedScoreForBreakdown,
-        finalConfidence: 0,
-        suppressionGates: debugContext.suppression_gates,
-      }),
-      _debug: debugContext,
-    };
-  }
-
-  const garmentPublicationAuthority = buildGarmentPublicationAuthorityV1(zoneKey, zoneData, regionColors, context);
-  if (garmentPublicationAuthority.applied) {
-    regionColors = garmentPublicationAuthority.palette;
-    debugContext.garment_publication_authority_v1 = garmentPublicationAuthority;
-  }
-
-  const accessoryDinoRegionColors = isAccessoryDinoPaletteZone(zoneKey) && Array.isArray(context?.selectedDinoRegionColors)
-    ? context.selectedDinoRegionColors
-    : [];
-  const accessoryDinoDetectedPalette = accessoryDinoRegionColors.length
-    ? buildAccessoryDinoDetectedPalette(accessoryDinoRegionColors)
-    : [];
-  const baseHex = safeHex(zoneData.hex) || zoneData.hex;
-  const candidateColors = regionColors.length ? regionColors : useRegionOnly ? [] : normalizedColors;
-  const zoneColors = candidateColors.filter((c) => {
-    if (!c?.hex || !baseHex) return false;
-    if (garmentPublicationAuthority.applied) return true;
-    const dist = colorDistanceLab(c.hex, baseHex);
-    if (dist < 14) return true;
-    if (Number(c?.pct || 0) >= 0.18 && dist < 20) return true;
-    return false;
-  });
-
-  const fallbackSet = useRegionOnly && !regionColors.length ? [zoneData] : zoneColors.length ? zoneColors : [zoneData];
-  const clusters = buildColorClusters(fallbackSet);
-  debugContext.filtered_cluster_count = clusters.length;
-  const regionCoverage = clamp01(regionColors.reduce((sum, c) => sum + Number(c?.pct || 0), 0));
-  const lowSignalRegion =
-    useRegionOnly &&
-    regionCoverage < 0.3 &&
-    clusters.length < 2 &&
-    !garmentPublicationAuthority.applied;
-  const sortedByLight = clusters.slice().sort((a, b) => getLight(a.base) - getLight(b.base));
-  const darkestCluster = sortedByLight[0];
-  const lightestCluster = sortedByLight[sortedByLight.length - 1];
-  const darkLightContrast = darkestCluster && lightestCluster
-    ? Math.abs(getLight(lightestCluster.base) - getLight(darkestCluster.base))
-    : 0;
-  const eyewearStrongSignal =
-    zoneKey === "eyewear" &&
-    clusters.length >= 2 &&
-    darkLightContrast >= 0.2 &&
-    Number(darkestCluster?.pct || 0) >= 0.18 &&
-    Number(lightestCluster?.pct || 0) >= 0.1;
-  const furTrimStrongSignal =
-    zoneKey === "fur_trim" &&
-    clusters.length >= 2 &&
-    darkLightContrast >= 0.38 &&
-    Number(darkestCluster?.pct || 0) >= 0.14 &&
-    Number(lightestCluster?.pct || 0) >= 0.14;
-  debugContext.strong_signal_overrides.eyewearStrongSignal = eyewearStrongSignal;
-  debugContext.strong_signal_overrides.furTrimStrongSignal = furTrimStrongSignal;
-  const clustersTotalWeight = clusters.reduce((sum, c) => sum + Number(c?.weight || 0), 0) || 1;
-  const scoredClusters = clusters
-    .map((cluster, index) => {
-      const traits = getPerceptualTraits(cluster.base);
-      const light = getLight(cluster.base);
-      const sat = getSat(cluster.base);
-      const contrastBoost = Math.max(0, light - 0.45) * 0.12 + Math.max(0, sat - 0.2) * 0.12;
-      const chromaBoost = Math.max(0, (Number(traits?.chroma_magnitude || 0) - 18) / 100);
-      const anchorBoost = index === 0 ? 0.08 : 0;
-      const sameAsUpper =
-        context?.dominantDarkBodyHex &&
-        colorDistanceLab(cluster.base, context.dominantDarkBodyHex) < 9 &&
-        getLight(cluster.base) < 0.36 &&
-        Number(traits?.chroma_magnitude || 0) < 26;
-      const reusePenaltyZones = ["hair", "eyewear", "fur_trim"];
-      const reusePenalty =
-        reusePenaltyZones.includes(zoneKey) &&
-        sameAsUpper &&
-        (!regionColors.length || regionCoverage < 0.62 || Number(cluster?.pct || 0) < 0.45)
-          ? 0.2
-          : 0;
-      return {
-        ...cluster,
-        _score: Number(cluster?.pct || 0) + contrastBoost + chromaBoost + anchorBoost - reusePenalty,
-      };
-    })
-    .sort((a, b) => b._score - a._score);
-  const dominantCluster = scoredClusters[0] || clusters[0] || null;
-  const preservedDinoHex = safeHex(context?.preservedDinoHex || "");
-  const preservedDinoCluster = preservedDinoHex
-    ? clusters.find((c) => colorDistanceLab(c.base, preservedDinoHex) < 3)
-    : null;
-  debugContext.preservedDinoHex = preservedDinoHex || null;
-  debugContext.dominantCluster = { base: dominantCluster?.base || null };
-  const dominant = {
-    base: preservedDinoHex || dominantCluster?.base || baseHex,
-    pct: round2(
-      preservedDinoCluster
-        ? (Number(preservedDinoCluster?.weight || 0) || 1) / clustersTotalWeight
-        : (Number(dominantCluster?.weight || 0) || 1) / clustersTotalWeight
-    ),
-  };
-  debugContext.dominant = { base: dominant?.base || null };
-  const dominantTraits = getPerceptualTraits(dominant.base);
-  const isWeakDominantEvidence = Number(dominant?.pct || 0) < 0.25;
-  const isNeutralContamination =
-    Number(dominantTraits?.chroma_magnitude || 0) < 18 &&
-    Number(dominant?.pct || 0) < 0.35 &&
-    regionCoverage < 0.65;
-  const sameFamilyCount = clusters.filter((c) => {
-    const dominantHue = getHue(dominant.base);
-    const cHue = getHue(c.base);
-    const hueClose = hueDistance(dominant.base, c.base) <= 30;
-    const bothNeutral = getSat(dominant.base) < 0.18 && getSat(c.base) < 0.18;
-    const sameWarmth = Math.abs(dominantHue - cHue) <= 45;
-    return hueClose || bothNeutral || sameWarmth;
-  }).length;
-  const footwearSignalWeak =
-    zoneKey === "footwear" &&
-    sameFamilyCount < 2 &&
-    regionCoverage < 0.55;
-  const jewelrySkinContamination =
-    zoneKey === "accessory_jewelry" &&
-    (() => {
-      const hue = getHue(dominant.base);
-      const sat = getSat(dominant.base);
-      const light = getLight(dominant.base);
-      const skinLike = hue >= 12 && hue <= 55 && sat >= 0.12 && sat <= 0.55 && light >= 0.32 && light <= 0.86;
-      const highlightLike = light >= 0.8 && sat < 0.22;
-      return (skinLike || highlightLike) && Number(dominant?.pct || 0) < 0.58;
-    })();
-  debugContext.suppression_gates.lowSignalRegion = lowSignalRegion;
-  debugContext.suppression_gates.isWeakDominantEvidence = isWeakDominantEvidence;
-  debugContext.suppression_gates.isNeutralContamination = isNeutralContamination;
-  debugContext.suppression_gates.footwearSignalWeak = footwearSignalWeak;
-  debugContext.suppression_gates.jewelrySkinContamination = jewelrySkinContamination;
-
-  if (
-    (lowSignalRegion && !eyewearStrongSignal && !furTrimStrongSignal) ||
-    (isWeakDominantEvidence && !eyewearStrongSignal && !furTrimStrongSignal) ||
-    (isNeutralContamination && !eyewearStrongSignal && !furTrimStrongSignal) ||
-    footwearSignalWeak ||
-    jewelrySkinContamination
-  ) {
-    debugContext.unknown_reason =
-      lowSignalRegion && !eyewearStrongSignal && !furTrimStrongSignal
-        ? "lowSignalRegion"
-        : isWeakDominantEvidence && !eyewearStrongSignal && !furTrimStrongSignal
-          ? "isWeakDominantEvidence"
-          : isNeutralContamination && !eyewearStrongSignal && !furTrimStrongSignal
-            ? "isNeutralContamination"
-            : footwearSignalWeak
-              ? "footwearSignalWeak"
-              : jewelrySkinContamination
-                ? "jewelrySkinContamination"
-                : "suppressed_by_unknown_gate";
-    return {
-      mode: "single",
-      cluster_count: clusters.length,
-      interpretation: "unknown",
-      display_label: fallbackName,
-      color_mode: "single_color",
-      dominant_color: null,
-      primary_color: null,
-      support_colors: [],
-      secondary_colors: [],
-      accent_colors: [],
-      region_colors: clusters.map((c) => compactRegionColor({ hex: c.base, pct: c.pct })).filter(Boolean),
-      evidence_summary: buildEvidenceSummary("single_color", clusters, debugContext.zone_color_source),
-      confidence: Math.round(clamp100(Number(zoneData?.score || 0) * 0.4)),
-      confidence_breakdown: buildConfidenceBreakdown({
-        sourceConfidence,
-        regionCoverage: contextEvidence.coverage || regionCoverage,
-        weightedRegionConfidence: contextEvidence.weighted_confidence,
-        colorCount: contextEvidence.color_count || regionColors.length,
-        dominantPct: dominant?.pct,
-        clusterCount: clusters.length,
-        multicolorDetected: debugContext.multicolor_detected,
-        suppressionGates: debugContext.suppression_gates,
-        computedScore: computedScoreForBreakdown,
-        finalConfidence: Math.round(clamp100(Number(zoneData?.score || 0) * 0.4)),
-      }),
-      _debug: debugContext,
-    };
-  }
-
-  let displayLabel = getColorName(dominant.base);
-  let mode = "single";
-  let interpretation = "single_color";
-  const pctSortedClusters = clusters.slice().sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
-  const meaningfulThreshold = zoneKey === "footwear" ? 0.06 : 0.08;
-  const meaningfulClusters = pctSortedClusters.filter((c) => Number(c?.pct || 0) >= meaningfulThreshold);
-  const topPct = Number(pctSortedClusters?.[0]?.pct || 0);
-  const secondPct = Number(pctSortedClusters?.[1]?.pct || 0);
-  const footwearMulticolorSignal =
-    zoneKey === "footwear" &&
-    meaningfulClusters.length >= 3 &&
-    meaningfulThreshold === 0.06;
-  const generalMulticolorSignal = meaningfulClusters.length >= 3 && meaningfulThreshold === 0.08;
-  const zoneColorModeRead = getZoneColorMode(pctSortedClusters);
-  const balancedTwoPlusSignal = topPct < 0.55 || secondPct >= 0.18;
-  const preserveDominantAccessoryIdentity = shouldPreserveDominantAccessoryColor(zoneKey, pctSortedClusters);
-  const multicolorReason = preserveDominantAccessoryIdentity ? null : zoneColorModeRead.reason;
-  const multicolorDetected = !!multicolorReason;
-  debugContext.preserve_dominant_accessory_identity = preserveDominantAccessoryIdentity;
-  debugContext.multicolor_detected = multicolorDetected;
-  debugContext.multicolor_reason = multicolorReason;
-  debugContext.meaningful_color_count = meaningfulClusters.length;
-  const isDinoPreservedZone =
-    context?.zoneColorSource === "dino_primary" ||
-    !!safeHex(context?.preservedDinoHex || "") ||
-    context?.preserveDinoZoneColor === true;
-  const rawDinoClusters = isDinoPreservedZone ? buildRawDinoColorClusters(accessoryDinoRegionColors.length ? accessoryDinoRegionColors : regionColors) : [];
-  const rawDinoMeaningfulThreshold = 0.08;
-  const rawDinoMeaningfulClusters = rawDinoClusters.filter((c) => Number(c?.pct || 0) >= rawDinoMeaningfulThreshold);
-  const rawDinoColorModeRead = getZoneColorMode(rawDinoClusters);
-  const rawDinoTopPct = rawDinoColorModeRead.topPct;
-  const rawDinoSecondPct = rawDinoColorModeRead.secondPct;
-  const rawDinoMulticolorReason =
-    isDinoPreservedZone &&
-    (isGarmentZoneKey(zoneKey) || zoneKey === "footwear") &&
-    (!isGarmentZoneKey(zoneKey) || garmentPublicationAuthority.owned_secondary_count > 0) &&
-    rawDinoColorModeRead.reason
-      ? `raw_dino_${rawDinoColorModeRead.reason}`
-      : null;
-  const rawDinoMulticolorDetected = !!rawDinoMulticolorReason;
-  debugContext.raw_dino_meaningful_color_count = rawDinoMeaningfulClusters.length;
-  debugContext.raw_dino_multicolor_reason = rawDinoMulticolorReason;
-  if (rawDinoMulticolorDetected) {
-    debugContext.multicolor_detected = true;
-    debugContext.multicolor_reason = rawDinoMulticolorReason;
-    debugContext.multicolor_source = "raw_dino_region_colors";
-  }
-  const evidenceCoverage = clusters.reduce((sum, c) => sum + Number(c?.pct || 0), 0);
-
-  if (
-    zoneKey === "lower_garment" &&
-    clusters.length >= 2 &&
-    evidenceCoverage >= 0.55 &&
-    clusters.some((c) => {
-      const h = getHue(c.base);
-      return h >= 200 && h <= 245;
-    }) &&
-    clusters.filter((c) => {
-      const h = getHue(c.base);
-      return h >= 190 && h <= 255;
-    }).length >= 2 &&
-    clusters.every((c) => {
-      const traits = getPerceptualTraits(c.base);
-      const l = getLight(c.base);
-      return traits.chroma_magnitude < 42 && l > 0.2;
-    })
-  ) {
-    displayLabel = "Light Wash Denim";
-    mode = "washed_fabric";
-    interpretation = "denim";
-  } else if ((multicolorDetected || rawDinoMulticolorDetected) && zoneKey === "footwear") {
-    displayLabel = "Multicolor Sneaker";
-    mode = "multicolor";
-    interpretation = "multi_material";
-  } else if (multicolorDetected && ["accessory_jewelry", "bag", "eyewear"].includes(zoneKey)) {
-    displayLabel = "Multicolor Accessory";
-    mode = "multicolor";
-    interpretation = "patterned";
-  } else if (
-    (multicolorDetected || rawDinoMulticolorDetected) &&
-    ["upper_garment", "lower_garment", "outerwear", "body_garment"].includes(zoneKey)
-  ) {
-    displayLabel = "Multicolor Garment";
-    mode = "multicolor";
-    interpretation = "multi_material";
-  } else if (["accessory_jewelry", "bag", "eyewear"].includes(zoneKey) && clusters.length >= 2) {
-    const top = scoredClusters[0] || clusters[0];
-    const second = scoredClusters[1] || clusters[1];
-    const topTraits = getPerceptualTraits(top?.base || dominant.base);
-    const secondTraits = second ? getPerceptualTraits(second.base) : null;
-    const lightContrast = second ? Math.abs(getLight(top.base) - getLight(second.base)) : 0;
-    const chromaSpread = second
-      ? Math.abs(Number(topTraits?.chroma_magnitude || 0) - Number(secondTraits?.chroma_magnitude || 0))
-      : 0;
-    const reflectiveMix =
-      Number(topTraits?.chroma_magnitude || 0) < 24 &&
-      (lightContrast > 0.2 || chromaSpread > 16) &&
-      Number(second?.pct || 0) >= 0.18;
-    if (reflectiveMix) {
-      displayLabel = "Metallic";
-      mode = "reflective";
-      interpretation = "metallic";
-    }
-  } else if (zoneKey === "fur_trim" && clusters.length >= 2) {
-    const darkest = sortedByLight[0];
-    const lightest = sortedByLight[sortedByLight.length - 1];
-    const lightDiff = darkLightContrast;
-    const dualMaterialSignal =
-      clusters.length >= 2 &&
-      lightDiff > 0.36 &&
-      Number(darkest?.pct || 0) >= 0.14 &&
-      Number(lightest?.pct || 0) >= 0.14;
-    if (dualMaterialSignal) {
-      displayLabel = "Black/White Fur";
-      mode = "multicolor";
-      interpretation = "multi_material";
-    }
-  } else if (zoneKey === "eyewear") {
-    const top = scoredClusters[0] || clusters[0];
-    const second = scoredClusters[1] || clusters[1];
-    const hasReflectiveEdge =
-      !!second &&
-      Math.abs(getLight(top.base) - getLight(second.base)) >= 0.22 &&
-      Number(second?.pct || 0) >= 0.12;
-    const topVeryDark = getLight(top.base) < 0.3;
-    if (topVeryDark && hasReflectiveEdge) {
-      displayLabel = getSat(top.base) < 0.12 ? "Black Metal" : "Metallic";
-      mode = "reflective";
-      interpretation = "metallic";
-    } else if (!isNavyCandidate(top.base) && getLight(top.base) < 0.34) {
-      displayLabel = getBlackNuanceLabel(top.base);
-    }
-  }
-
-  if (zoneKey === "hair" && !isNavyCandidate(dominant.base) && getLight(dominant.base) < 0.26) {
-    displayLabel = getLight(dominant.base) < 0.14 ? "Jet Black" : "Deep Black";
-  }
-
-  if (
-    ["upper_garment", "lower_garment", "outerwear", "body_garment"].includes(zoneKey) &&
-    !isNavyCandidate(dominant.base) &&
-    !isDarkOliveFamily(dominant.base) &&
-    getLight(dominant.base) < 0.28 &&
-    Number(dominantTraits?.chroma_magnitude || 0) < 18
-  ) {
-    displayLabel = getBlackNuanceLabel(dominant.base);
-  }
-
-  const zoneConfidence = Math.round(
-    clamp100(Number(zoneData?.score || 0) * 0.55 + Number(zoneData?.confidence || 0) * 0.45)
-  );
-  const useRawDinoMulticolorRead =
-    !isGarmentZoneKey(zoneKey) &&
-    !preserveDominantAccessoryIdentity &&
-    mode === "multicolor" &&
-    rawDinoMulticolorDetected &&
-    rawDinoMeaningfulClusters.length;
-  const colorReadClusters = useRawDinoMulticolorRead
-    ? rawDinoMeaningfulClusters
-    : mode === "multicolor" && meaningfulClusters.length
-      ? meaningfulClusters
-      : clusters;
-  const shouldPreferPreservedDinoAccessoryCluster =
-    context?.preserveDinoZoneColor === true &&
-    !!preservedDinoHex &&
-    preserveDominantAccessoryIdentity &&
-    zoneKey !== "bag";
-  const preservedDinoAccessoryCluster = shouldPreferPreservedDinoAccessoryCluster
-    ? pctSortedClusters.find((c) => colorDistanceLab(c?.base || c?.hex, preservedDinoHex) < 3)
-    : null;
-  const preservedDinoDominantBaseFallback = shouldPreferPreservedDinoAccessoryCluster && !preservedDinoAccessoryCluster
-    ? { base: dominant.base, pct: dominant.pct }
-    : null;
-  const dominantReadCluster = mode === "multicolor" && !useRawDinoMulticolorRead
-    ? colorReadClusters[0] || { base: dominant.base, pct: dominant.pct }
-    : preserveDominantAccessoryIdentity
-      ? preservedDinoAccessoryCluster || preservedDinoDominantBaseFallback || pctSortedClusters[0] || { base: dominant.base, pct: dominant.pct }
-      : { base: dominant.base, pct: dominant.pct };
-  debugContext.dominantReadCluster = { base: dominantReadCluster?.base || dominantReadCluster?.hex || null };
-  debugContext.dominant_color_selection = {
-    preserved_dino_hex: preservedDinoHex || null,
-    selected_cluster_hex: safeHex(dominantReadCluster?.base || dominantReadCluster?.hex || "") || null,
-    matched_preserved_cluster: Boolean(preservedDinoAccessoryCluster),
-    reason: shouldPreferPreservedDinoAccessoryCluster
-      ? preservedDinoAccessoryCluster
-        ? "preserved_dino_cluster_match"
-        : preservedDinoDominantBaseFallback
-          ? "preserved_dino_fallback_to_dominant_base"
-          : "preserved_dino_cluster_missing_fallback_pct_top"
-      : preserveDominantAccessoryIdentity
-        ? "preserve_dominant_accessory_identity_pct_top"
-        : mode === "multicolor" && !useRawDinoMulticolorRead
-          ? "multicolor_primary_cluster"
-          : "dominant_color_read",
-  };
-  const preservedAccessoryColor = preserveDominantAccessoryIdentity
-    ? buildPreservedAccessoryColor(dominantReadCluster, {
-        base: dominant.base,
-        name: displayLabel,
-        pct: dominant.pct,
-      })
-    : null;
-  if (preservedAccessoryColor) {
-    displayLabel = preservedAccessoryColor.name;
-  }
-  const dominantColor = preservedAccessoryColor || withColorIdentity({
-    hex: dominantReadCluster.base,
-    name: getColorName(dominantReadCluster.base),
-    pct: round2(dominantReadCluster.pct),
-  });
-  const summaryColorReadClusters = mergeClusterSummaryFamilies(colorReadClusters);
-  const supportColors = summaryColorReadClusters.slice(1, 4).map((c) => withColorIdentity({
-    hex: c.hex,
-    name: c.name,
-    pct: round2(c.pct),
-  }));
-  const accentColors = summaryColorReadClusters.slice(4, 6).map((c) => withColorIdentity({
-    hex: c.hex,
-    name: c.name,
-    pct: round2(c.pct),
-  }));
-  const summaryPrimaryColor = preservedAccessoryColor || (summaryColorReadClusters[0]
-    ? withColorIdentity({
-        hex: summaryColorReadClusters[0].hex,
-        name: summaryColorReadClusters[0].name,
-        pct: round2(summaryColorReadClusters[0].pct),
-      })
-    : dominantColor);
-  const rawDinoPrimaryColor = useRawDinoMulticolorRead
-    ? withColorIdentity({
-        hex: colorReadClusters[0].base,
-        name: getColorName(colorReadClusters[0].base),
-        pct: round2(colorReadClusters[0].pct),
-      })
-    : null;
-  const rawDinoSecondaryColors = useRawDinoMulticolorRead
-    ? colorReadClusters.slice(1, 4).map((c) => withColorIdentity({
-        hex: c.base,
-        name: getColorName(c.base),
-        pct: round2(c.pct),
-      }))
-    : [];
-  const rawDinoAccentColors = useRawDinoMulticolorRead
-    ? colorReadClusters.slice(4, 6).map((c) => withColorIdentity({
-        hex: c.base,
-        name: getColorName(c.base),
-        pct: round2(c.pct),
-      }))
-    : [];
-
-  const primaryColorRead = compactColorRead(summaryPrimaryColor);
-  const rawDinoPalette = preserveAccessoryRawPalette(context?.rawDinoRegionColors || accessoryDinoRegionColors);
-  const rawDetectorPalette = preserveAccessoryRawPalette(
-    rawDinoPalette.length ? rawDinoPalette : (zoneData?.hex ? [{ hex: zoneData.hex, pct: zoneData.pct, name: zoneData.name }] : [])
-  );
-  const pixelRefinedPalette = preserveAccessoryRawPalette(context?.refinedRegionColors || []);
-  const candidateRegionPalette = preserveAccessoryRawPalette(accessoryDinoRegionColors);
-  const fallbackPalette = preserveAccessoryRawPalette(normalizedColors);
-  const displayPaletteSelection = isAccessoryDisplayPaletteZone(zoneKey)
-    ? selectAccessoryDisplayPalette({
-        refinedCrop: pixelRefinedPalette,
-        candidateRegion: candidateRegionPalette,
-        rawDino: rawDinoPalette,
-        detector: rawDetectorPalette,
-        fallback: fallbackPalette,
-      })
-    : null;
-  const displayPalette = displayPaletteSelection?.palette || [];
-  const selectedDisplaySource = displayPaletteSelection?.selected_source || debugContext.zone_color_source || "fallback";
-  const displayEvidenceWeight = displayPaletteEvidenceWeight(selectedDisplaySource);
-  const explainabilitySourceConfidence = Number(contextEvidence?.weighted_confidence || sourceConfidence || zoneConfidence || 0);
-  const calibratedDisplayPalette = displayPalette.map((color) => withDisplayColorConfidence(color, {
-    zoneConfidence,
-    sourceConfidence: explainabilitySourceConfidence,
-    evidenceWeight: displayEvidenceWeight,
-  }));
-  const compactAccessoryDisplayRoles = calibratedDisplayPalette.length
-    ? splitAccessoryDetectedPaletteRoles(calibratedDisplayPalette)
-    : null;
-  const accessoryDisplayRoles = compactAccessoryDisplayRoles
-    ? {
-        primary: withDisplayColorConfidence(compactAccessoryDisplayRoles.primary, {
-          zoneConfidence,
-          sourceConfidence: explainabilitySourceConfidence,
-          evidenceWeight: displayEvidenceWeight,
-        }),
-        secondary: (compactAccessoryDisplayRoles.secondary || []).map((color) => withDisplayColorConfidence(color, {
-          zoneConfidence,
-          sourceConfidence: explainabilitySourceConfidence,
-          evidenceWeight: displayEvidenceWeight,
-        })),
-        accent: (compactAccessoryDisplayRoles.accent || []).map((color) => withDisplayColorConfidence(color, {
-          zoneConfidence,
-          sourceConfidence: explainabilitySourceConfidence,
-          evidenceWeight: displayEvidenceWeight,
-        })),
-      }
-    : null;
-  const contaminationScore = buildContaminationEvidenceScore({
-    dominant,
-    regionCoverage: contextEvidence.coverage || regionCoverage,
-    suppressionGates: debugContext.suppression_gates,
-  });
-  debugContext.contamination_score_total = contaminationScore.total;
-  debugContext.contamination_score = contaminationScore;
-  const rejectedAlternatives = flattenRejectedDisplayAlternatives(displayPaletteSelection?.trace);
-  const explainabilityPublishedColors = calibratedDisplayPalette.length
-    ? calibratedDisplayPalette
-    : summaryColorReadClusters.map((color) => withDisplayColorConfidence(color, {
-        zoneConfidence,
-        sourceConfidence: explainabilitySourceConfidence,
-        evidenceWeight: displayEvidenceWeight,
-      }));
-  const explainabilityPrimary = accessoryDisplayRoles?.primary || withDisplayColorConfidence(primaryColorRead, {
-    zoneConfidence,
-    sourceConfidence: explainabilitySourceConfidence,
-    evidenceWeight: displayEvidenceWeight,
-  });
-  const publicationPrimaryReason = {
-    code: calibratedDisplayPalette.length ? "highest_priority_surviving_palette" : "zone_color_read_selected",
-    source: selectedDisplaySource,
-    selected_hex: explainabilityPrimary?.hex || dominantColor?.hex || null,
-    confidence: explainabilityPrimary?.confidence ?? calibrateConfidence(zoneConfidence),
-    message: calibratedDisplayPalette.length
-      ? "Published the highest-priority surviving color evidence after contamination filtering."
-      : "Published the finalized zone color read supported by available evidence.",
-  };
-  const publicationReasons = {
-    primary: publicationPrimaryReason,
-    supporting: [
-      {
-        code: "confidence_calibrated",
-        zone_weight: 0.55,
-        color_percentage_weight: 0.30,
-        source_confidence_weight: 0.15,
-        evidence_weight: round2(displayEvidenceWeight),
-      },
-      {
-        code: "contamination_evidence_scored",
-        total: contaminationScore.total,
-      },
-    ],
-  };
-  const evidenceLedger = {
-    zone: zoneKey,
-    source: selectedDisplaySource,
-    selected_color: explainabilityPrimary,
-    published_colors: explainabilityPublishedColors,
-    detector_evidence: rawDetectorPalette,
-    dino_evidence: rawDinoPalette,
-    crop_pixel_evidence: filterAccessoryDisplayPalette(pixelRefinedPalette).kept,
-    candidate_region_evidence: candidateRegionPalette,
-    contamination_scores: contaminationScore,
-  };
-  debugContext.dominantColor = { hex: dominantColor?.hex || null };
-  debugContext.primaryColor = { hex: primaryColorRead?.hex || null };
-  if (zoneKey === "accessory_jewelry") {
-    debugContext.accessory_jewelry_identity_trace = {
-      preserveDominantAccessoryIdentity,
-      dominant_color: {
-        name: dominantColor?.name || null,
-        color_identity_name: dominantColor?.color_identity?.name || null,
-        translation: dominantColor?.color_identity?.translation || null,
-      },
-      primary_color: {
-        name: primaryColorRead?.name || null,
-        color_identity_name: primaryColorRead?.color_identity?.name || null,
-        translation: primaryColorRead?.color_identity?.translation || null,
-      },
-      display_label: displayLabel,
-      color_identity: {
-        name: dominantColor?.color_identity?.name || null,
-        translation: dominantColor?.color_identity?.translation || null,
-      },
-    };
-  }
-
-  return {
-    mode,
-    read_mode: mode,
-    cluster_count: clusters.length,
-    color_mode: mode === "multicolor" ? "multi_color" : "single_color",
-    interpretation,
-    display_label: displayLabel,
-    confidence: zoneConfidence,
-    confidence_breakdown: buildConfidenceBreakdown({
-      sourceConfidence,
-      regionCoverage: contextEvidence.coverage || regionCoverage,
-      weightedRegionConfidence: contextEvidence.weighted_confidence,
-      colorCount: contextEvidence.color_count || regionColors.length,
-      dominantPct: dominant?.pct,
-      clusterCount: clusters.length,
-      multicolorDetected: debugContext.multicolor_detected,
-      suppressionGates: debugContext.suppression_gates,
-      computedScore: computedScoreForBreakdown,
-      finalConfidence: zoneConfidence,
-    }),
-    dominant_color: dominantColor,
-    color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
-    garment_identity: isGarmentZoneKey(zoneKey) ? buildGarmentIdentity(dominantColor, supportColors) : undefined,
-    primary_color: explainabilityPrimary,
-    support_colors: supportColors,
-    secondary_colors: accessoryDisplayRoles ? accessoryDisplayRoles.secondary : mergeColorReadSummaryFamilies(supportColors),
-    accent_colors: accessoryDisplayRoles ? accessoryDisplayRoles.accent : mergeColorReadSummaryFamilies(accentColors),
-    detected_colors: explainabilityPublishedColors,
-    region_colors: explainabilityPublishedColors,
-    raw_detector_palette: isAccessoryDisplayPaletteZone(zoneKey) ? rawDetectorPalette : undefined,
-    raw_dino_palette: isAccessoryDisplayPaletteZone(zoneKey) ? rawDinoPalette : undefined,
-    pixel_refined_palette: isAccessoryDisplayPaletteZone(zoneKey) ? filterAccessoryDisplayPalette(pixelRefinedPalette).kept : undefined,
-    display_palette: isAccessoryDisplayPaletteZone(zoneKey) ? calibratedDisplayPalette : undefined,
-    display_palette_trace: isAccessoryDisplayPaletteZone(zoneKey) ? displayPaletteSelection?.trace : undefined,
-    evidence_ledger: evidenceLedger,
-    publication_reasons: publicationReasons,
-    publication_reason: publicationReasons.primary,
-    rejected_alternatives: rejectedAlternatives,
-    evidence_summary: buildEvidenceSummary(mode === "multicolor" ? "multi_color" : "single_color", colorReadClusters, useRawDinoMulticolorRead ? "raw DINO region colors" : debugContext.zone_color_source),
-    ...(
-      useRawDinoMulticolorRead && isGarmentZoneKey(zoneKey)
-        ? {
-            primary_color: compactColorRead(mergeClusterSummaryFamilies(colorReadClusters)[0] || rawDinoPrimaryColor),
-            secondary_colors: rawDinoSecondaryColors.map(compactColorRead).filter(Boolean),
-            accent_colors: rawDinoAccentColors.map(compactColorRead).filter(Boolean),
-            color_identity_summary: buildColorIdentitySummary(rawDinoPrimaryColor?.color_identity),
-            garment_identity: buildGarmentIdentity(rawDinoPrimaryColor, rawDinoSecondaryColors),
-            color_story: buildColorStory(
-              compactColorRead(rawDinoPrimaryColor),
-              rawDinoSecondaryColors.map(compactColorRead).filter(Boolean),
-              rawDinoAccentColors.map(compactColorRead).filter(Boolean)
-            ),
-          }
-        : buildGarmentColorProfile({
-            zoneKey,
-            mode,
-            dominantColor,
-            supportColors,
-            accentColors,
-          })
-    ),
-    ...(isAccessoryDisplayPaletteZone(zoneKey) ? {
-      primary_color: explainabilityPrimary,
-      secondary_colors: accessoryDisplayRoles?.secondary || [],
-      accent_colors: accessoryDisplayRoles?.accent || [],
-      detected_colors: explainabilityPublishedColors,
-      region_colors: explainabilityPublishedColors,
-      display_palette: calibratedDisplayPalette,
-    } : {}),
-    _debug: debugContext,
-  };
-}
-
-
-function buildHeadwearDebugValues(zoneData = {}) {
-  if (zoneData?.display_zone_label !== "Headwear") return null;
-  const debug = zoneData?._debug || {};
-  const dinoPrimaryRegionSelection = debug?.dino_primary_region_selection || null;
-  const values = {
-    preserveDinoZoneColor: Boolean(debug?.preserveDinoZoneColor),
-    preservedDinoHex: debug?.preservedDinoHex || debug?.preserved_dino_hex || null,
-    "dominant.base": debug?.dominant?.base || null,
-    "dominantCluster.base": debug?.dominantCluster?.base || null,
-    "dominantReadCluster.base": debug?.dominantReadCluster?.base || null,
-    "dominantColor.hex": debug?.dominantColor?.hex || zoneData?.dominant_color?.hex || null,
-    "primaryColor.hex": debug?.primaryColor?.hex || zoneData?.primary_color?.hex || null,
-    "dominant_color_selection.reason": debug?.dominant_color_selection?.reason || null,
-  };
-
-  return {
-    ...values,
-    dino_primary_region_selection: dinoPrimaryRegionSelection,
-    dino_primary_region_selection_json: dinoPrimaryRegionSelection
-      ? JSON.stringify(dinoPrimaryRegionSelection, null, 2)
-      : null,
-    ui_rows: Object.entries(values).map(([label, value]) => ({
-      label,
-      value: value === undefined ? null : value,
-    })),
-  };
-}
-
-function getZoneRegionEvidence(zoneRegions = []) {
-  const coverage = (zoneRegions || []).reduce((sum, r) => sum + Number(r?.coverage || r?.confidence || 0), 0);
-  const weightedConfidence = avg((zoneRegions || []).map((r) => Number(r?.confidence || 0)));
-  const colorCount = (zoneRegions || []).reduce((sum, r) => {
-    const local = Array.isArray(r?.region_colors) ? r.region_colors.length : 0;
-    return sum + local;
-  }, 0);
-
-  return {
-    region_count: zoneRegions.length,
-    coverage: round2(coverage),
-    weighted_confidence: round2(weightedConfidence),
-    color_count: colorCount,
-  };
-}
-
-function hasHighContrastColorSignal(colors = []) {
-  const palette = (colors || []).map((c) => safeHex(c?.hex)).filter(Boolean);
-  if (palette.length < 2) return false;
-  for (let i = 0; i < palette.length; i += 1) {
-    for (let j = i + 1; j < palette.length; j += 1) {
-      if (Math.abs(getLight(palette[i]) - getLight(palette[j])) >= 0.33) return true;
-    }
-  }
-  return false;
-}
-
-function hasStrongEyewearRegionSignal(zoneRegions = [], evidence = {}) {
-  if (!Array.isArray(zoneRegions) || !zoneRegions.length) return false;
-  const weightedConfidence = Number(evidence?.weighted_confidence || 0);
-  const coverage = Number(evidence?.coverage || 0);
-  const compactRegion = zoneRegions.some((r) => {
-    const localCoverage = Number(r?.coverage || 0);
-    return localCoverage >= 0.03 && localCoverage <= 0.24;
-  });
-  const hasLensLikeContrast = zoneRegions.some((r) => {
-    const colors = Array.isArray(r?.region_colors) ? r.region_colors : [];
-    if (colors.length < 2) return false;
-    const sorted = colors
-      .map((c) => ({ ...c, hex: safeHex(c?.hex) }))
-      .filter((c) => !!c.hex)
-      .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
-    if (sorted.length < 2) return false;
-    const top = sorted[0];
-    const second = sorted[1];
-    const lightDiff = Math.abs(getLight(top.hex) - getLight(second.hex));
-    const darkLens = getLight(top.hex) < 0.34 || getLight(second.hex) < 0.34;
-    const reflectiveEdge = getLight(top.hex) > 0.64 || getLight(second.hex) > 0.64;
-    return lightDiff >= 0.2 && darkLens && reflectiveEdge;
-  });
-  return compactRegion && hasLensLikeContrast && coverage >= 0.05 && weightedConfidence >= 38;
-}
-
-function hasStrongOuterwearRegionSignal(zoneRegions = [], evidence = {}) {
-  if (!Array.isArray(zoneRegions) || !zoneRegions.length) return false;
-  const coverage = Number(evidence?.coverage || 0);
-  const weightedConfidence = Number(evidence?.weighted_confidence || 0);
-  const colorCount = Number(evidence?.color_count || 0);
-  const largeRegion = zoneRegions.some((r) => Number(r?.coverage || 0) >= 0.22);
-  const materialContrast = zoneRegions.some((r) => {
-    const colors = Array.isArray(r?.region_colors) ? r.region_colors : [];
-    if (colors.length < 2) return false;
-    const sorted = colors
-      .map((c) => ({ ...c, hex: safeHex(c?.hex) }))
-      .filter((c) => !!c.hex)
-      .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
-    if (sorted.length < 2) return false;
-    const top = sorted[0];
-    const second = sorted[1];
-    const lightDiff = Math.abs(getLight(top.hex) - getLight(second.hex));
-    const satDiff = Math.abs(getSat(top.hex) - getSat(second.hex));
-    return lightDiff >= 0.16 || satDiff >= 0.22;
-  });
-  return largeRegion && materialContrast && coverage >= 0.2 && weightedConfidence >= 40 && colorCount >= 2;
-}
-
-function hasExplicitZoneRegionEvidence(zoneKey, zoneRegions = [], evidence = {}) {
-  const regionCount = Number(evidence?.region_count || 0);
-  const coverage = Number(evidence?.coverage || 0);
-  const weightedConfidence = Number(evidence?.weighted_confidence || 0);
-  const colorCount = Number(evidence?.color_count || 0);
-  const labels = (zoneRegions || []).map((r) => normalizeText(r?.segment_label || r?.label || r?.zone || ""));
-  const hasDinoEvidence = (zoneRegions || []).some((r) =>
-    r?.source_type === "dino_detection" || r?.source_type === "grounding_dino"
-  );
-
-  if (hasDinoEvidence) {
-    return regionCount >= 1 && weightedConfidence >= 35;
-  }
-
-  if (["bag", "accessory_jewelry", "footwear", "fur_trim"].includes(zoneKey)) {
-    return regionCount >= 1 && coverage >= 0.12 && weightedConfidence >= 40 && colorCount >= 1;
-  }
-
-  if (zoneKey === "logo_text_detail") {
-    const hasTextLikeLabel = labels.some((t) => /logo|text|graphic|print/.test(t));
-    const hasContrastSignal = (zoneRegions || []).some((r) =>
-      hasHighContrastColorSignal(Array.isArray(r?.region_colors) ? r.region_colors : [])
-    );
-    return (
-      regionCount >= 1 &&
-      coverage >= 0.08 &&
-      weightedConfidence >= 42 &&
-      colorCount >= 1 &&
-      (hasTextLikeLabel || hasContrastSignal)
-    );
-  }
-
-  if (zoneKey === "outerwear") {
-    if (hasStrongOuterwearRegionSignal(zoneRegions, evidence)) return true;
-    return regionCount >= 1 && coverage >= 0.16 && weightedConfidence >= 42 && colorCount >= 1;
-  }
-
-  if (zoneKey === "eyewear") {
-    if (hasStrongEyewearRegionSignal(zoneRegions, evidence)) return true;
-    return regionCount >= 1 && coverage >= 0.08 && weightedConfidence >= 40 && colorCount >= 1;
-  }
-
-  return regionCount >= 1;
-}
-
-function shouldPromoteFallbackZone(zoneKey, evidence, zoneScore = 0) {
-  if (["bag", "accessory_jewelry", "footwear", "logo_text_detail", "fur_trim", "outerwear"].includes(zoneKey)) {
-    return false;
-  }
-  if (!["lower_garment"].includes(zoneKey)) return true;
-  const hasStrongRegionEvidence =
-    Number(evidence?.region_count || 0) >= 1 &&
-    Number(evidence?.coverage || 0) >= 0.24 &&
-    Number(evidence?.weighted_confidence || 0) >= 42;
-  const hasStrongColorEvidence = Number(evidence?.color_count || 0) >= 2;
-  const passesConfidence = Number(zoneScore || 0) >= 58;
-  return (hasStrongRegionEvidence && hasStrongColorEvidence) || passesConfidence;
-}
-
-function areLikelyOnePiece(zones = {}, segmentedByZone = {}) {
-  const upper = getZoneRegionEvidence(segmentedByZone.upper_garment || []);
-  const lower = getZoneRegionEvidence(segmentedByZone.lower_garment || []);
-  const bodyEvidence = upper.region_count + lower.region_count;
-  if (bodyEvidence < 1) return { decision: false, confidence: 0, reason: "insufficient_region_evidence" };
-
-  const upperHex = zones?.upper_garment?.hex;
-  const lowerHex = zones?.lower_garment?.hex;
-  const hasColors = !!upperHex && !!lowerHex;
-  const labDistance = hasColors ? colorDistanceLab(upperHex, lowerHex) : 99;
-  const upperScore = Number(zones?.upper_garment?.confidence || zones?.upper_garment?.score || 0);
-  const lowerScore = Number(zones?.lower_garment?.confidence || zones?.lower_garment?.score || 0);
-  const noStrongSplitEvidence = lower.coverage < 0.28 || lowerScore < 55;
-  const visuallyContinuous = hasColors && labDistance < 11;
-  const decision = visuallyContinuous && noStrongSplitEvidence;
-  const confidence = decision ? Math.round(clamp100(62 + (11 - Math.max(0, labDistance)) * 2.2)) : 0;
-  return {
-    decision,
-    confidence,
-    reason: decision ? "continuous_body_region_and_weak_split" : "split_evidence_present",
-    lab_distance: round2(labDistance),
-    upper_score: upperScore,
-    lower_score: lowerScore,
-  };
-}
-
-
-function withConfidenceBreakdownFinalConfidence(zone = {}, finalConfidence = 0) {
-  return {
-    ...zone,
-    confidence_breakdown: {
-      ...(zone?.confidence_breakdown || buildConfidenceBreakdown()),
-      final_confidence: Math.round(clamp100(Number(finalConfidence || 0))),
-    },
-  };
-}
-
-function dedupeDarkNeutralZoneReuse(zones = {}) {
-  const slots = ["upper_garment", "lower_garment", "outerwear"];
-  const candidates = slots
-    .map((slot) => ({ slot, data: zones[slot] }))
-    .filter((x) => !!x?.data?.hex)
-    .map((x) => ({
-      ...x,
-      confidence: Number(x.data?.confidence || x.data?.score || 0),
-      traits: getPerceptualTraits(x.data.hex),
-    }));
-
-  const removals = [];
-  for (let i = 0; i < candidates.length; i += 1) {
-    for (let j = i + 1; j < candidates.length; j += 1) {
-      const a = candidates[i];
-      const b = candidates[j];
-      const dist = colorDistanceLab(a.data.hex, b.data.hex);
-      const nearDuplicate = dist < 9;
-      const darkNeutralPair =
-        a.traits?.chroma_magnitude < 20 &&
-        b.traits?.chroma_magnitude < 20 &&
-        getLight(a.data.hex) < 0.45 &&
-        getLight(b.data.hex) < 0.45;
-
-      if (nearDuplicate || darkNeutralPair) {
-        const weaker = a.confidence <= b.confidence ? a : b;
-        if (weaker.slot === "upper_garment") continue;
-        removals.push({
-          slot: weaker.slot,
-          reason: "near_duplicate_dark_neutral",
-          matched_with: weaker.slot === a.slot ? b.slot : a.slot,
-          distance: round2(dist),
-        });
-      }
-    }
-  }
-
-  const deduped = { ...zones };
-  for (const r of removals) {
-    const current = deduped[r.slot];
-    if (!current?.hex) continue;
-    const dedupedConfidence = Math.min(Number(current?.confidence || 0), 42);
-    deduped[r.slot] = withConfidenceBreakdownFinalConfidence({
-      ...current,
-      hex: null,
-      interpretation: "unknown",
-      display_label: titleCase(String(r.slot).replace(/_/g, " ")),
-      confidence: dedupedConfidence,
-      dominant_color: null,
-      support_colors: [],
-      accent_colors: [],
-      dedupe_reason: r.reason,
-    }, dedupedConfidence);
-  }
-
-  return { zones: deduped, removals };
-}
-
-const GARMENT_ZONE_OUTPUT_WHITELIST = new Set([
-  "upper",
-  "upper_garment",
-  "lower",
-  "lower_garment",
-  "body_garment",
-  "one_piece",
-  "outerwear",
-  "footwear",
-  "bag",
-  "accessory",
-  "accessories",
-  "accessory_jewelry",
-  "eyewear",
-  "logo_text_detail",
-  "fur_trim",
-]);
-
-
-const dinoTraceObjectIds = new WeakMap();
-let dinoTraceObjectIdCounter = 0;
-
-function getDinoTraceObjectId(value) {
-  if (!value || typeof value !== "object") return null;
-  if (!dinoTraceObjectIds.has(value)) {
-    dinoTraceObjectIdCounter += 1;
-    dinoTraceObjectIds.set(value, `obj_${dinoTraceObjectIdCounter}`);
-  }
-  return dinoTraceObjectIds.get(value);
-}
-
-function summarizeDinoRegionForTrace(region) {
-  if (!region) return null;
-  const topColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
-  return {
-    object_ref: getDinoTraceObjectId(region),
-    id: region?.id || region?.region_id || region?.detection_id || null,
-    dominant_hex: safeHex(region?.dominant_hex || "") || region?.dominant_hex || null,
-    region_colors_0_hex: safeHex(topColor?.hex || "") || topColor?.hex || null,
-    region_colors_0_pct: topColor?.pct ?? null,
-  };
-}
-
-function findDinoRegionForTrace(regions = [], id = "dino_4") {
-  return Array.isArray(regions) ? regions.find((region) => region?.id === id) || null : null;
-}
-
-function summarizeDinoStageForTrace(stage, regions = [], id = "dino_4") {
-  const region = findDinoRegionForTrace(regions, id);
-  return {
-    stage,
-    found: !!region,
-    ...summarizeDinoRegionForTrace(region),
-  };
-}
-
-function buildDinoLifecycleChangeSummary(stages = []) {
-  const foundStages = (Array.isArray(stages) ? stages : []).filter((stage) => stage?.found);
-  for (let idx = 1; idx < foundStages.length; idx += 1) {
-    const previous = foundStages[idx - 1];
-    const current = foundStages[idx];
-    if ((previous?.dominant_hex || null) !== (current?.dominant_hex || null)) {
-      return {
-        changed_between: [previous.stage, current.stage],
-        from_dominant_hex: previous?.dominant_hex || null,
-        to_dominant_hex: current?.dominant_hex || null,
-        same_object_ref: !!previous?.object_ref && previous.object_ref === current.object_ref,
-      };
-    }
-  }
-  return {
-    changed_between: null,
-    from_dominant_hex: foundStages[0]?.dominant_hex || null,
-    to_dominant_hex: foundStages[foundStages.length - 1]?.dominant_hex || null,
-    same_object_ref: foundStages.length > 1
-      ? foundStages.every((stage) => stage?.object_ref && stage.object_ref === foundStages[0].object_ref)
-      : null,
-  };
-}
-
-function filterGarmentZoneOutput(zones = {}) {
-  const filteredZones = {};
-  const removedNonGarmentZones = [];
-
-  for (const [zoneKey, zoneData] of Object.entries(zones || {})) {
-    if (GARMENT_ZONE_OUTPUT_WHITELIST.has(zoneKey)) {
-      filteredZones[zoneKey] = zoneData;
-      continue;
-    }
-    removedNonGarmentZones.push(zoneKey);
-  }
-
-  return {
-    zones: filteredZones,
-    removed_non_garment_zones: removedNonGarmentZones,
-  };
-}
-
-
-const V6_DECISION_CONFIDENCE_CONFIG = Object.freeze({
-  object_evidence: 0.20,
-  pixel_evidence: 0.16,
-  geometry: 0.10,
-  region: 0.14,
-  coverage: 0.10,
-  color_consistency: 0.12,
-  publication: 0.18,
-  skin_like_penalty: 0.08,
-  highlight_penalty: 0.06,
-  neutral_evidence: 0.50,
-});
-
-function normalizeDecisionConfidence(value, fallback = 0) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return Math.max(0, Math.min(1, fallback));
-  return Math.max(0, Math.min(1, n > 1 ? n / 100 : n));
-}
-
-function getZoneDecisionInputs(zone = {}) {
-  const evidence = zone?.evidence_ledger || {};
-  const contamination = evidence?.contamination_scores || {};
-  const publishedColors = Array.isArray(evidence?.published_colors) ? evidence.published_colors : [];
-  const regionColors = Array.isArray(zone?.region_colors) ? zone.region_colors : [];
-  const detectorEvidence = Array.isArray(evidence?.detector_evidence) ? evidence.detector_evidence : [];
-  const cropEvidence = Array.isArray(evidence?.crop_pixel_evidence) ? evidence.crop_pixel_evidence : [];
-  const candidateEvidence = Array.isArray(evidence?.candidate_region_evidence) ? evidence.candidate_region_evidence : [];
-  const pctTotal = (publishedColors.length ? publishedColors : regionColors)
-    .reduce((sum, color) => sum + Math.max(0, Number(color?.pct || 0)), 0);
-  const colorConfidenceValues = (publishedColors.length ? publishedColors : regionColors)
-    .map((color) => normalizeDecisionConfidence(color?.confidence, 0))
-    .filter((value) => Number.isFinite(value));
-  const avgColorConfidence = colorConfidenceValues.length
-    ? colorConfidenceValues.reduce((sum, value) => sum + value, 0) / colorConfidenceValues.length
-    : normalizeDecisionConfidence(zone?.confidence, V6_DECISION_CONFIDENCE_CONFIG.neutral_evidence);
-  const objectEvidence = normalizeDecisionConfidence(
-    Math.max(Number(zone?.score || 0), Number(zone?.confidence || 0)),
-    V6_DECISION_CONFIDENCE_CONFIG.neutral_evidence
-  );
-  const pixelEvidence = cropEvidence.length
-    ? Math.min(1, 0.55 + cropEvidence.length * 0.10)
-    : candidateEvidence.length
-      ? 0.58
-      : 0.42;
-  const geometry = zone?.mask_geometry || zone?.bbox ? 0.72 : 0.5;
-  const region = candidateEvidence.length || regionColors.length ? Math.min(1, 0.55 + Math.max(candidateEvidence.length, regionColors.length) * 0.07) : 0.4;
-  const coverage = Math.max(0, Math.min(1, Number(zone?.coverage || zone?.pct || pctTotal || 0)));
-  const colorConsistency = Math.max(0, Math.min(1, avgColorConfidence));
-  const publication = zone?.primary_color?.hex || zone?.hex ? 0.85 : zone?.interpretation === 'unknown' ? 0.12 : 0.45;
-  const skinPenalty = Math.max(0, Math.min(1, Number(contamination?.skin_or_beige || 0)));
-  const highlightPenalty = Math.max(0, Math.min(1, Number(contamination?.highlight_or_glare || 0)));
-
-  return {
-    object_evidence: objectEvidence,
-    pixel_evidence: pixelEvidence,
-    geometry,
-    region,
-    coverage,
-    color_consistency: colorConsistency,
-    publication,
-    skin_like_penalty: skinPenalty,
-    highlight_penalty: highlightPenalty,
-  };
-}
-
-function computeUnifiedZoneConfidence(zone = {}) {
-  const inputs = getZoneDecisionInputs(zone);
-  const positive =
-    inputs.object_evidence * V6_DECISION_CONFIDENCE_CONFIG.object_evidence +
-    inputs.pixel_evidence * V6_DECISION_CONFIDENCE_CONFIG.pixel_evidence +
-    inputs.geometry * V6_DECISION_CONFIDENCE_CONFIG.geometry +
-    inputs.region * V6_DECISION_CONFIDENCE_CONFIG.region +
-    inputs.coverage * V6_DECISION_CONFIDENCE_CONFIG.coverage +
-    inputs.color_consistency * V6_DECISION_CONFIDENCE_CONFIG.color_consistency +
-    inputs.publication * V6_DECISION_CONFIDENCE_CONFIG.publication;
-  const penalty =
-    inputs.skin_like_penalty * V6_DECISION_CONFIDENCE_CONFIG.skin_like_penalty +
-    inputs.highlight_penalty * V6_DECISION_CONFIDENCE_CONFIG.highlight_penalty;
-  const raw = Math.max(0, Math.min(1, positive - penalty));
-  const rawConfidence = Math.round(raw * 100);
-  const legacyConfidence = Math.round(clamp100(Number(zone?.confidence || zone?.score || 0)));
-  const calibratedConfidence = Math.round(clamp100(rawConfidence * 0.72 + legacyConfidence * 0.28));
-  return {
-    raw_confidence: rawConfidence,
-    calibrated_confidence: calibratedConfidence,
-    unified_confidence: calibratedConfidence,
-    confidence_inputs: Object.fromEntries(Object.entries(inputs).map(([key, value]) => [key, round2(value)])),
-    confidence_weights: { ...V6_DECISION_CONFIDENCE_CONFIG },
-  };
-}
-
-function getV6PublicationState(zone = {}, unifiedConfidence = 0) {
-  const hasPublishableEvidence = Boolean(zone?.primary_color?.hex || zone?.hex || zone?.dominant_color?.hex);
-  if (!hasPublishableEvidence || zone?.interpretation === 'unknown' || zone?.publication_decision === 'reject') {
-    return unifiedConfidence <= 20 ? 'rejected' : 'unknown';
-  }
-  if (unifiedConfidence >= 80) return 'confirmed';
-  if (unifiedConfidence >= 65) return 'probable';
-  if (unifiedConfidence >= 45) return 'possible';
-  return 'unknown';
-}
-
-function buildV6EvidenceChain(zone = {}) {
-  const evidence = zone?.evidence_ledger || {};
-  return [
-    { stage: 'detector', present: Array.isArray(evidence?.detector_evidence) && evidence.detector_evidence.length > 0, evidence: evidence?.detector_evidence || [] },
-    { stage: 'region_selection', present: Array.isArray(evidence?.candidate_region_evidence) && evidence.candidate_region_evidence.length > 0, evidence: evidence?.candidate_region_evidence || [] },
-    { stage: 'pixel_refinement', present: Array.isArray(evidence?.crop_pixel_evidence) && evidence.crop_pixel_evidence.length > 0, evidence: evidence?.crop_pixel_evidence || [] },
-    { stage: 'geometry_validation', present: Boolean(zone?.mask_geometry || zone?.bbox), evidence: zone?.mask_geometry || zone?.bbox || null },
-    { stage: 'contamination_analysis', present: Boolean(evidence?.contamination_scores), evidence: evidence?.contamination_scores || null },
-    { stage: 'alternative_candidates', present: Array.isArray(zone?.rejected_alternatives) && zone.rejected_alternatives.length > 0, evidence: zone?.rejected_alternatives || [] },
-    { stage: 'publication_decision', present: true, evidence: zone?.publication_reason || zone?.publication_reasons?.primary || null },
-  ];
-}
-
-function buildV6DecisionMetrics(zone = {}, unifiedConfidence = 0, publicationState = 'unknown') {
-  const alternatives = Array.isArray(zone?.rejected_alternatives) ? zone.rejected_alternatives : [];
-  const palette = Array.isArray(zone?.display_palette) && zone.display_palette.length
-    ? zone.display_palette
-    : Array.isArray(zone?.region_colors) ? zone.region_colors : [];
-  const confidences = palette.map((color) => Number(color?.confidence || 0)).filter(Number.isFinite).sort((a, b) => b - a);
-  const top = confidences[0] || unifiedConfidence;
-  const second = confidences[1] || 0;
-  const pct = palette.map((color) => Number(color?.pct || 0)).filter(Number.isFinite).sort((a, b) => b - a);
-  const dominantMargin = Math.max(0, (pct[0] || 0) - (pct[1] || 0));
-  const certaintyMap = { confirmed: 1, probable: 0.8, possible: 0.6, unknown: 0.3, rejected: 0 };
-  return {
-    decision_complexity: 1 + alternatives.length + Math.max(0, palette.length - 1),
-    candidate_count: Math.max(1, palette.length + alternatives.length),
-    confidence_spread: Math.round(Math.max(0, top - second)),
-    alternative_margin: Math.round(Math.max(0, unifiedConfidence - second)),
-    dominant_margin: round2(dominantMargin),
-    publication_certainty: certaintyMap[publicationState] ?? 0.3,
-  };
-}
-
-function validateV6DecisionConsistency(zone = {}) {
-  const issues = [];
-  if (!Number.isFinite(Number(zone?.unified_confidence))) issues.push('unified_confidence_missing');
-  if (!['confirmed', 'probable', 'possible', 'unknown', 'rejected'].includes(zone?.publication_state)) issues.push('invalid_publication_state');
-  if (!Array.isArray(zone?.evidence_chain) || zone.evidence_chain.length !== 7) issues.push('evidence_chain_incomplete');
-  if (zone?.publication_state === 'confirmed' && Number(zone?.unified_confidence || 0) < 80) issues.push('confirmed_below_threshold');
-  if (zone?.publication_state === 'rejected' && (zone?.primary_color?.hex || zone?.hex)) issues.push('rejected_has_publishable_color');
-  return { valid: issues.length === 0, issues };
-}
-
-function enrichV6FinalizedZone(zoneKey, zone = {}) {
-  const confidence = computeUnifiedZoneConfidence(zone);
-  const publicationState = getV6PublicationState(zone, confidence.unified_confidence);
-  const evidenceChain = buildV6EvidenceChain(zone);
-  const decisionMetrics = buildV6DecisionMetrics(zone, confidence.unified_confidence, publicationState);
-  const calibrationMetadata = {
-    predicted_confidence: confidence.raw_confidence,
-    final_confidence: confidence.unified_confidence,
-    supporting_evidence: evidenceChain.filter((entry) => entry.present).map((entry) => entry.stage),
-    confidence_source: 'formula_v6_unified_confidence',
-    calibration_ready: true,
-  };
-  const enriched = {
-    ...zone,
-    ...confidence,
-    publication_state: publicationState,
-    evidence_chain: evidenceChain,
-    decision_metrics: decisionMetrics,
-    calibration_metadata: calibrationMetadata,
-  };
-  return {
-    ...enriched,
-    decision_consistency: validateV6DecisionConsistency(enriched),
-  };
-}
-
-function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelligence = {}, segmentedRegions = []) {
-  const roleByName = Object.fromEntries((colorRoles || []).map((r) => [r.role, r]));
-  const dominant = visualIntelligence?.dominant_body_color || roleByName.anchor || normalizedColors[0] || null;
-  const secondary = roleByName.support || normalizedColors[1] || dominant;
-  const accent = roleByName.accent || normalizedColors[2] || secondary;
-  const stabilizer = roleByName.stabilizer || normalizedColors[3] || secondary;
-
-  const segmentedByZone = {};
-  const genericSamRegions = [];
-  for (const region of segmentedRegions || []) {
-    const zone = region?.zone && region.zone !== "unknown" ? region.zone : getZoneFromLabel(region?.segment_label);
-    if (zone === "unknown") {
-      genericSamRegions.push(region);
-      continue;
-    }
-    if (!segmentedByZone[zone]) segmentedByZone[zone] = [];
-    segmentedByZone[zone].push(region);
-  }
-
-  const bodyContextBoxes = []
-    .concat(segmentedByZone.upper_garment || [])
-    .concat(segmentedByZone.lower_garment || [])
-    .concat(segmentedByZone.body_garment || [])
-    .map((r) => r?.mask_geometry?.bbox)
-    .filter(Boolean);
-  const outerContextBoxes = (segmentedByZone.outerwear || []).map((r) => r?.mask_geometry?.bbox).filter(Boolean);
-  const genericContext = {
-    body_bbox: mergeNormalizedBBoxes(bodyContextBoxes),
-    outer_bbox: mergeNormalizedBBoxes(outerContextBoxes),
-  };
-  const genericMaskDebug = [];
-  for (const region of genericSamRegions) {
-    const proposal = estimateGenericMaskZone(region, genericContext);
-    const dominantHex = safeHex(region?.dominant_hex || region?.region_colors?.[0]?.hex || "");
-    const candidateDebug = {
-      mask_id: region?.id || null,
-      coverage: round2(Number(region?.mask_geometry?.coverage || region?.coverage || 0)),
-      dominant_hex: dominantHex || null,
-      region_colors: (Array.isArray(region?.region_colors) ? region.region_colors : [])
-        .map((c) => ({ hex: safeHex(c?.hex) || c?.hex || null, pct: round2(Number(c?.pct || 0)) }))
-        .filter((c) => !!c.hex)
-        .slice(0, 4),
-      estimated_positional_role: proposal.estimated_role,
-      proposed_zone: proposal.proposed_zone,
-      proposed_zone_flags: {
-        upper_garment: proposal.proposed_zone === "upper_garment",
-        body_garment: proposal.proposed_zone === "body_garment",
-        outerwear: proposal.proposed_zone === "outerwear",
-        eyewear: proposal.proposed_zone === "eyewear",
-        fur_trim: proposal.proposed_zone === "fur_trim",
-      },
-      accepted: proposal.accepted,
-      accepted_reasons: proposal.acceptance_reasons,
-      rejected_reasons: proposal.rejection_reasons,
-      top_score: proposal.top_score,
-      threshold_used: proposal.threshold_used,
-      expandsPastBody: proposal.expandsPastBody,
-      nearOuterBoundary: proposal.nearOuterBoundary,
-      body_bbox: proposal.body_bbox,
-      bbox: proposal.bbox,
-      final_acceptance_formula: proposal.decision_formula,
-    };
-    genericMaskDebug.push(candidateDebug);
-    console.info("[SAM DEBUG] Generic mask candidate", candidateDebug);
-
-    if (proposal.accepted && proposal.proposed_zone) {
-      if (!segmentedByZone[proposal.proposed_zone]) segmentedByZone[proposal.proposed_zone] = [];
-      segmentedByZone[proposal.proposed_zone].push({
-        ...region,
-        zone: proposal.proposed_zone,
-        generic_zone_proposal: proposal,
-      });
-    }
-  }
-
-  const zoneMap = {
-    upper_garment: dominant,
-    lower_garment: secondary,
-    outerwear: stabilizer,
-    footwear: accent,
-    eyewear: stabilizer,
-    bag: secondary,
-    hair: dominant,
-    lips: accent,
-    fur_trim: stabilizer,
-    logo_text_detail: accent,
-    accessory_jewelry: accent,
-  };
-
-  const zones = {};
-  const regionColorAnalysis = [];
-  const regionSummary = [];
-  const zoneCandidateSummary = [];
-  const dinoLifecycleTrace = [
-    summarizeDinoStageForTrace("garmentEvidenceRegions", segmentedRegions),
-    summarizeDinoStageForTrace("segmentedByZone.accessory_jewelry", segmentedByZone.accessory_jewelry || []),
-  ];
-  const missedZoneDebug = [];
-  const piecePrimaryHexesByZone = Object.fromEntries(
-    ["upper_garment", "lower_garment", "footwear", "accessory_jewelry", "bag"].map((pieceZone) => {
-      const candidates = (segmentedByZone[pieceZone] || []).flatMap((region) => {
-        const colors = Array.isArray(region?.region_colors) ? region.region_colors : [];
-        const intrinsic = colors.find((color) => color?.intrinsic_material_identity === true);
-        return [
-          intrinsic?.hex || intrinsic?.base,
-          region?.dominant_hex || region?.hex,
-          colors[0]?.hex || colors[0]?.base,
-        ].map((hex) => safeHex(hex || "")).filter(Boolean);
-      });
-      return [pieceZone, [...new Set(candidates)]];
-    })
-  );
-
-  for (const [zoneKey, fallbackColor] of Object.entries(zoneMap)) {
-    const zoneRegions = segmentedByZone[zoneKey] || [];
-    if (zoneKey === "accessory_jewelry") {
-      dinoLifecycleTrace.push(summarizeDinoStageForTrace("zoneRegions", zoneRegions));
-    }
-    const regionColors = zoneRegions
-      .flatMap((r) => {
-        const local = Array.isArray(r?.region_colors) ? r.region_colors : [];
-        if (local.length) return local;
-        const fallbackHex = safeHex(r?.dominant_hex || r?.hex);
-        if (!fallbackHex) return [];
-        return [{ hex: fallbackHex, pct: Number(r?.coverage || r?.confidence || 0.2) }];
-      })
-      .filter((c) => !!c.hex);
-    const evidence = getZoneRegionEvidence(zoneRegions);
-    const isDinoSourceType = (sourceType) => sourceType === "grounding_dino" || sourceType === "dino_detection";
-    const hasHeadwearDinoPrimarySignal = (region) => {
-      const fields = [
-        region?.display_zone_label,
-        region?.accessory_type,
-        region?.object_type,
-        region?.label,
-        region?.category,
-        region?.segment_label,
-      ];
-      return fields.some((value) => /headwear|\bhat\b|\bcap\b|beanie/i.test(String(value || "")));
-    };
-    const selectBestDinoPrimaryRegion = (currentZoneKey, currentZoneRegions = []) => {
-      const candidates = currentZoneRegions.filter((region) => isDinoSourceType(region?.source_type));
-      const fallbackRegion = candidates[0] || null;
-      const fallbackScore = { total: -Infinity };
-      if (!fallbackRegion) {
-        return {
-          region: null,
-          debug: {
-            selected_id: null,
-            selected_label: null,
-            selected_display_zone_label: null,
-            selected_accessory_type: null,
-            selected_dominant_hex: null,
-            selected_top_region_hex: null,
-            selected_top_pct: null,
-            candidate_count: 0,
-            reason: "no_dino_candidates",
-          },
-        };
-      }
-
-      const isSaturatedObjectColor = (hex, topPct) => {
-        const safe = safeHex(hex || "");
-        if (!safe) return false;
-        const saturation = getSat(safe);
-        const lightness = getLight(safe);
-        return saturation >= 0.55 && lightness >= 0.25 && lightness <= 0.7 && Number(topPct || 0) >= 0.45;
-      };
-      const isMutedSkinLikeDustyRose = (hex) => {
-        const safe = safeHex(hex || "");
-        if (!safe) return false;
-        const hue = getHue(safe);
-        const saturation = getSat(safe);
-        const lightness = getLight(safe);
-        const isRoseHue = hue >= 330 || hue <= 25;
-        return isRoseHue && saturation >= 0.08 && saturation <= 0.42 && lightness >= 0.35 && lightness <= 0.68;
-      };
-      const hasSaturatedHeadwearColor = currentZoneKey === "accessory_jewelry" && candidates.some((region) => {
-        if (!hasHeadwearDinoPrimarySignal(region)) return false;
-        const topColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
-        const topPct = Number(topColor?.pct || 0);
-        const colorHex = safeHex(region?.dominant_hex || "") || safeHex(topColor?.hex || "");
-        return isSaturatedObjectColor(colorHex, topPct);
-      });
-
-      const scoreRegion = (region) => {
-        const topColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
-        const topPct = Number(topColor?.pct || 0);
-        const confidence = Number(region?.confidence || 0);
-        const coverage = Number(region?.coverage || region?.mask_geometry?.coverage || 0);
-        const dominantHex = safeHex(region?.dominant_hex || "");
-        const topHex = safeHex(topColor?.hex || "");
-        const evidenceHex = dominantHex || topHex;
-        const hasDominantHex = !!dominantHex;
-        const hasHeadwearSignal = currentZoneKey === "accessory_jewelry" && hasHeadwearDinoPrimarySignal(region);
-        const saturatedObjectScore =
-          currentZoneKey === "accessory_jewelry" && isSaturatedObjectColor(evidenceHex, topPct)
-            ? 180 + (topPct * 120) + (getSat(evidenceHex) * 80)
-            : 0;
-        const mutedPenalty =
-          currentZoneKey === "accessory_jewelry" &&
-          hasSaturatedHeadwearColor &&
-          hasHeadwearSignal &&
-          isMutedSkinLikeDustyRose(evidenceHex)
-            ? 220
-            : 0;
-        const total = currentZoneKey === "accessory_jewelry"
-          ? (
-            (hasHeadwearSignal ? 150 : 0) +
-            (hasDominantHex ? 60 : 0) +
-            (topPct * 500) +
-            (confidence * 120) +
-            (coverage * 100) +
-            saturatedObjectScore -
-            mutedPenalty
-          )
-          : (
-            (hasHeadwearSignal ? 1000 : 0) +
-            (topPct * 100) +
-            (confidence * 10) +
-            (coverage * 10) +
-            (hasDominantHex ? 1 : 0)
-          );
-        return {
-          topPct,
-          confidence,
-          coverage,
-          hasDominantHex,
-          hasHeadwearSignal,
-          saturatedObjectScore,
-          mutedPenalty,
-          total,
-        };
-      };
-
-      let bestRegion = fallbackRegion;
-      let bestScore = scoreRegion(fallbackRegion) || fallbackScore;
-      for (const candidate of candidates.slice(1)) {
-        const candidateScore = scoreRegion(candidate);
-        if (candidateScore.total > bestScore.total) {
-          bestRegion = candidate;
-          bestScore = candidateScore;
-        }
-      }
-
-      const fallbackWasSelected = bestRegion === fallbackRegion;
-      const topColor = Array.isArray(bestRegion?.region_colors) ? bestRegion.region_colors[0] : null;
-      return {
-        region: bestRegion,
-        debug: {
-          selected_id: bestRegion?.id || bestRegion?.region_id || bestRegion?.detection_id || null,
-          selected_label: bestRegion?.label || bestRegion?.segment_label || null,
-          selected_display_zone_label: bestRegion?.display_zone_label || null,
-          selected_accessory_type: bestRegion?.accessory_type || null,
-          selected_dominant_hex: safeHex(bestRegion?.dominant_hex || "") || null,
-          selected_top_region_hex: safeHex(topColor?.hex || "") || null,
-          selected_top_pct: topColor?.pct ?? null,
-          candidate_count: candidates.length,
-          candidate_scores: currentZoneKey === "accessory_jewelry"
-            ? candidates.map((candidate) => {
-              const candidateTopColor = Array.isArray(candidate?.region_colors) ? candidate.region_colors[0] : null;
-              const candidateScore = scoreRegion(candidate);
-              return {
-                id: candidate?.id || candidate?.region_id || candidate?.detection_id || null,
-                label: candidate?.label || candidate?.segment_label || null,
-                dominant_hex: safeHex(candidate?.dominant_hex || "") || null,
-                top_hex: safeHex(candidateTopColor?.hex || "") || null,
-                top_pct: candidateTopColor?.pct ?? null,
-                confidence: candidateScore.confidence,
-                coverage: candidateScore.coverage,
-                headwear_signal: candidateScore.hasHeadwearSignal,
-                saturated_object_score: round2(candidateScore.saturatedObjectScore),
-                muted_penalty: round2(candidateScore.mutedPenalty),
-                total: round2(candidateScore.total),
-              };
-            })
-            : undefined,
-          reason: fallbackWasSelected
-            ? "fallback_first_dino_candidate_retained"
-            : bestScore.hasHeadwearSignal
-              ? "selected_highest_scoring_headwear_dino_candidate"
-              : "selected_highest_scoring_dino_candidate",
-        },
-      };
-    };
-    const refinedRegionColors = zoneRegions
-      .filter((region) => !isDinoSourceType(region?.source_type))
-      .flatMap((region) => Array.isArray(region?.region_colors) ? region.region_colors : []);
-    const rawDinoRegionColors = zoneRegions
-      .filter((region) => isDinoSourceType(region?.source_type))
-      .flatMap((region) => Array.isArray(region?.region_colors) ? region.region_colors : []);
-    const dinoOnlyZone =
-      zoneRegions.length > 0 &&
-      zoneRegions.every((region) => isDinoSourceType(region?.source_type));
-    const dinoPrimarySelection = dinoOnlyZone ? selectBestDinoPrimaryRegion(zoneKey, zoneRegions) : { region: null, debug: null };
-    const dinoPrimaryRegion = dinoPrimarySelection.region;
-    const dinoPrimaryHex = dinoOnlyZone
-      ? safeHex(dinoPrimaryRegion?.dominant_hex || dinoPrimaryRegion?.region_colors?.[0]?.hex || "")
-      : null;
-    const preserveDinoZoneColor =
-      ["accessory_jewelry", "bag", "eyewear", "footwear", "lower_garment", "upper_garment"].includes(zoneKey) &&
-      dinoOnlyZone &&
-      !!dinoPrimaryHex;
-
-    const hasColorRegionEvidence = zoneRegions.some((region) => {
-      const sourceType = region?.source_type;
-      const isDinoRegion = sourceType === "grounding_dino" || sourceType === "dino_detection";
-      const explicitRegionColors = Array.isArray(region?.region_colors) ? region.region_colors : [];
-      return !isDinoRegion && explicitRegionColors.length > 0;
-    });
-    const regionClusters = buildColorClusters(regionColors);
-    const consensusCluster = regionClusters[0] || null;
-    const chosenColor = preserveDinoZoneColor
-      ? { ...fallbackColor, hex: dinoPrimaryHex, pct: dinoPrimaryRegion?.region_colors?.[0]?.pct || dinoPrimaryRegion?.coverage || dinoPrimaryRegion?.confidence || consensusCluster?.pct || fallbackColor?.pct }
-      : consensusCluster?.base
-        ? { ...fallbackColor, hex: consensusCluster.base, pct: consensusCluster.pct }
-        : fallbackColor;
-    const computedScore = Math.max(45, Math.round((chosenColor?.pct || 0.25) * 100));
-    const promoteFallback = shouldPromoteFallbackZone(zoneKey, evidence, computedScore);
-    const hasExplicitEvidence = hasExplicitZoneRegionEvidence(zoneKey, zoneRegions, evidence);
-    const strongEyewearSignal = zoneKey === "eyewear" ? hasStrongEyewearRegionSignal(zoneRegions, evidence) : false;
-    const strongOuterwearSignal = zoneKey === "outerwear" ? hasStrongOuterwearRegionSignal(zoneRegions, evidence) : false;
-    const strongSignalHelper = zoneKey === "eyewear" ? strongEyewearSignal : zoneKey === "outerwear" ? strongOuterwearSignal : false;
-    const allowZoneFromRegionOnly = ["bag", "accessory_jewelry", "footwear", "logo_text_detail", "fur_trim", "outerwear"].includes(zoneKey);
-    const useRegionCandidate = (hasExplicitEvidence || preserveDinoZoneColor) && zoneRegions.length > 0;
-    const zoneData = useRegionCandidate
-      ? buildZoneCandidate(chosenColor, zoneKey, computedScore)
-      : promoteFallback && !allowZoneFromRegionOnly
-        ? buildZoneCandidate(chosenColor, zoneKey, computedScore)
-        : null;
-    const dominantDarkBodyHex =
-      zones.upper_garment?.dominant_color?.hex ||
-      zones.upper_garment?.hex ||
-      zones.body_garment?.dominant_color?.hex ||
-      zones.body_garment?.hex ||
-      null;
-    const zoneRead = inferZoneColorRead(
-      zoneKey,
-      zoneData,
-      normalizedColors,
-      regionColors,
-      hasColorRegionEvidence || preserveDinoZoneColor,
-      {
-        dominantDarkBodyHex,
-        preservedDinoHex: preserveDinoZoneColor ? dinoPrimaryHex : null,
-        preserveDinoZoneColor,
-        zoneColorSource: preserveDinoZoneColor ? "dino_primary" : consensusCluster?.base ? "cluster" : "fallback",
-        dinoPrimaryRegionSelection: dinoPrimarySelection.debug,
-        selectedDinoRegionColors: Array.isArray(dinoPrimaryRegion?.region_colors) ? dinoPrimaryRegion.region_colors : [],
-        refinedRegionColors,
-        rawDinoRegionColors,
-        otherGarmentPrimaryHexes: Object.entries(piecePrimaryHexesByZone)
-          .filter(([pieceZone]) => ["upper_garment", "lower_garment"].includes(pieceZone) && pieceZone !== zoneKey)
-          .flatMap(([, hexes]) => hexes),
-        otherOwnedPiecePrimaryHexes: Object.entries(piecePrimaryHexesByZone)
-          .filter(([pieceZone]) => ["footwear", "accessory_jewelry", "bag"].includes(pieceZone))
-          .flatMap(([, hexes]) => hexes),
-        evidence,
-      }
-    );
-    if (["eyewear", "outerwear", "fur_trim"].includes(zoneKey)) {
-      const segmentLabels = zoneRegions.map((r) => r?.segment_label || r?.label || r?.zone || "unknown");
-      const regionColorSummary = zoneRegions.map((r) => ({
-        segment_label: r?.segment_label || r?.label || r?.zone || "unknown",
-        coverage: round2(Number(r?.coverage || 0)),
-        confidence: round2(Number(r?.confidence || 0)),
-        region_colors: (Array.isArray(r?.region_colors) ? r.region_colors : [])
-          .map((c) => ({
-            hex: safeHex(c?.hex) || c?.hex || null,
-            pct: round2(Number(c?.pct || 0)),
-            name: c?.name || null,
-          }))
-          .filter((c) => !!c.hex),
-      }));
-      missedZoneDebug.push({
-        zone: zoneKey,
-        region_count: evidence.region_count,
-        coverage: evidence.coverage,
-        weighted_confidence: evidence.weighted_confidence,
-        color_count: evidence.color_count,
-        has_explicit_zone_region_evidence: hasExplicitEvidence,
-        strong_signal_helper: strongSignalHelper,
-        strong_signal_helper_name:
-          zoneKey === "eyewear"
-            ? "hasStrongEyewearRegionSignal"
-            : zoneKey === "outerwear"
-              ? "hasStrongOuterwearRegionSignal"
-              : "none",
-        zone_data_created: !!zoneData,
-        zone_data_hex: zoneData?.hex || null,
-        infer_zone_unknown: zoneRead?.interpretation === "unknown",
-        infer_zone_unknown_reason: zoneRead?._debug?.unknown_reason || null,
-        suppression_gates: zoneRead?._debug?.suppression_gates || null,
-        infer_zone_strong_signal_overrides: zoneRead?._debug?.strong_signal_overrides || null,
-        segment_labels: segmentLabels,
-        region_colors_summary: regionColorSummary,
-      });
-    }
-    regionSummary.push({
-      zone: zoneKey,
-      region_count: evidence.region_count,
-      coverage: evidence.coverage,
-      weighted_confidence: evidence.weighted_confidence,
-      color_count: evidence.color_count,
-    });
-    zoneCandidateSummary.push({
-      zone: zoneKey,
-      has_sam_region: hasColorRegionEvidence,
-      promote_fallback: promoteFallback,
-      score: computedScore,
-      selected_hex: zoneData?.hex || null,
-      confidence: zoneRead?.confidence || 0,
-      zone_color_source: zoneRead?._debug?.zone_color_source || null,
-      preserved_dino_hex: zoneRead?._debug?.preserved_dino_hex || null,
-    });
-
-    const signatureColor = deriveSignatureColorDisplayRead(zoneRead, zoneKey);
-    const accessoryDisplayMetadata = zoneKey === "accessory_jewelry"
-      ? inferAccessoryDisplayMetadata(
-          zoneRegions.flatMap((region) => [
-            region?.segment_label,
-            region?.label,
-            region?.category,
-          ])
-        )
-      : {};
-
-    zones[zoneKey] = {
-      ...(zoneData || {}),
-      ...zoneRead,
-      signature_color: signatureColor,
-      ...accessoryDisplayMetadata,
-    };
-
-    const headwearDebugValues = buildHeadwearDebugValues(zones[zoneKey]);
-    if (headwearDebugValues) {
-      zones[zoneKey].headwear_debug_values = headwearDebugValues;
-    }
-
-    const dominantObj = buildSegmentedColorObject({
-      color: { hex: zoneRead?.dominant_color?.hex, pct: zoneRead?.dominant_color?.pct },
-      zone: zoneKey,
-      role: "dominant",
-      sourceType: hasColorRegionEvidence ? "sam_segment" : "global_palette",
-      segmentLabel: zoneRegions[0]?.segment_label || zoneKey,
-      confidence: zoneRead?.confidence || zoneData?.score || 0,
-    });
-
-    if (dominantObj) regionColorAnalysis.push(dominantObj);
-
-    for (const support of zoneRead.support_colors || []) {
-      const obj = buildSegmentedColorObject({
-        color: support,
-        zone: zoneKey,
-        role: "support",
-        sourceType: hasColorRegionEvidence ? "sam_segment" : "global_palette",
-        segmentLabel: zoneRegions[0]?.segment_label || zoneKey,
-        confidence: Math.max(40, (zoneRead?.confidence || 0) - 12),
-      });
-      if (obj) regionColorAnalysis.push(obj);
-    }
-
-    for (const accentColor of zoneRead.accent_colors || []) {
-      const obj = buildSegmentedColorObject({
-        color: accentColor,
-        zone: zoneKey,
-        role: "accent",
-        sourceType: hasColorRegionEvidence ? "sam_segment" : "global_palette",
-        segmentLabel: zoneRegions[0]?.segment_label || zoneKey,
-        confidence: Math.max(35, (zoneRead?.confidence || 0) - 16),
-      });
-      if (obj) regionColorAnalysis.push(obj);
-    }
-  }
-
-  const onePieceDecision = areLikelyOnePiece(zones, segmentedByZone);
-  if (onePieceDecision.decision) {
-    const baseBody = zones.upper_garment?.hex ? zones.upper_garment : zones.lower_garment;
-    const bodyCandidate = baseBody
-      ? buildZoneCandidate(
-          { hex: baseBody.hex, pct: Math.max(baseBody?.pct || 0.35, 0.35), name: baseBody?.name },
-          "body_garment",
-          Math.max(60, onePieceDecision.confidence)
-        )
-      : null;
-    const bodyRead = inferZoneColorRead("body_garment", bodyCandidate, normalizedColors, [], false);
-    zones.body_garment = {
-      ...bodyCandidate,
-      ...bodyRead,
-      silhouette: "one_piece",
-      one_piece_confidence: onePieceDecision.confidence,
-    };
-    zones.one_piece = {
-      zone: "one_piece",
-      interpretation: "one_piece",
-      confidence: onePieceDecision.confidence,
-      confidence_breakdown: buildConfidenceBreakdown({
-        computedScore: onePieceDecision.confidence,
-        finalConfidence: onePieceDecision.confidence,
-      }),
-      evidence: onePieceDecision.reason,
-      lab_distance: onePieceDecision.lab_distance,
-    };
-
-    if (zones.lower_garment) {
-      const lowerSuppressedConfidence = Math.min(Number(zones.lower_garment?.confidence || 0), 45);
-      zones.lower_garment = withConfidenceBreakdownFinalConfidence({
-        ...zones.lower_garment,
-        hex: null,
-        interpretation: "unknown",
-        confidence: lowerSuppressedConfidence,
-        dominant_color: null,
-        support_colors: [],
-        accent_colors: [],
-        one_piece_suppressed: true,
-      }, lowerSuppressedConfidence);
-    }
-  }
-
-  const dedupeResult = dedupeDarkNeutralZoneReuse(zones);
-  const garmentZoneFilterResult = filterGarmentZoneOutput(dedupeResult.zones);
-  const finalZones = Object.fromEntries(
-    Object.entries(garmentZoneFilterResult.zones).map(([zoneKey, zone]) => [
-      zoneKey,
-      enrichV6FinalizedZone(zoneKey, zone),
-    ])
-  );
-  const denimSummary = {
-    lower_zone_interpretation: finalZones?.lower_garment?.interpretation || "unknown",
-    lower_zone_confidence: Number(finalZones?.lower_garment?.confidence || 0),
-    lower_zone_hex: finalZones?.lower_garment?.hex || null,
-  };
-
-  console.info("[INTERPRET DEBUG] segmented region summary", regionSummary);
-  console.info("[INTERPRET DEBUG] zone candidate summary", zoneCandidateSummary);
-  if (missedZoneDebug.length) {
-    console.info("[INTERPRET DEBUG] missed zone suppression diagnostics", missedZoneDebug);
-  }
-  if (genericMaskDebug.length) {
-    console.info("[INTERPRET DEBUG] generic mask proposal diagnostics", genericMaskDebug);
-  }
-  console.info("[INTERPRET DEBUG] one_piece decision summary", onePieceDecision);
-  console.info("[INTERPRET DEBUG] denim decision summary", denimSummary);
-  if (garmentZoneFilterResult.removed_non_garment_zones.length) {
-    console.info("[INTERPRET DEBUG] removed non-garment zones", garmentZoneFilterResult.removed_non_garment_zones);
-  }
-  console.info(
-    "[INTERPRET DEBUG] final selected zones with confidence",
-    Object.fromEntries(Object.entries(finalZones).map(([k, v]) => [k, Number(v?.confidence || v?.score || 0)]))
-  );
-  console.info("[DINO TRACE] dino_4 inferGarmentZones lifecycle", {
-    stages: dinoLifecycleTrace,
-    change_summary: buildDinoLifecycleChangeSummary(dinoLifecycleTrace),
-  });
-
-  return {
-    version: "garment_zone_v3",
-    segmented_regions: segmentedRegions,
-    zones: finalZones,
-    confidence_breakdown: Object.fromEntries(
-      Object.entries(finalZones).map(([key, value]) => [key, value?.confidence_breakdown || null])
-    ),
-    decision_consistency: Object.fromEntries(
-      Object.entries(finalZones).map(([key, value]) => [key, value?.decision_consistency || { valid: false, issues: ["missing_decision_consistency"] }])
-    ),
-    decision_metrics: Object.fromEntries(
-      Object.entries(finalZones).map(([key, value]) => [key, value?.decision_metrics || null])
-    ),
-    confidence_calibration: Object.fromEntries(
-      Object.entries(finalZones).map(([key, value]) => [key, value?.calibration_metadata || null])
-    ),
-    region_color_analysis: regionColorAnalysis,
-    dino_lifecycle_trace: {
-      target_id: "dino_4",
-      stages: dinoLifecycleTrace,
-      change_summary: buildDinoLifecycleChangeSummary(dinoLifecycleTrace),
-    },
-    generic_mask_debug: genericMaskDebug,
-    removed_non_garment_zones: garmentZoneFilterResult.removed_non_garment_zones,
-  };
-}
-
-function colorClusterWeight(color = {}) {
-  if (color?.pct === undefined || color?.pct === null) return 1;
-  const weight = Number(color.pct);
-  return Number.isFinite(weight) ? weight : 1;
-}
-
-export function buildColorClusters(colors = []) {
-
-  const clusters = [];
-
-  for (const c of colors || []) {
-    const hex = safeHex(c?.hex);
-    if (!hex) continue;
-    const weight = colorClusterWeight(c);
-
-    let placed = false;
-
-    for (const cluster of clusters) {
-      const dist = colorDistanceLab(hex, cluster.base);
-      if (dist < 20) {
-        cluster.colors.push(c);
-        cluster.weight += weight;
-        placed = true;
-        break;
-      }
-    }
-
-    if (!placed) {
-      clusters.push({
-        base: hex,
-        colors: [c],
-        weight,
-      });
-    }
-  }
-
-  const weightedClusters = clusters.filter((c) => Number(c.weight || 0) > 0);
-  const total = weightedClusters.reduce((sum, c) => sum + Number(c.weight || 0), 0) || 1;
-
-  return weightedClusters
-    .map((c) => ({
-      ...c,
-      pct: c.weight / total,
-    }))
-    .sort((a, b) => b.pct - a.pct);
-}
-
-function isMultiColor(clusters = []) {
-  if (clusters.length < 3) return false;
-  const topPct = Number(clusters?.[0]?.pct || 0);
-  return topPct < 0.55;
-}
-
-function isDenimLike(clusters = []) {
-  const blueClusters = clusters.filter((c) => {
-    const h = getHue(c.base);
-    return h >= 200 && h <= 250;
-  });
-
-  const supportiveBlueClusters = clusters.filter((c) => {
-    const h = getHue(c.base);
-    return h >= 190 && h <= 260 && Number(c?.pct || 0) >= 0.12;
-  });
-  const blueCoverage = blueClusters.reduce((sum, c) => sum + Number(c?.pct || 0), 0);
-  const meaningfulCoverage = clusters.reduce((sum, c) => sum + Number(c?.pct || 0), 0) >= 0.55;
-  const lowChroma = clusters.every((c) => {
-    const chromaMag = Number(getPerceptualTraits(c.base)?.chroma_magnitude || 0);
-    const light = getLight(c.base);
-    return chromaMag < 44 && light > 0.2;
-  });
-
-  const midLight = clusters.some((c) => {
-    const l = getLight(c.base);
-    return l >= 0.38 && l <= 0.82;
-  });
-
-  return blueClusters.length >= 2 && supportiveBlueClusters.length >= 2 && blueCoverage >= 0.45 && meaningfulCoverage && lowChroma && midLight;
-}
-
-export function resolveConsumerZonePrimary(type, zoneData, clusters = [], colorEvidence = null) {
-  const finalizedHex = safeHex(zoneData?.dominant_color?.hex || zoneData?.hex || "");
-  const rawHex = safeHex(clusters?.[0]?.base || "");
-  const signatureHex = safeHex(zoneData?.signature_color?.hex || "");
-  const confidence = Number(zoneData?.confidence || zoneData?.score || 0);
-  const minimumConfidence = type === "lower_garment" ? 60 : type === "upper_garment" ? 45 : 56;
-  const consistency = zoneData?.decision_consistency;
-  const consistencyValid = consistency ? consistency.valid !== false : true;
-  const publicationAccepted = zoneData?.publication_decision !== "reject" && zoneData?.validation_decision !== "rejected";
-  const finalizedVsRawDistance = finalizedHex && rawHex ? colorDistanceLab(finalizedHex, rawHex) : null;
-  const signatureCorroborates = finalizedHex && signatureHex ? colorDistanceLab(finalizedHex, signatureHex) < 18 : false;
-  const supportCorroborates = finalizedHex && Array.isArray(zoneData?.support_colors)
-    ? zoneData.support_colors.some((c) => safeHex(c?.hex) && colorDistanceLab(finalizedHex, c.hex) < 18)
-    : false;
-  const locallyConsistent = finalizedVsRawDistance === null || finalizedVsRawDistance < 18;
-
-const v3Publication = zoneData?.color_publication_v3;
-const v3PublishedHex = safeHex(v3Publication?.hex || "");
-const v3PublicationApplied =
-  v3Publication?.action === "publish_v3" &&
-  v3Publication?.applied_to_zone === true &&
-  finalizedHex &&
-  v3PublishedHex === finalizedHex;
-
-if (v3PublicationApplied) {
-  return {
-    status: "resolved",
-    hex: finalizedHex,
-    source: "color_evidence_v3_publication",
-    confidence,
-    finalized_vs_raw_lab: finalizedVsRawDistance,
-    corroboration: {
-      signature: signatureCorroborates,
-      support: supportCorroborates,
-      raw_agreement: locallyConsistent,
-    },
-    publication: {
-      action: v3Publication.action,
-      reason: v3Publication.reason || null,
-      source: v3Publication.source || "color_evidence_v3",
-    },
-  };
-}
-  const corroborated = signatureCorroborates || supportCorroborates || locallyConsistent;
-  const finalizedTrusted = !!finalizedHex && confidence >= minimumConfidence && consistencyValid && publicationAccepted && corroborated;
-  const evidenceHex = safeHex(colorEvidence?.consensus_hex || "");
-  const evidenceSupported = colorEvidence?.decision_state === "supported" && Number(colorEvidence?.region_purity || 0) >= 0.80 && Number(colorEvidence?.family_consensus || 0) >= 0.80;
-  const evidenceVsRawDistance = evidenceHex && rawHex ? colorDistanceLab(evidenceHex, rawHex) : null;
-  const evidenceVsFinalizedDistance = evidenceHex && finalizedHex ? colorDistanceLab(evidenceHex, finalizedHex) : null;
-  const rawTraits = rawHex ? getPerceptualTraits(rawHex) : null;
-  const rawLooksDarkNeutral = !!rawHex && (getLight(rawHex) <= 0.22 || Number(rawTraits?.chroma_magnitude || 0) < 18);
-  const evidenceCanCorrectDarkContamination = evidenceSupported && !!evidenceHex && rawLooksDarkNeutral && evidenceVsRawDistance !== null && evidenceVsRawDistance >= 18 && (!finalizedHex || evidenceVsFinalizedDistance < 18);
-
-  if (evidenceCanCorrectDarkContamination) {
-    return {
-      status: "resolved",
-      hex: evidenceHex,
-      source: "color_evidence_v2_consensus",
-      confidence,
-      finalized_vs_raw_lab: finalizedVsRawDistance,
-      evidence: {
-        region_purity: Number(colorEvidence.region_purity || 0),
-        family_consensus: Number(colorEvidence.family_consensus || 0),
-        consensus_family: colorEvidence.consensus_family || null,
-        consensus_hex: evidenceHex,
-        evidence_vs_raw_lab: evidenceVsRawDistance,
-        evidence_vs_finalized_lab: evidenceVsFinalizedDistance,
-      },
-      corroboration: { signature: signatureCorroborates, support: supportCorroborates, raw_agreement: locallyConsistent },
-    };
-  }
-
-  if (finalizedTrusted) {
-    return {
-      status: "resolved",
-      hex: finalizedHex,
-      source: "finalized_zone_primary",
-      confidence,
-      finalized_vs_raw_lab: finalizedVsRawDistance,
-      corroboration: { signature: signatureCorroborates, support: supportCorroborates, raw_agreement: locallyConsistent },
-    };
-  }
-
-  if (rawHex) {
-    return {
-      status: finalizedHex && finalizedVsRawDistance >= 18 ? "uncertain" : "fallback",
-      hex: rawHex,
-      source: "local_cluster_fallback",
-      confidence,
-      finalized_vs_raw_lab: finalizedVsRawDistance,
-      corroboration: { signature: signatureCorroborates, support: supportCorroborates, raw_agreement: locallyConsistent },
-    };
-  }
-
-  return {
-    status: "uncertain",
-    hex: finalizedHex || null,
-    source: finalizedHex ? "low_confidence_finalized" : "no_color_evidence",
-    confidence,
-    finalized_vs_raw_lab: finalizedVsRawDistance,
-    corroboration: { signature: signatureCorroborates, support: supportCorroborates, raw_agreement: locallyConsistent },
-  };
-}
-
-function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceByZone = {} }) {
-  const z = zones || {};
-  const items = [];
-
-  function getZoneColors(zoneHex) {
-    if (!zoneHex) return [];
-    return (normalizedColors || []).filter((c) => colorDistanceLab(c.hex, zoneHex) < 22);
-  }
-
-  function buildItem(type, zoneData) {
-    if (!zoneData?.hex) return null;
-    if (
-      ["lower_garment", "footwear"].includes(type) &&
-      Number(zoneData?.confidence || 0) < 56
-    ) {
-      return null;
-    }
-    if (
-      type === "outerwear" &&
-      Number(zoneData?.confidence || 0) < 52 &&
-      Number(zoneData?.cluster_count || 0) < 2
-    ) {
-      return null;
-    }
-
-    const zoneColors = getZoneColors(zoneData.hex);
-    const clusterInput = Array.isArray(zoneData?.support_colors) && zoneData.support_colors.length
-      ? [{ hex: zoneData.hex, pct: zoneData.pct || 0.5 }, ...zoneData.support_colors]
-      : zoneColors.length
-        ? zoneColors
-        : [zoneData];
-    const clusters = buildColorClusters(clusterInput);
-    const rawDominant = clusters[0] || { base: zoneData.hex, pct: 1 };
-    const consumerColorResolution = resolveConsumerZonePrimary(type, zoneData, clusters, colorEvidenceByZone?.[type] || null);
-    const dominant = { ...rawDominant, base: consumerColorResolution.hex || rawDominant.base };
-
-    const dominantTraits = getPerceptualTraits(dominant.base);
-
-    let material = "mixed_material";
-    let materialConfidence = 50;
-    let displayLabel = zoneData.display_label || zoneData.name || getColorName(dominant.base);
-
-    if (isDenimLike(clusters) && type === "lower_garment") {
-      material = "denim";
-      materialConfidence = 84;
-      displayLabel = "Light Wash Denim";
-    } else if (isMultiColor(clusters) && type === "footwear") {
-      material = "mixed_material";
-      materialConfidence = 76;
-      displayLabel = "Multicolor Sneaker";
-    } else if (isMultiColor(clusters) && type === "accessory") {
-      material = "patterned_textile";
-      materialConfidence = 74;
-      displayLabel = "Multicolor Accessory";
-    } else if (type === "fur_trim") {
-      material = "fur";
-      materialConfidence = 68;
-    } else if (type === "logo_text_detail" && dominantTraits.chroma_magnitude < 24) {
-      material = "cotton";
-      materialConfidence = 58;
-    } else if (type === "eyewear" && getLight(dominant.base) < 0.32) {
-      material = "nylon";
-      materialConfidence = 62;
-    } else if (type === "accessory_jewelry" && dominantTraits.chroma_magnitude < 20 && getLight(dominant.base) > 0.45) {
-      material = "metallic";
-      materialConfidence = 64;
-    } else if (dominantTraits.temperature === "cool" && dominantTraits.chroma_magnitude < 30) {
-      material = "wool";
-      materialConfidence = 60;
-    } else if (dominantTraits.chroma_magnitude > 48) {
-      material = "knit";
-      materialConfidence = 58;
-    } else if (type === "outerwear") {
-      material = getLight(dominant.base) < 0.4 ? "leather" : "cotton";
-      materialConfidence = 61;
-    }
-
-    if (type === "footwear" && getLight(dominant.base) < 0.35) {
-      material = material === "mixed_material" ? "rubber" : "leather";
-      materialConfidence = Math.max(materialConfidence, 66);
-    }
-
-    if (type === "footwear") {
-      const tanLike = clusters.some((c) => {
-        const h = getHue(c.base);
-        const l = getLight(c.base);
-        const s = getSat(c.base);
-        return h >= 25 && h <= 55 && l >= 0.34 && l <= 0.72 && s >= 0.2;
-      });
-      const tanCoverage = clusters
-        .filter((c) => {
-          const h = getHue(c.base);
-          return h >= 25 && h <= 55;
-        })
-        .reduce((sum, c) => sum + Number(c?.pct || 0), 0);
-      if (/tan|camel|beige|luxury/i.test(displayLabel) && (!tanLike || tanCoverage < 0.42)) {
-        displayLabel = getColorName(dominant.base);
-      }
-      if (Number(zoneData?.confidence || 0) < 58 && clusters.length < 2) {
-        return null;
-      }
-    }
-
-    const zoneDominantColor = compactColorRead(zoneData?.dominant_color);
-    const shouldKeepZoneDominantIdentity =
-      ["accessory_jewelry", "bag", "eyewear", "headwear"].includes(type) &&
-      !!zoneDominantColor?.name &&
-      safeHex(zoneDominantColor.hex) === safeHex(dominant.base) &&
-      shouldPreserveDominantAccessoryColor(type, clusters);
-    const dominantColor = shouldKeepZoneDominantIdentity
-      ? zoneDominantColor
-      : withColorIdentity({
-          hex: dominant.base,
-          name: getColorName(dominant.base),
-          pct: round2(dominant.pct),
-        });
-    if (shouldKeepZoneDominantIdentity) {
-      displayLabel = zoneDominantColor.name;
-    }
-    const supportColors = clusters.slice(1, 3).map((c) => ({
-      hex: c.base,
-      name: getColorName(c.base),
-      pct: round2(c.pct),
-    }));
-    const accentColors = clusters.slice(3, 5).map((c) => ({
-      hex: c.base,
-      name: getColorName(c.base),
-      pct: round2(c.pct),
-    }));
-    const itemMode = zoneData.mode || zoneData.read_mode || (isMultiColor(clusters) ? "multicolor" : "single_color");
-
-    return {
-      type,
-      confidence: zoneData.score || 60,
-      material,
-      material_confidence: materialConfidence,
-      cluster_count: clusters.length,
-      display_label: displayLabel,
-      display_zone_label: zoneData.display_zone_label || null,
-      accessory_type: zoneData.accessory_type || null,
-      object_type: zoneData.object_type || null,
-      headwear_debug_values: buildHeadwearDebugValues(zoneData),
-      consumer_color_resolution: consumerColorResolution,
-      dominant_color: dominantColor,
-      primary_color: compactColorRead(dominantColor),
-      color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
-      support_colors: supportColors,
-      accent_colors: accentColors,
-      ...buildGarmentColorProfile({
-        zoneKey: type,
-        mode: itemMode,
-        dominantColor,
-        supportColors,
-        accentColors,
-      }),
-      // Accuracy decision owns the consumer-facing primary after profile metadata is merged.
-      dominant_color: dominantColor,
-      primary_color: compactColorRead(dominantColor),
-      color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
-    };
-  }
-
-  items.push(buildItem("upper_garment", z.upper_garment));
-  items.push(buildItem("lower_garment", z.lower_garment));
-  items.push(buildItem("outerwear", z.outerwear));
-  items.push(buildItem("footwear", z.footwear));
-  items.push(buildItem("eyewear", z.eyewear));
-  items.push(buildItem("bag", z.bag));
-  items.push(buildItem("hair", z.hair));
-  items.push(buildItem("lips", z.lips));
-  items.push(buildItem("fur_trim", z.fur_trim));
-  items.push(buildItem("logo_text_detail", z.logo_text_detail));
-  items.push(buildItem("accessory_jewelry", z.accessory_jewelry));
-
-  return {
-    version: "garment_scaffold_v2",
-    detected_items: items.filter(Boolean),
-  };
-}
-/* =========================
-   CATEGORY / MODE HELPERS
-========================= */
-
-function familyBiasForCategory(category) {
-  const c = normalizeCategoryLabel(category, "piece");
-  const defaults = {
-    jacket: ["anchor", "support", "stabilizer", "accent"],
-    shirt: ["support", "anchor", "stabilizer", "accent"],
-    sweater: ["support", "anchor", "stabilizer", "accent"],
-    hoodie: ["support", "anchor", "stabilizer", "accent"],
-    pants: ["stabilizer", "anchor", "support", "accent"],
-    shorts: ["stabilizer", "support", "anchor", "accent"],
-    shoes: ["stabilizer", "anchor", "support", "accent"],
-    boots: ["stabilizer", "anchor", "support", "accent"],
-    sneakers: ["stabilizer", "support", "anchor", "accent"],
-    accessory: ["accent", "support", "stabilizer", "anchor"],
-    piece: ["anchor", "support", "stabilizer", "accent"],
-  };
-  return defaults[c] || defaults.piece;
-}
-
-function buildAmazonSearchLink(query) {
-  const tag = process.env.AMAZON_PARTNER_TAG || "visioncore-20";
-  const encoded = encodeURIComponent(String(query || "").trim());
-  return `https://www.amazon.com/s?k=${encoded}&tag=${tag}`;
-}
-
-/* =========================
-   CATEGORY / CONTEXT LOCK
-========================= */
-const CATEGORY_CONTEXT_ANCHORS = {
-  jacket: ["fashion", "outfit", "mens"],
-  shirt: ["fashion", "outfit", "mens"],
-  sweater: ["fashion", "outfit", "mens"],
-  hoodie: ["fashion", "outfit", "mens"],
-  pants: ["fashion", "outfit", "mens"],
-  shorts: ["fashion", "outfit", "mens"],
-  shoes: ["fashion", "outfit", "mens"],
-  boots: ["fashion", "outfit", "mens"],
-  sneakers: ["fashion", "outfit", "mens"],
-  accessory: ["fashion", "outfit", "mens"],
-  piece: ["fashion", "outfit"],
-};
-
-const AMBIGUOUS_COLOR_NEGATIVES = {
-  tan: ["-tanning", "-lotion", "-spray", "-self-tanner", "-bronzer", "-skincare", "-cream"],
-};
-
-function resolveCategorySubtypes(category) {
-  const normalized = normalizeCategoryLabel(category, "piece");
-  return CATEGORY_SUBTYPES[normalized] || [normalized];
-}
-
-function getCategorySubtypeForIndex(category, idx = 0) {
-  const subtypes = resolveCategorySubtypes(category);
-  return subtypes[idx % subtypes.length] || normalizeCategoryLabel(category, "piece");
-}
-
-function dedupeKeywords(arr) {
-  const seen = new Set();
-  const out = [];
-  for (const value of arr || []) {
-    const key = normalizeText(value);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(value);
-  }
-  return out;
-}
-
-function getQueryAnchorsForCategory(category, industry = "fashion") {
-  const normalized = normalizeCategoryLabel(category, "piece");
-  const anchors = CATEGORY_CONTEXT_ANCHORS[normalized] || [industry];
-  const extra = industry && !anchors.includes(industry) ? [industry] : [];
-  return dedupeKeywords([...anchors, ...extra]);
-}
-
-function getNegativeQueryTermsForKeyword(keyword) {
-  const key = normalizeText(keyword);
-  return AMBIGUOUS_COLOR_NEGATIVES[key] || [];
-}
-
-function buildContextualAmazonQueries({ colorKeyword, category, industry = "fashion", limit = 3 }) {
-  const cleanColor = normalizeText(colorKeyword);
-  const normalizedCategory = normalizeCategoryLabel(category, "piece");
-  const subtypes = resolveCategorySubtypes(normalizedCategory);
-  const anchors = getQueryAnchorsForCategory(normalizedCategory, industry);
-  const negatives = getNegativeQueryTermsForKeyword(cleanColor);
-
-  const queries = subtypes.slice(0, limit).map((subtype) => {
-    const parts = [cleanColor, subtype, ...anchors, ...negatives].filter(Boolean);
-    return parts.join(" ");
-  });
-
-  return dedupeKeywords(queries);
-}
-
-function buildPrimaryContextualQuery({ colorKeyword, category, industry = "fashion", subtype = null }) {
-  const cleanColor = normalizeText(colorKeyword);
-  const normalizedCategory = normalizeCategoryLabel(category, "piece");
-  const anchors = getQueryAnchorsForCategory(normalizedCategory, industry);
-  const negatives = getNegativeQueryTermsForKeyword(cleanColor);
-
-  const chosenSubtype =
-    normalizeText(subtype) || resolveCategorySubtypes(normalizedCategory)[0] || normalizedCategory;
-
-  const parts = [cleanColor, chosenSubtype, ...anchors, ...negatives].filter(Boolean);
-  return parts.join(" ");
-}
-
-/* =========================
-   COLOR FAMILY (V2 TAXONOMY)
-========================= */
-function classifyColorV2(dominantHex) {
-  const c = chroma(dominantHex);
-  const [hRaw, sRaw, lRaw] = c.hsl();
-  const h = Number.isFinite(hRaw) ? hRaw : 0;
-  const s = clamp01(sRaw || 0);
-  const l = clamp01(lRaw || 0);
-
-  let family = "neutral";
-  if (s < 0.12) family = "neutral";
-  else if (l > 0.78 && s < 0.35) family = "pastel";
-  else {
-    const earthHue = (h >= 15 && h <= 65) || (h >= 80 && h <= 165);
-    if (earthHue && s <= 0.6 && l >= 0.22 && l <= 0.78) family = "earth";
-    else if (s >= 0.55) family = "bold";
-    else family = "neutral";
-  }
-
-  let lane = "other";
-  if (h >= 345 || h < 15) lane = "red";
-  else if (h >= 15 && h < 45) lane = "orange";
-  else if (h >= 45 && h < 75) lane = "yellow";
-  else if (h >= 75 && h < 165) lane = "green";
-  else if (h >= 165 && h < 210) lane = "cyan";
-  else if (h >= 210 && h < 255) lane = "blue";
-  else if (h >= 255 && h < 315) lane = "purple";
-  else if (h >= 315 && h < 345) lane = "pink";
-
-  const vivid = s >= 0.7;
-  const dark = l <= 0.35;
-
-  return { family, lane, vivid, dark, h, s, l };
-}
-
-/* =========================
-   V2 PALETTE ENGINE
-========================= */
-function generatePalettesV2(dominantHex) {
-  let base = safeHex(dominantHex);
-
-  if (!base || typeof base !== "string") {
-    console.warn("âš ï¸ Invalid dominantHex â€” forcing fallback");
-    base = "#7A7A7A";
-  }
-
-  try {
-    const meta = classifyColorV2(base);
-
-    const balanceHexes = uniqHexes([
-      "#111111",
-      "#2B2B2B",
-      "#7A7A7A",
-      "#CFCFCF",
-      "#F5F1E8",
-    ]);
-
-    const comp = rotateHue(base, 180);
-    const split1 = rotateHue(base, 150);
-    const split2 = rotateHue(base, 210);
-
-    const contrastHexes = uniqHexes([
-      setTone(comp, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
-      setTone(split1, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
-      setTone(split2, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
-    ]);
-
-    const cohesionHexes = uniqHexes([
-      setTone(base, { sMul: 0.85, lAdd: 0.18 }),
-      setTone(base, { sMul: 0.75, lAdd: 0.08 }),
-      setTone(base, { sMul: 1.0, lAdd: 0.0 }),
-      setTone(base, { sMul: 0.9, lAdd: -0.1 }),
-      setTone(base, { sMul: 0.8, lAdd: -0.18 }),
-    ]);
-
-    let emphasisHexes;
-    if (meta.vivid) {
-      emphasisHexes = uniqHexes([
-        setTone(rotateHue(base, 200), { sMul: 0.85, lAdd: meta.dark ? 0.22 : 0.06 }),
-        setTone(rotateHue(base, -200), { sMul: 0.85, lAdd: meta.dark ? 0.22 : 0.06 }),
-        setTone(rotateHue(base, 120), { sMul: 0.8, lAdd: meta.dark ? 0.18 : 0.04 }),
-      ]);
-    } else {
-      emphasisHexes = uniqHexes([
-        setTone(base, { sMul: 1.25, lAdd: 0.02 }),
-        setTone(rotateHue(base, 150), { sMul: 1.1, lAdd: 0.06 }),
-        setTone(rotateHue(base, 210), { sMul: 1.1, lAdd: 0.06 }),
-      ]);
-    }
-
-    const naturalHexes = uniqHexes(
-      [
-        chroma.mix(base, "#556B2F", 0.55, "lab").hex().toUpperCase(),
-        chroma.mix(base, "#8B4513", 0.5, "lab").hex().toUpperCase(),
-        chroma.mix(base, "#B87333", 0.45, "lab").hex().toUpperCase(),
-        chroma.mix(base, "#D2B48C", 0.55, "lab").hex().toUpperCase(),
-        chroma.mix(base, "#2F5D50", 0.55, "lab").hex().toUpperCase(),
-      ].map((h) => setTone(h, { sMul: 0.75, lAdd: meta.dark ? 0.18 : 0.0 }))
-    );
-
-    const tri1 = rotateHue(base, 120);
-    const tri2 = rotateHue(base, 240);
-    const tet1 = rotateHue(base, 90);
-    const tet2 = rotateHue(base, 270);
-
-    const exploreHexes = uniqHexes([
-      setTone(tri1, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
-      setTone(tri2, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
-      setTone(tet1, { sMul: 0.9, lAdd: meta.dark ? 0.22 : 0.05 }),
-      setTone(tet2, { sMul: 0.9, lAdd: meta.dark ? 0.22 : 0.05 }),
-    ]);
-
-    return {
-      dominantHex: base,
-      dominantName: getColorName(base),
-      classification: {
-        family: meta.family,
-        lane: meta.lane,
-        vivid: meta.vivid,
-        h: Math.round(meta.h),
-        s: Number(meta.s.toFixed(3)),
-        l: Number(meta.l.toFixed(3)),
-      },
-      palettes: {
-        balance: {
-          hexes: balanceHexes,
-          named_hexes: buildNamedHexes(balanceHexes),
-          reason: "Neutral anchors for stability and broad compatibility.",
-        },
-        contrast: {
-          hexes: contrastHexes,
-          named_hexes: buildNamedHexes(contrastHexes),
-          reason: "Complementary and split-complementary accents with tonal normalization.",
-        },
-        cohesion: {
-          hexes: cohesionHexes,
-          named_hexes: buildNamedHexes(cohesionHexes),
-          reason: "Same-hue tonal ladder from light to deep for cohesive systems.",
-        },
-        emphasis: {
-          hexes: emphasisHexes,
-          named_hexes: buildNamedHexes(emphasisHexes),
-          reason: meta.vivid
-            ? "Vivid base with controlled accents."
-            : "Muted base with boosted saturation and energetic shift.",
-        },
-        natural: {
-          hexes: naturalHexes,
-          named_hexes: buildNamedHexes(naturalHexes),
-          reason: "Earth blends via LAB mixing with muted toning.",
-        },
-        explore: {
-          hexes: exploreHexes,
-          named_hexes: buildNamedHexes(exploreHexes),
-          reason: "Triad and tetrad harmonies with tonal normalization.",
-        },
-      },
-    };
-  } catch (err) {
-    console.error("âŒ Palette engine crash:", err);
-
-    return {
-      dominantHex: "#7A7A7A",
-      dominantName: "Neutral Gray",
-      classification: {
-        family: "neutral",
-        lane: "neutral",
-        vivid: false,
-        h: 0,
-        s: 0,
-        l: 0.5,
-      },
-      palettes: {
-        balance: {
-          hexes: ["#111111", "#7A7A7A", "#FFFFFF"],
-          named_hexes: [],
-          reason: "Fallback",
-        },
-        contrast: {
-          hexes: ["#111111", "#FFFFFF"],
-          named_hexes: [],
-          reason: "Fallback",
-        },
-        cohesion: {
-          hexes: ["#7A7A7A"],
-          named_hexes: [],
-          reason: "Fallback",
-        },
-        emphasis: {
-          hexes: ["#7A7A7A"],
-          named_hexes: [],
-          reason: "Fallback",
-        },
-        natural: {
-          hexes: ["#7A7A7A"],
-          named_hexes: [],
-          reason: "Fallback",
-        },
-        explore: {
-          hexes: ["#7A7A7A"],
-          named_hexes: [],
-          reason: "Fallback",
-        },
-      },
-    };
-  }
-}
-/* =========================
-   OUTFIT SCORING ENGINE
-========================= */
-const LEGACY_MODE_RULES = {
-  Balance: { harmony: 0.34, applicability: 0.28, versatility: 0.24, boldness: 0.14 },
-  Contrast: { harmony: 0.2, applicability: 0.2, versatility: 0.2, boldness: 0.4 },
-  Cohesion: { harmony: 0.44, applicability: 0.24, versatility: 0.22, boldness: 0.1 },
-  Natural: { harmony: 0.4, applicability: 0.3, versatility: 0.2, boldness: 0.1 },
-  Explore: { harmony: 0.25, applicability: 0.25, versatility: 0.25, boldness: 0.25 },
-};
-
-function normalizeDetectedColors(topColors, dominantHex) {
-  return mergeDominantAndImportantColors(topColors, dominantHex)
-    .slice(0, 8)
-    .map((c) => ({
-      ...c,
-      structural_role: classifyStructuralRole(c),
-    }));
-}
-
-function assignColorRoles(normalizedColors) {
-  const colors = [...(normalizedColors || [])];
-  if (!colors.length) return [];
-
-  const dominantHex = colors[0]?.hex || null;
-
-  const enriched = colors.map((c) => {
-    const surfaceRole = classifySurfaceRole(c, dominantHex);
-    return {
-      ...c,
-      surface_role: surfaceRole,
-      chroma_magnitude: Number(c?.perceptual?.chroma_magnitude || 0),
-      visual_weight: Number(c?.importance?.visual_weight || 0),
-      contrast_potential: Number(c?.importance?.contrast_potential || 0),
-      highlight_strength: Number(c?.importance?.highlight_strength || 0),
-      shadow_strength: Number(c?.importance?.shadow_strength || 0),
-      accent_strength: Number(c?.importance?.accent_strength || 0),
-      labL: Number(c?.lab?.l || 0),
-      pctNum: Number(c?.pct || 0),
-    };
-  });
-
-  // ANCHOR = dominant body fabric, not trim/detail/highlight
-  const anchorCandidates = enriched
-    .map((c) => {
-      let score = 0;
-
-      score += c.pctNum * 42;
-      score += c.visual_weight * 0.34;
-      score += 100 - Math.abs(c.labL - 48) * 1.05;
-      score += Math.max(0, 22 - Math.abs(c.chroma_magnitude - 24) * 0.35);
-
-      if (c.structural_role === "body") score += 22;
-      if (c.structural_role === "trim") score += 4;
-      if (c.structural_role === "highlight") score -= 16;
-      if (c.structural_role === "shadow") score -= 10;
-      if (c.structural_role === "graphic") score -= 22;
-
-      if (c.surface_role === "body_fabric") score += 34;
-      if (c.surface_role === "shadow_structure") score += 18;
-      if (c.surface_role === "trim") score -= 16;
-      if (c.surface_role === "highlight_trim") score -= 20;
-      if (c.surface_role === "graphic_detail") score -= 30;
-      if (c.surface_role === "micro_accent") score -= 34;
-
-      // prevent tiny accent colors from becoming anchor
-      if (c.pctNum <= 0.16) score -= 24;
-      if (c.chroma_magnitude > 48 && c.pctNum <= 0.18) score -= 18;
-
-      return { ...c, _anchorScore: clamp100(score) };
-    })
-    .sort((a, b) => b._anchorScore - a._anchorScore);
-
-  const anchor = anchorCandidates[0] || enriched[0];
-
-  // SUPPORT = color that extends anchor, not another fake warm neutral
-  const supportCandidates = enriched
-    .filter((c) => c.hex !== anchor.hex)
-    .map((c) => {
-      let score = 0;
-
-      const dist = colorDistanceLab(anchor.hex, c.hex);
-      const hueGap = hueDistance(anchor.hex, c.hex);
-
-      score += 86 - Math.abs(dist - 24) * 0.95;
-      score += c.visual_weight * 0.16;
-      score += c.pctNum * 10;
-
-      if (c.structural_role === "body") score += 10;
-      if (c.structural_role === "trim") score += 8;
-      if (c.structural_role === "graphic") score -= 18;
-      if (c.structural_role === "highlight") score -= 8;
-
-      if (c.surface_role === "body_fabric") score += 18;
-      if (c.surface_role === "shadow_structure") score += 10;
-      if (c.surface_role === "trim") score += 6;
-      if (c.surface_role === "graphic_detail") score -= 25;
-      if (c.surface_role === "micro_accent") score -= 28;
-      if (c.surface_role === "highlight_trim") score -= 12;
-
-      // stop muddy earth tones from stealing support unless truly dominant
-      if (c.family === "earth" && c.chroma_magnitude < 36 && c.pctNum < 0.22) {
-        score -= 48;
-      }
-
-      // favor blue / denim / cool / charcoal extension when it reads real
-      if (["blue", "cyan", "purple"].includes(c.lane)) score += 16;
-      if (c.family === "neutral" && c.chroma_magnitude >= 14) score += 8;
-
-      // support should not be too close to anchor or too wild
-      if (dist < 8) score -= 18;
-      if (hueGap > 115 && c.chroma_magnitude > 45) score -= 16;
-
-      return { ...c, _roleScore: clamp100(score) };
-    })
-    .sort((a, b) => b._roleScore - a._roleScore);
-
-  const support = supportCandidates[0] || anchor;
-
-  // ACCENT = high-attention detail, not another neutral body tone
-  const accentCandidates = enriched
-    .filter((c) => c.hex !== anchor.hex && c.hex !== support.hex)
-    .map((c) => {
-      let score = 0;
-
-      const dist = colorDistanceLab(anchor.hex, c.hex);
-      const hueGap = hueDistance(anchor.hex, c.hex);
-
-      score += Math.min(56, dist * 0.9);
-      score += Math.min(26, c.chroma_magnitude * 0.34);
-      score += c.contrast_potential * 0.24;
-      score += c.accent_strength * 0.26;
-      score += c.highlight_strength * 0.12;
-      score += c.visual_weight * 0.12;
-
-      if (c.vivid) score += 10;
-      if (c.structural_role === "accent") score += 16;
-      if (c.structural_role === "graphic") score += 28;
-      if (c.structural_role === "highlight") score += 18;
-      if (c.structural_role === "body") score -= 14;
-
-      if (c.surface_role === "graphic_detail") score += 36;
-      if (c.surface_role === "micro_accent") score += 34;
-      if (c.surface_role === "highlight_trim") score += 18;
-      if (c.surface_role === "trim") score += 8;
-      if (c.surface_role === "body_fabric") score -= 26;
-      if (c.surface_role === "shadow_structure") score -= 12;
-
-      // neutrals should almost never win accent unless clearly contrast-driving
-      if (c.family === "neutral" && c.chroma_magnitude < 22 && c.contrast_potential < 72) {
-        score -= 42;
-      }
-
-      // colorful lanes get rewarded
-      if (!["neutral", "pastel"].includes(c.family)) score += 12;
-      if (["red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink"].includes(c.lane)) {
-        score += 8;
-      }
-
-      if (hueGap < 10 && c.chroma_magnitude < 30) score -= 20;
-
-      return { ...c, _roleScore: clamp100(score) };
-    })
-    .sort((a, b) => b._roleScore - a._roleScore);
-
-  const accent =
-    accentCandidates[0] ||
-    enriched.find((c) => c.hex !== anchor.hex && c.hex !== support.hex) ||
-    support;
-
-  // STABILIZER = grounding neutral / shadow / quiet structure
-  const stabilizerCandidates = enriched
-    .filter((c) => ![anchor.hex, support.hex, accent.hex].includes(c.hex))
-    .map((c) => {
-      let score = 0;
-
-      score += 54;
-      score += c.shadow_strength * 0.2;
-      score += c.visual_weight * 0.12;
-
-      if (c.family === "neutral") score += 24;
-      if (c.family === "earth" && c.chroma_magnitude < 26) score += 8;
-      if (c.chroma_magnitude < 24) score += 16;
-      if (c.labL < 46) score += 12;
-
-      if (c.structural_role === "shadow") score += 28;
-      if (c.structural_role === "trim") score += 8;
-      if (c.structural_role === "highlight") score -= 12;
-      if (c.structural_role === "graphic") score -= 20;
-
-      if (c.surface_role === "shadow_structure") score += 24;
-      if (c.surface_role === "trim") score += 8;
-      if (c.surface_role === "body_fabric") score += 6;
-      if (c.surface_role === "graphic_detail") score -= 24;
-      if (c.surface_role === "micro_accent") score -= 28;
-      if (c.surface_role === "highlight_trim") score -= 16;
-
-      return { ...c, _roleScore: clamp100(score) };
-    })
-    .sort((a, b) => b._roleScore - a._roleScore);
-
-  const stabilizer =
-    stabilizerCandidates[0] ||
-    enriched
-      .filter((c) => c.hex !== anchor.hex && c.hex !== support.hex)
-      .sort((a, b) => a.chroma_magnitude - b.chroma_magnitude)[0] ||
-    anchor;
-
-  return [
-    {
-      hex: anchor.hex,
-      name: anchor.name || getColorName(anchor.hex),
-      role: "anchor",
-      family: titleCase(anchor.family),
-      weight: 0.34,
-      lab: anchor.lab,
-      perceptual: anchor.perceptual,
-      importance: anchor.importance,
-      structural_role: anchor.structural_role,
-    },
-    {
-      hex: support.hex,
-      name: support.name || getColorName(support.hex),
-      role: "support",
-      family: titleCase(support.family),
-      weight: 0.28,
-      lab: support.lab,
-      perceptual: support.perceptual,
-      importance: support.importance,
-      structural_role: support.structural_role,
-    },
-    {
-      hex: accent.hex,
-      name: accent.name || getColorName(accent.hex),
-      role: "accent",
-      family: titleCase(accent.family),
-      weight: 0.14,
-      lab: accent.lab,
-      perceptual: accent.perceptual,
-      importance: accent.importance,
-      structural_role: accent.structural_role,
-    },
-    {
-      hex: stabilizer.hex,
-      name: stabilizer.name || getColorName(stabilizer.hex),
-      role: "stabilizer",
-      family: titleCase(stabilizer.family),
-      weight: 0.24,
-      lab: stabilizer.lab,
-      perceptual: stabilizer.perceptual,
-      importance: stabilizer.importance,
-      structural_role: stabilizer.structural_role,
-    },
-  ];
-}
-
-function enforceStructuralPreservation(colorRoles, normalizedColors) {
-  const roles = [...(colorRoles || [])];
-
-  const highlight = normalizedColors.find((c) => c.structural_role === "highlight");
-  const shadow = normalizedColors.find((c) => c.structural_role === "shadow");
-
-  if (highlight && !roles.find((r) => r.hex === highlight.hex)) {
-    roles.push({
-      hex: highlight.hex,
-      name: highlight.name || getColorName(highlight.hex),
-      role: "accent",
-      family: titleCase(highlight.family || "neutral"),
-      weight: 0.14,
-      lab: highlight.lab,
-      perceptual: highlight.perceptual,
-      importance: highlight.importance,
-      structural_role: highlight.structural_role,
-      forced: true,
-    });
-  }
-
-  if (shadow && !roles.find((r) => r.hex === shadow.hex)) {
-    roles.push({
-      hex: shadow.hex,
-      name: shadow.name || getColorName(shadow.hex),
-      role: "stabilizer",
-      family: titleCase(shadow.family || "neutral"),
-      weight: 0.24,
-      lab: shadow.lab,
-      perceptual: shadow.perceptual,
-      importance: shadow.importance,
-      structural_role: shadow.structural_role,
-      forced: true,
-    });
-  }
-
-  const ordered = [];
-  const wanted = ["anchor", "support", "accent", "stabilizer"];
-
-  for (const roleName of wanted) {
-    const hit = roles.find((r) => r.role === roleName);
-    if (hit && !ordered.find((x) => x.hex === hit.hex)) {
-      ordered.push(hit);
-    }
-  }
-
-  for (const role of roles) {
-    if (!ordered.find((x) => x.hex === role.hex) && ordered.length < 4) {
-      ordered.push(role);
-    }
-  }
-
-  return ordered.slice(0, 4);
-}
-
-function buildDetectedPalette(colorRoles, normalizedColors) {
-  const primary = [];
-  const secondary = [];
-  const accent = [];
-
-  const roleMap = Object.fromEntries((colorRoles || []).map((r) => [r.role, r.hex]));
-
-  if (roleMap.anchor) primary.push(roleMap.anchor);
-  if (roleMap.support) primary.push(roleMap.support);
-  if (roleMap.stabilizer) secondary.push(roleMap.stabilizer);
-
-  const extraSecondary = (normalizedColors || [])
-    .map((c) => c.hex)
-    .filter((hex) => !primary.includes(hex) && !secondary.includes(hex) && hex !== roleMap.accent)
-    .slice(0, 2);
-
-  secondary.push(...extraSecondary);
-
-  if (roleMap.accent) accent.push(roleMap.accent);
-
-  const primaryHexes = uniqHexes(primary);
-  const secondaryHexes = uniqHexes(secondary);
-  const accentHexes = uniqHexes(accent);
-
-  return {
-    primary: primaryHexes,
-    secondary: secondaryHexes,
-    accent: accentHexes,
-    named: {
-      primary: buildNamedHexes(primaryHexes),
-      secondary: buildNamedHexes(secondaryHexes),
-      accent: buildNamedHexes(accentHexes),
-    },
-  };
-}
-
-function computeHarmonyScore(colors) {
-  if (!colors.length) return 70;
-  const distances = [];
-  for (let i = 0; i < colors.length; i += 1) {
-    for (let j = i + 1; j < colors.length; j += 1) {
-      distances.push(colorDistanceLab(colors[i], colors[j]));
-    }
-  }
-  if (!distances.length) return 84;
-  const avgDist = avg(distances);
-  return Math.round(clamp100(92 - Math.abs(avgDist - 42) * 0.75));
-}
-
-function computeApplicabilityScore(colors, colorRoles) {
-  if (!colors.length) return 70;
-  const neutralCount = colors.filter((hex) => classifyColorV2(hex).family === "neutral").length;
-  const earthCount = colors.filter((hex) => classifyColorV2(hex).family === "earth").length;
-  const stabilizerExists = (colorRoles || []).some((r) => r.role === "stabilizer");
-  const anchorExists = (colorRoles || []).some((r) => r.role === "anchor");
-  return Math.round(
-    clamp100(62 + neutralCount * 8 + earthCount * 5 + (stabilizerExists ? 8 : 0) + (anchorExists ? 5 : 0))
-  );
-}
-
-function computeVersatilityScore(colors) {
-  if (!colors.length) return 70;
-  const sats = colors.map((hex) => getSat(hex));
-  const lights = colors.map((hex) => getLight(hex));
-  const neutralCount = colors.filter((hex) => classifyColorV2(hex).family === "neutral").length;
-  const satAvg = avg(sats);
-  const lightSpread = Math.max(...lights) - Math.min(...lights);
-  return Math.round(clamp100(58 + neutralCount * 7 + (1 - satAvg) * 18 + Math.min(16, lightSpread * 28)));
-}
-
-function computeBoldnessScore(colors) {
-  if (!colors.length) return 60;
-  const distances = [];
-  const sats = colors.map((hex) => getSat(hex));
-  const lights = colors.map((hex) => getLight(hex));
-  for (let i = 0; i < colors.length; i += 1) {
-    for (let j = i + 1; j < colors.length; j += 1) {
-      distances.push(hueDistance(colors[i], colors[j]));
-    }
-  }
-  const hueAvg = avg(distances);
-  const satAvg = avg(sats);
-  const lightSpread = Math.max(...lights) - Math.min(...lights);
-  return Math.round(clamp100(22 + Math.min(38, hueAvg * 0.18) + satAvg * 24 + lightSpread * 20));
-}
-
-function computeScoreBreakdown(colorRoles, normalizedColors) {
-  const roleOrdered = (colorRoles || []).map((r) => r.hex);
-  const fallback = (normalizedColors || []).map((c) => c.hex);
-  const colors = uniqHexes([...roleOrdered, ...fallback]).slice(0, 5);
-
-  return {
-    harmony: computeHarmonyScore(colors),
-    applicability: computeApplicabilityScore(colors, colorRoles),
-    versatility: computeVersatilityScore(colors),
-    boldness: computeBoldnessScore(colors),
-  };
-}
-
-function normalizeEngineModeScores(modeScores = {}) {
-  if (Array.isArray(modeScores)) {
-    return modeScores
-      .map((entry) => ({ mode: entry?.mode, score: Number(entry?.score) || 0 }))
-      .filter((entry) => entry.mode)
-      .sort((a, b) => b.score - a.score);
-  }
-
-  return Object.entries(modeScores)
-    .map(([mode, score]) => ({ mode, score: Number(score) || 0 }))
-    .sort((a, b) => b.score - a.score);
-}
-
-function toEngineModeScores(modeScores = []) {
-  if (!Array.isArray(modeScores)) return modeScores || {};
-  return modeScores.reduce((acc, entry) => {
-    if (entry?.mode) acc[entry.mode] = Number(entry.score) || 0;
-    return acc;
-  }, {});
-}
-
-function computeOverallScore(scoreBreakdown) {
-  if (typeof scoreEngine?.computeOverallScore === "function") {
-    return scoreEngine.computeOverallScore(scoreBreakdown);
-  }
-
-  return Math.round(
-    clamp100(
-      scoreBreakdown.harmony * 0.32 +
-        scoreBreakdown.applicability * 0.28 +
-        scoreBreakdown.versatility * 0.24 +
-        scoreBreakdown.boldness * 0.16
-    )
-  );
-}
-
-function computeModeScore(mode, scoreBreakdown) {
-  if (typeof scoreEngine?.computeModeScore === "function") {
-    return scoreEngine.computeModeScore(mode, scoreBreakdown);
-  }
-
-  const weights = LEGACY_MODE_RULES[mode];
-  if (!weights) return 0;
-
-  return Math.round(
-    clamp100(
-      scoreBreakdown.harmony * weights.harmony +
-        scoreBreakdown.applicability * weights.applicability +
-        scoreBreakdown.versatility * weights.versatility +
-        scoreBreakdown.boldness * weights.boldness
-    )
-  );
-}
-
-function computeModeScores(scoreBreakdown) {
-  if (typeof scoreEngine?.computeModeScores === "function") {
-    return normalizeEngineModeScores(scoreEngine.computeModeScores(scoreBreakdown));
-  }
-
-  return Object.keys(LEGACY_MODE_RULES)
-    .map((mode) => ({
-      mode,
-      score: computeModeScore(mode, scoreBreakdown),
-    }))
-    .sort((a, b) => b.score - a.score);
-}
-
-function getBestMode(modeScores) {
-  const normalizedModeScores = normalizeEngineModeScores(modeScores);
-  if (!normalizedModeScores.length) return { mode: "Balance", score: 0 };
-
-  if (typeof scoreEngine?.getBestMode === "function") {
-    const bestMode = scoreEngine.getBestMode(toEngineModeScores(normalizedModeScores));
-    const bestScore = normalizedModeScores.find((entry) => entry.mode === bestMode)?.score ?? 0;
-    return { mode: bestMode || normalizedModeScores[0].mode, score: bestScore };
-  }
-
-  return normalizedModeScores[0];
-}
-
-function scoreOutfit(scoreBreakdown) {
-  if (typeof scoreEngine?.scoreOutfit === "function") {
-    const scored = scoreEngine.scoreOutfit(scoreBreakdown);
-    const modeScores = normalizeEngineModeScores(scored?.modeScores || computeModeScores(scoreBreakdown));
-    const best = getBestMode(modeScores);
-
-    return {
-      outfit_score: scored?.overallScore ?? computeOverallScore(scoreBreakdown),
-      best_mode: scored?.bestMode || best.mode,
-      best_mode_score: modeScores.find((entry) => entry.mode === (scored?.bestMode || best.mode))?.score ?? best.score,
-      score_breakdown: scored?.scoreBreakdown || scoreBreakdown,
-      mode_scores: modeScores,
-    };
-  }
-
-  const modeScores = computeModeScores(scoreBreakdown);
-  const best = getBestMode(modeScores);
-
-  return {
-    outfit_score: computeOverallScore(scoreBreakdown),
-    best_mode: best.mode,
-    best_mode_score: best.score,
-    score_breakdown: scoreBreakdown,
-    mode_scores: modeScores,
-  };
-}
-
-/* =========================
-   STYLE IDENTITY SYSTEM
-========================= */
-
-function deriveStyleIdentity(bestMode, scoreBreakdown = {}) {
-  const identity = deriveStyleIdentityFromStyleIdentity(bestMode, scoreBreakdown);
-
-  return {
-    modifier: identity.modifier,
-    base_archetype: identity.base_archetype,
-    label: identity.label,
-  };
-}
-
-function buildWhyThisWorks(colorRoles) {
-  const anchor = colorRoles.find((r) => r.role === "anchor");
-  const support = colorRoles.find((r) => r.role === "support");
-  const accent = colorRoles.find((r) => r.role === "accent");
-  const stabilizer = colorRoles.find((r) => r.role === "stabilizer");
-
-  const anchorTraits = anchor?.perceptual || {};
-  const supportTraits = support?.perceptual || {};
-  const accentTraits = accent?.perceptual || {};
-  const stabilizerTraits = stabilizer?.perceptual || {};
-
-  const anchorDescriptor = `${anchorTraits.depth || "mid"} ${anchorTraits.temperature || "balanced"} ${anchor?.name || anchor?.hex || "anchor tone"}`;
-  const buildRoleDescriptor = (descriptor, colorName, fallbackName) => {
-    const prefix = String(descriptor || "").trim();
-    const name = String(colorName || fallbackName || "tone").trim();
-    if (!prefix) return name;
-    const normalizedPrefix = prefix.toLowerCase();
-    const normalizedName = name.toLowerCase();
-    return normalizedName === normalizedPrefix || normalizedName.startsWith(`${normalizedPrefix} `)
-      ? name
-      : `${prefix} ${name}`;
-  };
-
-  const supportDescriptor = buildRoleDescriptor(supportTraits.intensity || "balanced", support?.name || support?.hex, "support tone");
-  const stabilizerDescriptor = buildRoleDescriptor(stabilizerTraits.intensity || "balanced", stabilizer?.name || stabilizer?.hex, "stabilizer tone");
-  const accentDescriptor = buildRoleDescriptor(accentTraits.intensity || "balanced", accent?.name || accent?.hex, "accent tone");
-
-  return `The ${anchorDescriptor} anchor establishes the visual center, while ${supportDescriptor} extends the palette with compatible support. ${stabilizerDescriptor} adds grounding stability, and ${accentDescriptor} introduces controlled emphasis without overwhelming the overall structure.`;
-}
-
-function buildSuggestedAdjustment(scoreBreakdown, colorRoles, bestMode) {
-  const mode = normalizeModeLabel(bestMode);
-
-  const accent = colorRoles.find((r) => r.role === "accent");
-  const stabilizer = colorRoles.find((r) => r.role === "stabilizer");
-  const support = colorRoles.find((r) => r.role === "support");
-  const anchor = colorRoles.find((r) => r.role === "anchor");
-
-  const accentName = accent?.name || accent?.hex || "the accent tone";
-  const stabilizerName = stabilizer?.name || stabilizer?.hex || "the stabilizer tone";
-  const supportName = support?.name || support?.hex || "the support tone";
-  const anchorName = anchor?.name || anchor?.hex || "the anchor tone";
-
-  if (mode === "Natural") {
-    if (scoreBreakdown.boldness > 70) {
-      return `This look performs best in Natural mode. Softening the intensity of ${accentName} slightly would create a more grounded and organic balance.`;
-    }
-
-    if (scoreBreakdown.versatility < 75) {
-      return `This look performs best in Natural mode. Introducing a slightly more neutral or earthy support tone alongside ${supportName} would improve versatility.`;
-    }
-
-    return `This look performs best in Natural mode. Deepening ${stabilizerName} slightly would enhance grounding and elevate the overall composition.`;
-  }
-
-  if (mode === "Cohesion") {
-    if (scoreBreakdown.boldness > 65) {
-      return `This look performs best in Cohesion mode. Reducing the intensity of ${accentName} would improve tonal unity and strengthen overall harmony.`;
-    }
-
-    return `This look performs best in Cohesion mode. Tightening the tonal range around the ${anchorName} anchor would create a more seamless and refined visual flow.`;
-  }
-
-  if (mode === "Contrast") {
-    if (scoreBreakdown.boldness < 60) {
-      return `This look performs best in Contrast mode. Increasing the separation between ${anchorName} and ${accentName} would create stronger visual impact.`;
-    }
-
-    return `This look performs best in Contrast mode. Slightly sharpening the contrast between tones would make the composition feel more dynamic.`;
-  }
-
-  if (mode === "Balance") {
-    if (scoreBreakdown.boldness > 75) {
-      return `This look performs best in Balance mode. Slightly reducing the dominance of ${accentName} would improve overall equilibrium.`;
-    }
-
-    return `This look performs best in Balance mode. Reinforcing ${stabilizerName} would create a more even distribution across the palette.`;
-  }
-
-  if (mode === "Explore") {
-    return `This look performs best in Explore mode. You can push variation further by introducing a more unexpected accent while maintaining structure through ${anchorName}.`;
-  }
-
-  return `Refining the relationship between ${anchorName}, ${supportName}, and ${accentName} would improve the overall outfit score.`;
-}
-
-function buildPublishedGarmentColorAuthority(garmentZones, fallbackColors = []) {
-  const zones = garmentZones?.zones || {};
-  const orderedKeys = ["upper_garment", "lower_garment", "body_garment", "outerwear", "footwear", "bag", "accessory_jewelry", "eyewear"];
-  const authoritative = [];
-  for (const zone of orderedKeys) {
-    const z = zones[zone];
-    if (!z || z.interpretation === "unknown" || z.one_piece_suppressed) continue;
-    const hex = safeHex(z.hex || z.dominant_color?.hex || "");
-    if (!hex || authoritative.some((c) => c.hex === hex)) continue;
-    authoritative.push({ hex, pct: Math.max(0.01, Math.min(1, Number(z.dominant_color?.pct ?? z.pct ?? 0.25))), name: getColorName(hex), source_zone: zone, source: "published_garment_primary" });
-  }
-  if (!authoritative.length) return fallbackColors;
-  for (const c of fallbackColors) {
-    if (authoritative.length >= 5) break;
-    if (!c?.hex || authoritative.some((x) => x.hex === c.hex)) continue;
-    authoritative.push({ ...c, source: c.source || "global_palette_fallback" });
-  }
-  return authoritative;
-}
-
-function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], dinoGarmentRegions = [], pipeline = null, decodedImage = null, perception_v6_mode, v6_mode }) {
-  const perceptionV6Mode = normalizePerceptionV6Mode(perception_v6_mode ?? v6_mode, "shadow");
-  const normalizedColors = normalizeDetectedColors(topColors, dominantHex);
-  const baseRoles = assignColorRoles(normalizedColors);
-  const colorRoles = enforceStructuralPreservation(baseRoles, normalizedColors);
-
-  const visualIntelligence = buildVisualIntelligence({
-    dominantHex,
-    normalizedColors,
-    colorRoles,
-  });
-
-  const inputSegmentedRegions = Array.isArray(segmentedRegions) ? segmentedRegions : [];
-  const samRegions = inputSegmentedRegions.filter(
-    (region) => region?.source_type !== "grounding_dino" && region?.source_type !== "dino_detection"
-  );
-  const inputDinoRegions = inputSegmentedRegions.filter(
-    (region) => region?.source_type === "grounding_dino" || region?.source_type === "dino_detection"
-  );
-  const dinoRegions = dedupeDinoRegionsByZoneAndOverlap(
-    [...inputDinoRegions, ...(Array.isArray(dinoGarmentRegions) ? dinoGarmentRegions : [])].filter(
-      (region, idx, arr) => idx === arr.findIndex((candidate) => candidate?.id === region?.id && candidate?.segment_label === region?.segment_label && candidate?.zone === region?.zone)
-    )
-  );
-  const samZones = new Set(samRegions.map((region) => region?.zone).filter((zone) => zone && zone !== "unknown"));
-  const dedupedDinoRegions = samRegions.length
-    ? dinoRegions.filter((region) => !samZones.has(region?.zone))
-    : dinoRegions;
-  const rawGarmentEvidenceRegions = samRegions.length ? samRegions.concat(dedupedDinoRegions) : dinoRegions;
-  const pieceColorOwnership = applyPieceColorOwnershipV1({
-    decodedImage,
-    regions: rawGarmentEvidenceRegions,
-  });
-  const lowerGarmentPurity = applyLowerGarmentPurityV2({
-    decodedImage,
-    regions: pieceColorOwnership.regions,
-  });
-  const upperGarmentPurity = applyUpperGarmentPurityV1({
-    decodedImage,
-    regions: lowerGarmentPurity.regions,
-  });
-  const garmentEvidenceRegions = upperGarmentPurity.regions;
-  const garmentZoneSource = getGarmentZoneSource(samRegions, dedupedDinoRegions);
-  const dinoLifecycleTrace = [
-    summarizeDinoStageForTrace("analysis.dinoGarmentRegions", dinoGarmentRegions),
-    summarizeDinoStageForTrace("inputDinoRegions", inputDinoRegions),
-    summarizeDinoStageForTrace("dedupedDinoRegions", dedupedDinoRegions),
-    summarizeDinoStageForTrace("garmentEvidenceRegions", garmentEvidenceRegions),
-  ];
-
-  const legacyGarmentZones = inferGarmentZones(
-    normalizedColors,
-    colorRoles,
-    visualIntelligence,
-    garmentEvidenceRegions
-  );
-  const perceptionV5 = analyzePerceptionV5({ regions: garmentEvidenceRegions, pipeline });
-  const perceptionV6 = analyzePerceptionV6({ perceptionV5, regions: garmentEvidenceRegions, decodedImage, mode: perceptionV6Mode });
-  const rejectedZones = new Set(perceptionV6.publication_decisions.filter((decision) => !decision.published).map((decision) => decision.zone));
-  const acceptedZones = new Set(perceptionV6.zone_reconciliation.map((decision) => decision.zone));
-  const suppressibleZones = new Set(["eyewear", "accessory_jewelry", "bag", "footwear"]);
-  let publishedZones;
-  if (perceptionV6Mode === "authoritative") {
-    publishedZones = perceptionV6.publication_gating.allowed
-      ? Object.fromEntries(perceptionV6.zone_reconciliation.map((decision) => {
-          const legacy = legacyGarmentZones.zones?.[decision.zone] || null;
-          const dominantObjectColor = decision.object_local_colors?.[0] || null;
-          return [decision.zone, {
-            ...(legacy || {}),
-            name: decision.selected_label,
-            label: decision.selected_label,
-            hex: dominantObjectColor?.hex || legacy?.hex || null,
-            object_local_colors: decision.object_local_colors || [],
-            evidence_ids: decision.selected_evidence_ids || [],
-            validation_decision: "accepted",
-            publication_decision: "publish",
-            reconciliation_result: decision.resolution,
-            legacy_diagnostic: legacy,
-            perception_source: "v6_reconciliation",
-          }];
-        }))
-      : {};
-  } else if (perceptionV6Mode === "assist") {
-    const acceptedPublicationByZone = new Map();
-    for (const decision of perceptionV6.zone_reconciliation || []) {
-      acceptedPublicationByZone.set(decision.zone, decision);
-    }
-    const acceptedLabelsByZone = new Map();
-    for (const decision of perceptionV6.publication_decisions || []) {
-      if (!decision?.published) continue;
-      const labels = acceptedLabelsByZone.get(decision.zone) || new Set();
-      labels.add(String(decision.label || "").trim().toLowerCase());
-      acceptedLabelsByZone.set(decision.zone, labels);
-    }
-    publishedZones = Object.fromEntries(Object.entries(legacyGarmentZones.zones || {}).flatMap(([zone, legacy]) => {
-      if (suppressibleZones.has(zone) && rejectedZones.has(zone) && !acceptedZones.has(zone)) return [];
-      if (zone !== "accessory_jewelry") return [[zone, legacy]];
-
-      const legacyObjectType = String(legacy?.object_type || legacy?.accessory_type || "").trim().toLowerCase();
-      const acceptedLabels = acceptedLabelsByZone.get(zone) || new Set();
-      const legacyIdentityAccepted = legacyObjectType ? acceptedLabels.has(legacyObjectType) : true;
-      const legacyIdentityMarketSafe = shouldPublishMarketAccessoryIdentity({
-        legacy,
-        headwearEnabled: MARKET_HEADWEAR_PUBLICATION_ENABLED,
-      });
-      if (legacyIdentityAccepted && legacyIdentityMarketSafe) return [[zone, legacy]];
-
-      // If a legacy headwear identity is suppressed, still allow a separately accepted
-      // non-headwear reconciliation (for example a real necklace in the same canonical zone).
-      const reconciliation = acceptedPublicationByZone.get(zone) || null;
-      if (!reconciliation?.selected_label) return [];
-      if (!shouldPublishMarketAccessoryIdentity({
-        selectedLabel: reconciliation.selected_label,
-        headwearEnabled: MARKET_HEADWEAR_PUBLICATION_ENABLED,
-      })) return [];
-      const displayMetadata = inferAccessoryDisplayMetadata([reconciliation.selected_label]);
-      const dominantObjectColor = reconciliation.object_local_colors?.[0] || null;
-      return [[zone, {
-        ...legacy,
-        ...displayMetadata,
-        name: reconciliation.selected_label,
-        label: reconciliation.selected_label,
-        hex: dominantObjectColor?.hex || legacy?.hex || null,
-        object_local_colors: reconciliation.object_local_colors || [],
-        evidence_ids: reconciliation.selected_evidence_ids || [],
-        validation_decision: "accepted",
-        publication_decision: "publish",
-        reconciliation_result: "v6_object_identity_reconciled",
-        legacy_diagnostic: legacy,
-        perception_source: "v6_assist_identity_reconciliation",
-      }]];
-    }));
-  } else {
-    publishedZones = legacyGarmentZones.zones || {};
-  }
-  const garmentZones = perceptionV6Mode === "shadow" ? legacyGarmentZones : {
-    ...legacyGarmentZones,
-    zones: publishedZones,
-    publication_mode: perceptionV6Mode,
-    legacy_zones: legacyGarmentZones.zones,
-    v6_publication_diagnostics: perceptionV6.publication_decisions,
-  };
-  const fullDinoLifecycleTrace = [
-    ...dinoLifecycleTrace,
-    ...((legacyGarmentZones?.dino_lifecycle_trace?.stages || []).filter((stage) =>
-      !dinoLifecycleTrace.some((existing) => existing.stage === stage.stage)
-    )),
-    ...perceptionV6.lifecycle_trace.map((entry) => ({
-      ...entry,
-      stage: `perception_v6.${entry.stage}`,
-    })),
-  ];
-  console.info("[DINO TRACE] dino_4 buildOutfitAnalysis lifecycle", {
-    stages: fullDinoLifecycleTrace,
-    change_summary: buildDinoLifecycleChangeSummary(fullDinoLifecycleTrace),
-  });
-
-  const colorEvidenceShadowZones = attachColorEvidenceToZones({
-    zones: garmentZones?.zones || {},
-    regions: garmentEvidenceRegions,
-    decodedImage,
-  });
-  const signatureAuthorityZones = applySignatureColorAuthorityV2(colorEvidenceShadowZones);
-  const authoritativeGarmentZones = buildPublishedGarmentZonesV2(garmentZones, signatureAuthorityZones);
-  const colorEvidenceByZone = Object.fromEntries(
-    Object.entries(authoritativeGarmentZones?.zones || {}).map(([zone, value]) => [zone, value?.color_evidence_v1 || null])
-  );
-  const garmentAnalysis = inferGarmentAndMaterial({
-  zones: authoritativeGarmentZones.zones,
-  normalizedColors,
-  colorEvidenceByZone,
-});
-
-  const sceneOwnership = buildSceneOwnershipV1({
-    authoritativeGarmentZones,
-    garmentAnalysis,
-    normalizedColors,
-  });
-  const fallbackReasoningColors = buildPublishedGarmentColorAuthority(authoritativeGarmentZones, normalizedColors);
-  const reasoningColors = sceneOwnership.outfit_palette.length >= 2
-    ? sceneOwnership.outfit_palette
-    : fallbackReasoningColors;
-  const reasoningBaseRoles = assignColorRoles(reasoningColors);
-  const reasoningColorRoles = enforceStructuralPreservation(reasoningBaseRoles, reasoningColors);
-  const scoreBreakdown = computeScoreBreakdown(reasoningColorRoles, reasoningColors);
-  const scoredOutfit = scoreOutfit(scoreBreakdown);
-  const modeScores = scoredOutfit.mode_scores;
-  const best = getBestMode(modeScores);
-  const detectedPalette = buildDetectedPalette(reasoningColorRoles, reasoningColors);
-  const styleIdentity = deriveStyleIdentity(best.mode, scoreBreakdown);
-  const visualImportance = collectImportantColors(topColors, dominantHex);
-  const outfitScore = scoredOutfit.outfit_score;
-  const primaryColorIdentity = normalizedColors[0]?.color_identity || null;
-
-  return {
-    analysis_type: "outfit_score",
-    outfit_score: outfitScore,
-    best_mode: best.mode,
-    best_mode_score: best.score,
-    score_breakdown: scoreBreakdown,
-    mode_scores: modeScores,
-    detected_palette: detectedPalette,
-    color_identity_summary: buildColorIdentitySummary(primaryColorIdentity),
-    garment_identity: buildGarmentIdentity(normalizedColors[0], normalizedColors.slice(1, 4)),
-    color_roles: reasoningColorRoles,
-    color_authority: {
-      source: reasoningColors === sceneOwnership.outfit_palette ? "scene_ownership_v1_outfit" : (reasoningColors === normalizedColors ? "global_palette_fallback" : "published_garment_primaries"),
-      colors: reasoningColors.map((c) => ({ hex: c.hex, name: c.name || getColorName(c.hex), source_zone: c.source_zone || null, source: c.source || null })),
-    },
-    style_identity: styleIdentity,
-    why_this_works: buildWhyThisWorks(reasoningColorRoles),
-    suggested_adjustment: buildSuggestedAdjustment(scoreBreakdown, reasoningColorRoles, best.mode),
-    visual_importance: visualImportance,
-    visual_intelligence: visualIntelligence,
-    visual_intelligence_layer: visualIntelligence,
-    garment_zones: authoritativeGarmentZones,
-    scene_ownership_v1: sceneOwnership,
-    piece_color_ownership_v1: pieceColorOwnership.summary,
-    lower_garment_purity_v2: lowerGarmentPurity.summary,
-    upper_garment_purity_v1: upperGarmentPurity.summary,
-    perception_v5: perceptionV5,
-    perception_v6: perceptionV6,
-    perception_v6_mode: perceptionV6Mode,
-    dino_lifecycle_trace: {
-      target_id: "dino_4",
-      stages: fullDinoLifecycleTrace,
-      change_summary: buildDinoLifecycleChangeSummary(fullDinoLifecycleTrace),
-    },
-    segmented_regions: authoritativeGarmentZones.segmented_regions || garmentEvidenceRegions,
-    region_color_analysis: authoritativeGarmentZones.region_color_analysis || [],
-    detail_colors: visualIntelligence?.body_vs_detail?.detail_colors || [],
-    accessory_analysis: (garmentAnalysis?.detected_items || []).filter((item) =>
-      ["accessory_jewelry", "eyewear", "bag"].includes(item.type)
-    ),
-    confidence_scores: {
-      outfit: outfitScore,
-      best_mode: best.score,
-      zones: Object.fromEntries(
-        Object.entries(authoritativeGarmentZones?.zones || {}).map(([k, v]) => [k, Number(v?.confidence || v?.score || 0)])
-      ),
-    },
-    confidence_breakdown: authoritativeGarmentZones?.confidence_breakdown || {},
-    material_analysis: garmentAnalysis,
-    pipeline: pipeline ? { ...pipeline, garment_zone_source: garmentZoneSource } : {
-      sam_enabled: false,
-      sam_ok: false,
-      sam_reason: "not_requested",
-      fallback_mode: true,
-      garment_zone_source: garmentZoneSource,
-    },
-    garment_analysis: garmentAnalysis,
-    structural_analysis: normalizedColors.map((c) => ({
-      hex: c.hex,
-      name: c.name,
-      structural_role: c.structural_role,
-      surface_role: classifySurfaceRole(c, dominantHex),
-      importance: c.importance,
-    })),
-  };
-}
-
-/* =========================
-   RETRIEVAL INTENT + PIECE SCORING
-========================= */
-function getRoleHexMap(outfitAnalysis) {
-  const roles = Array.isArray(outfitAnalysis?.color_roles) ? outfitAnalysis.color_roles : [];
-  return {
-    anchor: roles.find((r) => r.role === "anchor")?.hex || null,
-    support: roles.find((r) => r.role === "support")?.hex || null,
-    accent: roles.find((r) => r.role === "accent")?.hex || null,
-    stabilizer: roles.find((r) => r.role === "stabilizer")?.hex || null,
-  };
-}
-
-function getDisplayPaletteForRetrieval(outfitAnalysis) {
-  const roleMap = getRoleHexMap(outfitAnalysis);
-  const detected = outfitAnalysis?.detected_palette || {};
-
-  return {
-    anchor: roleMap.anchor,
-    support: roleMap.support,
-    stabilizer: roleMap.stabilizer,
-    accent: roleMap.accent,
-    primary: Array.isArray(detected.primary) ? detected.primary : [],
-    secondary: Array.isArray(detected.secondary) ? detected.secondary : [],
-    accent_group: Array.isArray(detected.accent) ? detected.accent : [],
-    named: detected.named || {
-      primary: buildNamedHexes(Array.isArray(detected.primary) ? detected.primary : []),
-      secondary: buildNamedHexes(Array.isArray(detected.secondary) ? detected.secondary : []),
-      accent: buildNamedHexes(Array.isArray(detected.accent) ? detected.accent : []),
-    },
-  };
-}
-
-function getRetailColorKeywords(hex) {
-  const safe = safeHex(hex);
-  if (!safe) return [];
-
-  const h = getHue(safe);
-  const s = getSat(safe);
-  const l = getLight(safe);
-
-  if (s < 0.08 && l < 0.18) return ["black", "jet black", "deep black"];
-  if (s < 0.12 && l < 0.42) return ["charcoal", "dark gray", "graphite"];
-  if (s < 0.12 && l < 0.68) return ["gray", "slate gray", "stone"];
-  if (s < 0.16 && l >= 0.82) return ["white", "off white", "ivory"];
-  if (s < 0.18 && l >= 0.68) return ["cream", "light beige", "oatmeal"];
-
-  if (h >= 345 || h < 15) return l < 0.45 ? ["burgundy", "wine", "oxblood"] : ["red", "crimson", "rose"];
-  if (h >= 15 && h < 35) return l < 0.5 ? ["brown", "cognac", "rust"] : ["tan", "camel", "caramel"];
-  if (h >= 35 && h < 55) return l < 0.5 ? ["mustard", "golden brown", "amber"] : ["beige", "sand", "khaki"];
-  if (h >= 55 && h < 85) return ["olive", "sage", "moss"];
-  if (h >= 85 && h < 165) return l < 0.45 ? ["forest green", "olive green", "deep green"] : ["sage green", "muted green", "green"];
-  if (h >= 165 && h < 210) return ["teal", "blue green", "sea green"];
-  if (h >= 210 && h < 255) {
-    if (l < 0.3 && !isNavyCandidate(safe)) return ["black", "graphite black", "charcoal"];
-    return l < 0.45 ? ["navy", "deep blue", "midnight blue"] : ["blue", "steel blue", "powder blue"];
-  }
-  if (h >= 255 && h < 315) return l < 0.45 ? ["plum", "eggplant", "deep purple"] : ["lavender", "soft purple", "mauve"];
-  return ["neutral", "muted", "classic"];
-}
-
-function getNegativeKeywordsForMode(mode) {
-  const selectedMode = normalizeModeLabel(mode);
-  const map = {
-    Balance: ["neon", "rainbow", "multi-color", "graphic"],
-    Contrast: ["washed out", "faded neutral only"],
-    Cohesion: ["neon", "multi-color", "graphic", "rainbow"],
-    Natural: ["neon", "patent", "highlighter", "fluorescent"],
-    Explore: [],
-  };
-  return map[selectedMode] || [];
-}
-
-function getStyleKeywordsForMode(mode) {
-  const selectedMode = normalizeModeLabel(mode);
-  const map = {
-    Balance: ["balanced", "versatile", "clean"],
-    Contrast: ["contrast", "bold", "statement"],
-    Cohesion: ["cohesive", "tonal", "clean"],
-    Natural: ["natural", "earth tone", "muted"],
-    Explore: ["experimental", "creative", "expressive"],
-  };
-  return map[selectedMode] || [];
-}
-
-const OCCASION_SEARCH_KEYWORDS = Object.freeze({
-  formal: Object.freeze(["formal", "tailored", "dress"]),
-  business: Object.freeze(["business", "professional", "business casual"]),
-  business_casual: Object.freeze(["business casual", "professional"]),
-  streetwear: Object.freeze(["streetwear", "urban"]),
-  athleisure: Object.freeze(["athleisure", "activewear"]),
-  evening: Object.freeze(["evening", "night out"]),
-  casual: Object.freeze(["casual", "everyday"]),
-  smart_casual: Object.freeze(["smart casual"]),
-});
-
-function getOccasionSearchKeywords(occasion) {
-  const normalizedOccasion = normalizeText(occasion).replace(/[\s-]+/g, "_");
-  if (!OCCASION_IDS.includes(normalizedOccasion)) return [];
-  return OCCASION_SEARCH_KEYWORDS[normalizedOccasion] || [];
-}
-
-function getRolePriorityForModeAndTarget(mode, targetItem) {
-  const selectedMode = normalizeModeLabel(mode);
-  const categoryBias = familyBiasForCategory(targetItem);
-
-  const modeBias = {
-    Balance: ["anchor", "stabilizer", "support", "accent"],
-    Contrast: ["accent", "anchor", "support", "stabilizer"],
-    Cohesion: ["anchor", "support", "stabilizer", "accent"],
-    Natural: ["support", "anchor", "stabilizer", "accent"],
-    Explore: ["accent", "support", "anchor", "stabilizer"],
-  }[selectedMode] || ["anchor", "support", "stabilizer", "accent"];
-
-  const merged = [];
-  for (const role of [...categoryBias, ...modeBias]) {
-    if (!merged.includes(role)) merged.push(role);
-  }
-  return merged;
-}
-
-function buildSearchTermsFromIntent(retrievalIntent) {
-  const category = normalizeCategoryLabel(retrievalIntent?.target_item, "piece");
-  const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
-  const mode = normalizeModeLabel(retrievalIntent?.selected_mode);
-
-  const colorKeywords = dedupeKeywords(palettePriority.flatMap((entry) => getRetailColorKeywords(entry?.hex)));
-
-  return {
-    primary_keywords: CATEGORY_SEARCH_KEYWORDS[category] || CATEGORY_SEARCH_KEYWORDS.piece,
-    color_keywords: colorKeywords,
-    style_keywords: dedupeKeywords([
-      ...getStyleKeywordsForMode(mode),
-      ...getOccasionSearchKeywords(retrievalIntent?.occasion),
-    ]),
-    negative_keywords: getNegativeKeywordsForMode(mode),
-  };
-}
-
-function buildRetrievalIntent(outfitAnalysis, opts = {}) {
-  const normalizedOccasion = normalizeText(opts.occasion).replace(/[\s-]+/g, "_");
-  const occasion = OCCASION_IDS.includes(normalizedOccasion) ? normalizedOccasion : "";
-  const occasionTargetDefault = OCCASION_CATEGORIES[occasion]?.[0];
-  const occasionModeDefault = OCCASION_MODES[occasion]?.[0];
-  const hasExplicitSelectedMode = normalizeText(opts.selectedMode) !== "";
-  const rawTargetItem = normalizeText(opts.targetItem);
-  const selectedMode = normalizeModeLabel(
-    hasExplicitSelectedMode ? opts.selectedMode : occasionModeDefault || outfitAnalysis?.best_mode || "Balance"
-  );
-  const sourceItem = normalizeCategoryLabel(opts.sourceItem || "piece", "piece");
-  const targetItem = normalizeCategoryLabel(
-    !rawTargetItem || rawTargetItem === "piece" ? occasionTargetDefault || "piece" : opts.targetItem,
-    "piece"
-  );
-  const industry = normalizeText(opts.industry || "fashion") || "fashion";
-  const matchStrictness = normalizeText(opts.matchStrictness || "medium") || "medium";
-  const resultCount = Number.isFinite(Number(opts.resultCount))
-    ? Math.max(1, Math.min(60, Number(opts.resultCount)))
-    : 24;
-  const rolePriorityOrder = getRolePriorityForModeAndTarget(selectedMode, targetItem);
-  const roleMap = getRoleHexMap(outfitAnalysis);
-  const roleObjects = Array.isArray(outfitAnalysis?.color_roles) ? outfitAnalysis.color_roles : [];
-
-  const palettePriority = rolePriorityOrder
-    .map((role, idx) => {
-      const roleHex = roleMap[role];
-      const roleObj = roleObjects.find((r) => r.role === role);
-      if (!roleHex) return null;
-      return {
-        role,
-        hex: roleHex,
-        name: roleObj?.name || getColorName(roleHex),
-        priority: idx + 1,
-        usage_bias: familyBiasForCategory(targetItem),
-      };
-    })
-    .filter(Boolean);
-
-  const intent = {
-    analysis_type: "inventory_retrieval",
-    selected_mode: selectedMode,
-    best_mode_score: outfitAnalysis?.best_mode_score ?? 0,
-    source_item: sourceItem,
-    target_item: targetItem,
-    industry,
-    retrieval_goal: opts.retrievalGoal || "extend_palette",
-    match_strictness: matchStrictness,
-    result_count: resultCount,
-    initial_display_count: 4,
-    expanded_display_count: Math.max(8, Math.min(resultCount, 12)),
-    role_priority: rolePriorityOrder,
-    palette_priority: palettePriority,
-    palette: getDisplayPaletteForRetrieval(outfitAnalysis),
-    context: {
-      domain: industry,
-      category: targetItem,
-      subtypes: resolveCategorySubtypes(targetItem),
-      anchors: getQueryAnchorsForCategory(targetItem, industry),
-    },
-    ranking_rules: {
-      prefer_role_order: rolePriorityOrder,
-      prefer_neutrals_first:
-        selectedMode === "Natural" || targetItem === "pants" || targetItem === "shoes" || targetItem === "boots",
-      allow_accent_results: true,
-      accent_max_ratio: selectedMode === "Contrast" || selectedMode === "Explore" ? 0.35 : 0.15,
-      min_color_fit_score: matchStrictness === "strict" ? 78 : matchStrictness === "loose" ? 52 : 64,
-    },
-  };
-
-  if (occasion) {
-    Object.defineProperty(intent, "occasion", {
-      value: occasion,
-      enumerable: false,
-      configurable: true,
-    });
-  }
-
-  intent.search_terms = buildSearchTermsFromIntent(intent);
-  return intent;
-}
-
-function normalizeInventoryProduct(product, idx = 0) {
-  const title = String(product?.title || product?.name || product?.product_title || `Product ${idx + 1}`);
-  const category = normalizeCategoryLabel(product?.category || product?.type || product?.itemType || "piece", "piece");
-  const colorHex = safeHex(
-    product?.color_hex ||
-      product?.colorHex ||
-      product?.hex ||
-      product?.dominantHex ||
-      product?.dominant_hex
-  );
-
-  const styleTags = Array.isArray(product?.style_tags)
-    ? product.style_tags
-    : Array.isArray(product?.styleTags)
-      ? product.styleTags
-      : [];
-
-  return {
-    ...product,
-    id: product?.id || product?.product_id || `product_${idx + 1}`,
-    title,
-    category,
-    color_hex: colorHex,
-    color_name: colorHex ? getColorName(colorHex) : null,
-    brand: product?.brand || null,
-    image_url: product?.image_url || product?.imageUrl || null,
-    affiliate_link: product?.affiliate_link || product?.affiliateLink || null,
-    style_tags: styleTags,
-  };
-}
-
-function getStrictnessScalar(matchStrictness) {
-  const m = normalizeText(matchStrictness);
-  if (m === "strict") return 1.2;
-  if (m === "loose") return 0.8;
-  return 1.0;
-}
-
-function computeRoleFitForProduct(productHex, retrievalIntent) {
-  const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
-  if (!productHex || !palettePriority.length) {
-    return { score: 55, matchedRole: null, matchedHex: null };
-  }
-
-  const strictnessScalar = getStrictnessScalar(retrievalIntent.match_strictness);
-  let best = { score: 0, matchedRole: null, matchedHex: null };
-
-  palettePriority.forEach((entry) => {
-    const dist = colorDistanceLab(productHex, entry.hex);
-    const priorityWeight = Math.max(0.2, 1 - (entry.priority - 1) * 0.18);
-    const baseScore = clamp100(100 - dist * 1.15 * strictnessScalar);
-    const score = clamp100(baseScore * priorityWeight);
-    if (score > best.score) {
-      best = { score: Math.round(score), matchedRole: entry.role, matchedHex: entry.hex };
-    }
-  });
-
-  return best;
-}
-
-function computeModeAlignmentForProduct(productHex, retrievalIntent) {
-  if (!productHex) return 45;
-
-  const mode = normalizeModeLabel(retrievalIntent?.selected_mode);
-  const roleMap = {
-    anchor: retrievalIntent?.palette_priority?.find((x) => x.role === "anchor")?.hex || null,
-    support: retrievalIntent?.palette_priority?.find((x) => x.role === "support")?.hex || null,
-    stabilizer: retrievalIntent?.palette_priority?.find((x) => x.role === "stabilizer")?.hex || null,
-    accent: retrievalIntent?.palette_priority?.find((x) => x.role === "accent")?.hex || null,
-  };
-
-  const anchor = roleMap.anchor;
-  const support = roleMap.support;
-  const stabilizer = roleMap.stabilizer;
-  const accent = roleMap.accent;
-
-  const family = classifyColorV2(productHex).family;
-  const sat = getSat(productHex);
-
-  if (mode === "Cohesion") {
-    const d1 = anchor ? colorDistanceLab(productHex, anchor) : 40;
-    const d2 = support ? colorDistanceLab(productHex, support) : 40;
-    return Math.round(clamp100(96 - Math.min(d1, d2) * 1.05));
-  }
-
-  if (mode === "Contrast") {
-    const ref = anchor || support || stabilizer || accent;
-    const hueGap = ref ? hueDistance(productHex, ref) : 90;
-    return Math.round(clamp100(30 + Math.min(60, hueGap * 0.55) + sat * 12));
-  }
-
-  if (mode === "Natural") {
-    const goodFamily = family === "earth" || family === "neutral" || family === "pastel";
-    return Math.round(clamp100((goodFamily ? 82 : 58) + (1 - sat) * 12));
-  }
-
-  if (mode === "Balance") {
-    const d1 = anchor ? colorDistanceLab(productHex, anchor) : 40;
-    const d2 = stabilizer ? colorDistanceLab(productHex, stabilizer) : 40;
-    const avgDist = avg([d1, d2]);
-    return Math.round(clamp100(88 - Math.abs(avgDist - 30) * 0.9));
-  }
-
-  if (mode === "Explore") {
-    return Math.round(clamp100(62 + sat * 18));
-  }
-
-  return 70;
-}
-
-function computeCategoryFitForProduct(product, retrievalIntent) {
-  const target = normalizeCategoryLabel(retrievalIntent?.target_item, "piece");
-  const category = normalizeCategoryLabel(product?.category || "piece", "piece");
-  const title = normalizeText(product?.title || "");
-
-  if (target === category) return 96;
-  if (title.includes(target)) return 88;
-  if (target === "jacket" && CATEGORY_COMPATIBILITY.jacket?.includes(category)) return 85;
-  if (target === "shirt" && CATEGORY_COMPATIBILITY.shirt?.includes(category)) return 85;
-  if (target === "pants" && CATEGORY_COMPATIBILITY.pants?.includes(category)) return 86;
-  if (target === "shoes" && CATEGORY_COMPATIBILITY.shoes?.includes(category)) return 84;
-  if (target === "accessory" && ["bag", "cap", "belt", "watch"].some((x) => title.includes(x))) return 84;
-
-  const occasion = normalizeText(retrievalIntent?.occasion).replace(/[\s-]+/g, "_");
-  const occasionDefaultTarget = normalizeCategoryLabel(OCCASION_CATEGORIES[occasion]?.[0], "piece");
-  const allowsOccasionCategoryBoost =
-    OCCASION_IDS.includes(occasion) && target === occasionDefaultTarget;
-  if (
-    allowsOccasionCategoryBoost &&
-    OCCASION_CATEGORIES[occasion]?.some((occasionCategory) => normalizeCategoryLabel(occasionCategory, "piece") === category)
-  ) {
-    return 84;
-  }
-
-  return 58;
-}
-
-function computeVersatilityFitForProduct(productHex) {
-  if (!productHex) return 55;
-  const family = classifyColorV2(productHex).family;
-  const sat = getSat(productHex);
-  const light = getLight(productHex);
-
-  let score = 58;
-  if (family === "neutral") score += 24;
-  if (family === "earth") score += 15;
-  if (family === "pastel") score += 10;
-  score += (1 - sat) * 10;
-  if (light > 0.15 && light < 0.86) score += 8;
-  return Math.round(clamp100(score));
-}
-
-function computeColorFitForProduct(productHex, retrievalIntent) {
-  if (!productHex) return 0;
-  const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
-  if (!palettePriority.length) return 0;
-
-  const strictnessScalar = getStrictnessScalar(retrievalIntent.match_strictness);
-  const distances = palettePriority.map((entry) => colorDistanceLab(productHex, entry.hex));
-  const bestDist = Math.min(...distances);
-  return Math.round(clamp100(100 - bestDist * 1.2 * strictnessScalar));
-}
-
-function scoreProductFit(product, retrievalIntent) {
-  const normalized = normalizeInventoryProduct(product);
-  const roleFit = computeRoleFitForProduct(normalized.color_hex, retrievalIntent);
-  const colorFit = computeColorFitForProduct(normalized.color_hex, retrievalIntent);
-  const modeAlignment = computeModeAlignmentForProduct(normalized.color_hex, retrievalIntent);
-  const categoryFit = computeCategoryFitForProduct(normalized, retrievalIntent);
-  const versatilityFit = computeVersatilityFitForProduct(normalized.color_hex);
-
-  const pieceFitScore = Math.round(
-    clamp100(
-      colorFit * 0.28 +
-        roleFit.score * 0.24 +
-        modeAlignment * 0.18 +
-        categoryFit * 0.18 +
-        versatilityFit * 0.12
-    )
-  );
-
-  return {
-    ...normalized,
-    piece_fit_score: pieceFitScore,
-    score_breakdown: {
-      color_fit: colorFit,
-      role_fit: roleFit.score,
-      mode_alignment: modeAlignment,
-      category_fit: categoryFit,
-      versatility_fit: versatilityFit,
-    },
-    matched_role: roleFit.matchedRole,
-    matched_mode: retrievalIntent?.selected_mode || null,
-    why_it_matches:
-      roleFit.matchedRole
-        ? `Strong ${roleFit.matchedRole} alignment for ${retrievalIntent?.selected_mode || "selected"} mode with solid category relevance.`
-        : `General palette fit for ${retrievalIntent?.selected_mode || "selected"} mode.`,
-  };
-}
-
-function rankProducts(products, retrievalIntent) {
-  const rows = Array.isArray(products) ? products : [];
-  return rows
-    .map((product, idx) => scoreProductFit(normalizeInventoryProduct(product, idx), retrievalIntent))
-    .filter((item) => item.piece_fit_score >= (retrievalIntent?.ranking_rules?.min_color_fit_score || 0) * 0.9)
-    .sort((a, b) => b.piece_fit_score - a.piece_fit_score);
-}
-
-function generateRetrievalPreviewProducts(retrievalIntent) {
-  const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
-  const target = normalizeCategoryLabel(retrievalIntent?.target_item, "piece");
-  const out = [];
-
-  palettePriority.forEach((entry, idx) => {
-    const keyword = getRetailColorKeywords(entry.hex)[0] || "Classic";
-    const subtype = getCategorySubtypeForIndex(target, idx);
-
-    out.push({
-      id: `preview_${entry.role}_${idx + 1}`,
-      title: `${titleCase(keyword)} ${titleCase(subtype)}`,
-      category: target,
-      color_hex: entry.hex,
-      color_name: entry.name || getColorName(entry.hex),
-      brand: "Preview",
-      affiliate_link: buildAmazonSearchLink(
-        buildPrimaryContextualQuery({
-          colorKeyword: keyword,
-          category: target,
-          industry: retrievalIntent?.industry || "fashion",
-          subtype,
-        })
-      ),
-      image_url: null,
-      style_tags: [normalizeModeLabel(retrievalIntent.selected_mode).toLowerCase(), entry.role],
-    });
-  });
-
-  if (palettePriority[0]?.hex) {
-    const distractorHex = safeHex(rotateHue(palettePriority[0].hex, 130)) || "#FF4D4D";
-    out.push({
-      id: "preview_distractor_1",
-      title: `Bright Accent ${titleCase(getCategorySubtypeForIndex(target, 0))}`,
-      category: target,
-      color_hex: distractorHex,
-      color_name: getColorName(distractorHex),
-      brand: "Preview",
-      affiliate_link: buildAmazonSearchLink(`bright ${getCategorySubtypeForIndex(target, 0)} fashion outfit`),
-      image_url: null,
-      style_tags: ["experimental"],
-    });
-  }
-
-  return out;
-}
-
-function shopperLabelForRole(role) {
-  const map = {
-    anchor: "Best Match",
-    support: "Soft Match",
-    stabilizer: "Safe Neutral",
-    accent: "Bold Option",
-  };
-  return map[role] || titleCase(role);
-}
-
-function shopperReasonForRole(role) {
-  const map = {
-    anchor: "Best extension for maintaining the look.",
-    support: "Blends smoothly with the palette.",
-    stabilizer: "Grounds the outfit with a stable neutral.",
-    accent: "Adds a stronger pop if you want more energy.",
-  };
-  return map[role] || "Recommended match for this direction.";
-}
-
-function buildRoleQueries(retrievalIntent) {
-  const target = normalizeCategoryLabel(retrievalIntent?.target_item, "piece");
-  const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
-
-  return palettePriority.map((entry, idx) => {
-    const keywords = getRetailColorKeywords(entry.hex);
-    const subtype = getCategorySubtypeForIndex(target, idx);
-
-    const primaryQuery = buildPrimaryContextualQuery({
-      colorKeyword: keywords[0],
-      category: target,
-      industry: retrievalIntent?.industry || "fashion",
-      subtype,
-    });
-
-    const expandedQueries = dedupeKeywords(
-      keywords.flatMap((keyword) =>
-        buildContextualAmazonQueries({
-          colorKeyword: keyword,
-          category: target,
-          industry: retrievalIntent?.industry || "fashion",
-          limit: 3,
-        })
-      )
-    ).slice(0, 3);
-
-    return {
-      role: entry.role,
-      shopper_label: shopperLabelForRole(entry.role),
-      color_hex: entry.hex,
-      color_name: entry.name || getColorName(entry.hex),
-      subtype,
-      primary_query: primaryQuery,
-      expanded_queries: expandedQueries,
-      amazon_link: buildAmazonSearchLink(primaryQuery),
-      expanded_links: expandedQueries.map((q) => ({
-        query: q,
-        amazon_link: buildAmazonSearchLink(q),
-      })),
-      reason: shopperReasonForRole(entry.role),
-    };
-  });
-}
-
-function buildAlternativeDirections(outfitAnalysis, opts = {}) {
-  const current = normalizeModeLabel(opts.currentMode || outfitAnalysis?.best_mode || "Balance");
-  const targetItem = normalizeCategoryLabel(opts.targetItem || "piece", "piece");
-
-  return (Array.isArray(outfitAnalysis?.mode_scores) ? outfitAnalysis.mode_scores : [])
-    .filter((row) => normalizeModeLabel(row.mode) !== current)
-    .slice(0, 3)
-    .map((row) => ({
-      mode: normalizeModeLabel(row.mode),
-      score: row.score,
-      target_item: targetItem,
-      action_label: `Try ${normalizeModeLabel(row.mode)}`,
-    }));
-}
-
-function buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts = []) {
-  const displayCount = retrievalIntent?.initial_display_count || 4;
-  const expandedCount = retrievalIntent?.expanded_display_count || 12;
-
-  const roleQueries = buildRoleQueries(retrievalIntent);
-  const roleQueryMap = Object.fromEntries(roleQueries.map((row) => [row.role, row]));
-
-  const topResults = rankedProducts.slice(0, displayCount).map((product) => {
-    const fallbackRole = product.matched_role || "support";
-    const roleRow = roleQueryMap[fallbackRole] || roleQueries[0] || null;
-
-    return {
-      id: product.id,
-      title: product.title,
-      shopper_label: shopperLabelForRole(fallbackRole),
-      role: fallbackRole,
-      reason: roleRow?.reason || shopperReasonForRole(fallbackRole),
-      piece_fit_score: product.piece_fit_score,
-      matched_mode: product.matched_mode,
-      color_hex: product.color_hex,
-      color_name: product.color_name || (product.color_hex ? getColorName(product.color_hex) : null),
-      amazon_link:
-        product.affiliate_link ||
-        roleRow?.amazon_link ||
-        buildAmazonSearchLink(
-          buildPrimaryContextualQuery({
-            colorKeyword: getRetailColorKeywords(product.color_hex)[0] || "classic",
-            category: retrievalIntent.target_item,
-            industry: retrievalIntent?.industry || "fashion",
-            subtype: roleRow?.subtype || getCategorySubtypeForIndex(retrievalIntent.target_item, 0),
-          })
-        ),
-      query:
-        roleRow?.primary_query ||
-        buildPrimaryContextualQuery({
-          colorKeyword: getRetailColorKeywords(product.color_hex)[0] || "classic",
-          category: retrievalIntent.target_item,
-          industry: retrievalIntent?.industry || "fashion",
-          subtype: roleRow?.subtype || getCategorySubtypeForIndex(retrievalIntent.target_item, 0),
-        }),
-      why_it_matches: product.why_it_matches,
-    };
-  });
-
-  const moreOptions = rankedProducts.slice(displayCount, expandedCount).map((product) => {
-    const fallbackRole = product.matched_role || "support";
-    const roleRow = roleQueryMap[fallbackRole] || roleQueries[0] || null;
-
-    return {
-      id: product.id,
-      title: product.title,
-      shopper_label: shopperLabelForRole(fallbackRole),
-      role: fallbackRole,
-      piece_fit_score: product.piece_fit_score,
-      color_hex: product.color_hex,
-      color_name: product.color_name || (product.color_hex ? getColorName(product.color_hex) : null),
-      amazon_link:
-        product.affiliate_link ||
-        roleRow?.amazon_link ||
-        buildAmazonSearchLink(
-          buildPrimaryContextualQuery({
-            colorKeyword: getRetailColorKeywords(product.color_hex)[0] || "classic",
-            category: retrievalIntent.target_item,
-            industry: retrievalIntent?.industry || "fashion",
-            subtype: roleRow?.subtype || getCategorySubtypeForIndex(retrievalIntent.target_item, 0),
-          })
-        ),
-      query:
-        roleRow?.primary_query ||
-        buildPrimaryContextualQuery({
-          colorKeyword: getRetailColorKeywords(product.color_hex)[0] || "classic",
-          category: retrievalIntent.target_item,
-          industry: retrievalIntent?.industry || "fashion",
-          subtype: roleRow?.subtype || getCategorySubtypeForIndex(retrievalIntent.target_item, 0),
-        }),
-    };
-  });
-
-  return {
-    target_item: retrievalIntent.target_item,
-    source_item: retrievalIntent.source_item,
-    selected_mode: retrievalIntent.selected_mode,
-    best_mode_score: retrievalIntent.best_mode_score,
-    intro: `Top picks for building this look further with a ${retrievalIntent.target_item}.`,
-    top_paths: topResults,
-    more_options: {
-      available: moreOptions.length > 0,
-      count: moreOptions.length,
-      label: "More Options",
-      items: moreOptions,
-    },
-    role_search_paths: roleQueries,
-    try_another_direction: buildAlternativeDirections(outfitAnalysis, {
-      currentMode: retrievalIntent.selected_mode,
-      targetItem: retrievalIntent.target_item,
-    }),
-  };
-}
-
-const REPLICATE_SAM_TIMEOUT_MS = 90000;
-const REPLICATE_SAM_POLL_MS = 1200;
-const REPLICATE_SAM_POLL_RETRY_MAX = 3;
-const REPLICATE_SAM_POLL_RETRY_DELAY_MIN_MS = 500;
-const REPLICATE_SAM_POLL_RETRY_DELAY_MAX_MS = 1200;
-const DEFAULT_REPLICATE_SAM_VERSION =
-  process.env.REPLICATE_SAM_VERSION ||
-  "b88dc2ea8f814e5f4af2bac79f2414079800b5035b065d4eab99c857ab67e125";
-const DEFAULT_REPLICATE_SAM_MODEL = process.env.REPLICATE_SAM_MODEL || "meta/sam-2";
-const DEFAULT_REPLICATE_GROUNDING_DINO_VERSION =
-  process.env.REPLICATE_GROUNDING_DINO_VERSION ||
-  "efd10a8ddc57ea28773327e881ce95e20cc1d734c589f7dd01d2036921ed78aa";
-const DEFAULT_GROUNDING_DINO_QUERY =
-  process.env.GROUNDING_DINO_QUERY ||
-  "person. hat. bag. shoes. boots. sneakers. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. accessory.";
-
-function getSamPredictionsUrl(modelId = DEFAULT_REPLICATE_SAM_MODEL) {
-  const configured = String(process.env.REPLICATE_SAM_MODEL_PREDICTIONS_URL || "").trim();
-  if (configured) return configured;
-  return `https://api.replicate.com/v1/models/${modelId}/predictions`;
-}
-
-async function replicateRequest(url, options = {}, timeoutMs = REPLICATE_SAM_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const method = String(options?.method || "GET").toUpperCase();
-  let bodyTopLevelKeys = [];
-  if (typeof options?.body === "string" && options.body.trim()) {
-    try {
-      const parsedBody = JSON.parse(options.body);
-      if (parsedBody && typeof parsedBody === "object" && !Array.isArray(parsedBody)) {
-        bodyTopLevelKeys = Object.keys(parsedBody);
-      }
-    } catch {
-      bodyTopLevelKeys = [];
-    }
-  }
-
-  console.info("[SAM DEBUG] Replicate request dispatch", {
-    method,
-    url,
-    bodyTopLevelKeys,
-  });
-
-  try {
-    const resp = await fetch(url, {
-      ...options,
-      method,
-      signal: controller.signal,
-    });
-    const text = await resp.text();
-
-    let data = null;
-    try {
-      data = text ? JSON.parse(text) : null;
-    } catch (parseError) {
-      console.warn("[SAM DEBUG] Replicate response JSON parse failed", {
-        url,
-        parseError: parseError?.message || String(parseError),
-        preview: String(text || "").slice(0, 240),
-      });
-      data = null;
-    }
-
-    if (!resp.ok) {
-      throw new Error(data?.detail || `Replicate request failed (${resp.status})`);
-    }
-
-    return data;
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      throw new Error("Replicate SAM timed out");
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-function isTransientPollingError(error) {
-  const message = String(error?.message || error || "").toLowerCase();
-  if (!message) return false;
-  return (
-    message.includes("fetch failed") ||
-    message.includes("network") ||
-    message.includes("econnreset") ||
-    message.includes("etimedout") ||
-    message.includes("socket hang up") ||
-    message.includes("temporar") ||
-    message.includes("eai_again")
-  );
-}
-
-function isReplicateThrottleError(errorOrReason) {
-  const message = String(errorOrReason?.message || errorOrReason || "").toLowerCase();
-  if (!message) return false;
-  return (
-    message.includes("rate limit") ||
-    message.includes("rate-limit") ||
-    message.includes("ratelimit") ||
-    message.includes("too many requests") ||
-    message.includes("thrott") ||
-    message.includes("429")
-  );
-}
-
-function randomPollRetryDelayMs() {
-  const min = REPLICATE_SAM_POLL_RETRY_DELAY_MIN_MS;
-  const max = REPLICATE_SAM_POLL_RETRY_DELAY_MAX_MS;
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
-function normalizeGroundingDinoBbox(rawBbox) {
-  let values = null;
-  if (Array.isArray(rawBbox)) {
-    values = rawBbox.slice(0, 4).map(Number);
-  } else if (rawBbox && typeof rawBbox === "object") {
-    const x1 = rawBbox.x_min ?? rawBbox.xmin ?? rawBbox.left ?? rawBbox.x1 ?? rawBbox.x;
-    const y1 = rawBbox.y_min ?? rawBbox.ymin ?? rawBbox.top ?? rawBbox.y1 ?? rawBbox.y;
-    const x2 = rawBbox.x_max ?? rawBbox.xmax ?? rawBbox.right ?? rawBbox.x2;
-    const y2 = rawBbox.y_max ?? rawBbox.ymax ?? rawBbox.bottom ?? rawBbox.y2;
-    const w = rawBbox.width ?? rawBbox.w;
-    const h = rawBbox.height ?? rawBbox.h;
-    values = [Number(x1), Number(y1), Number(x2 ?? Number(x1) + Number(w)), Number(y2 ?? Number(y1) + Number(h))];
-  }
-
-  if (!values || values.some((value) => !Number.isFinite(value))) return null;
-  let [x1, y1, x2, y2] = values;
-  if (x2 < x1) [x1, x2] = [x2, x1];
-  if (y2 < y1) [y1, y2] = [y2, y1];
-
-  return {
-    x_min: round2(x1),
-    y_min: round2(y1),
-    x_max: round2(x2),
-    y_max: round2(y2),
-    width: round2(Math.max(0, x2 - x1)),
-    height: round2(Math.max(0, y2 - y1)),
-  };
-}
-
-
-function getNormalizedDinoRegionBBox(bbox = null) {
-  if (!bbox) return null;
-  const xMin = Number(bbox.x_min);
-  const yMin = Number(bbox.y_min);
-  const xMax = Number(bbox.x_max);
-  const yMax = Number(bbox.y_max);
-  if (![xMin, yMin, xMax, yMax].every(Number.isFinite)) return null;
-  if (xMin < 0 || yMin < 0 || xMax > 1 || yMax > 1) return null;
-  if (xMax <= xMin || yMax <= yMin) return null;
-  return {
-    x: round2(xMin),
-    y: round2(yMin),
-    w: round2(xMax - xMin),
-    h: round2(yMax - yMin),
-  };
-}
-
-function isIgnoredDinoLabel(label) {
-  const normalized = normalizeText(label);
-  return ["person", "clothing", "object", "body"].includes(normalized);
-}
-
-function getDinoBboxArea(bbox = null) {
-  if (!bbox) return 0;
-  const width = Number(bbox.width ?? (Number(bbox.x_max) - Number(bbox.x_min)) ?? 0);
-  const height = Number(bbox.height ?? (Number(bbox.y_max) - Number(bbox.y_min)) ?? 0);
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return 0;
-  return round2(width * height);
-}
-
-
-function getRegionBBox(region = {}) {
-  return region?.bbox || region?.mask_geometry?.bbox || null;
-}
-
-function getBboxIoU(a = null, b = null) {
-  const boxA = normalizeGroundingDinoBbox(a) || a;
-  const boxB = normalizeGroundingDinoBbox(b) || b;
-  if (!boxA || !boxB) return 0;
-  const ax1 = Number(boxA.x_min ?? boxA.x ?? 0);
-  const ay1 = Number(boxA.y_min ?? boxA.y ?? 0);
-  const ax2 = Number(boxA.x_max ?? (Number(boxA.x || 0) + Number(boxA.w || 0)));
-  const ay2 = Number(boxA.y_max ?? (Number(boxA.y || 0) + Number(boxA.h || 0)));
-  const bx1 = Number(boxB.x_min ?? boxB.x ?? 0);
-  const by1 = Number(boxB.y_min ?? boxB.y ?? 0);
-  const bx2 = Number(boxB.x_max ?? (Number(boxB.x || 0) + Number(boxB.w || 0)));
-  const by2 = Number(boxB.y_max ?? (Number(boxB.y || 0) + Number(boxB.h || 0)));
-  if (![ax1, ay1, ax2, ay2, bx1, by1, bx2, by2].every(Number.isFinite)) return 0;
-  const ix1 = Math.max(ax1, bx1);
-  const iy1 = Math.max(ay1, by1);
-  const ix2 = Math.min(ax2, bx2);
-  const iy2 = Math.min(ay2, by2);
-  const intersection = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
-  const areaA = Math.max(0, ax2 - ax1) * Math.max(0, ay2 - ay1);
-  const areaB = Math.max(0, bx2 - bx1) * Math.max(0, by2 - by1);
-  const union = areaA + areaB - intersection;
-  return union > 0 ? intersection / union : 0;
-}
-
-function mergeRegionColors(...colorLists) {
-  return buildColorClusters(colorLists.flat().filter(Boolean))
-    .map((c) => compactRegionColor({ hex: c.base, pct: c.pct }))
-    .filter(Boolean);
-}
-
-function isHeadwearAccessoryDinoRegion(region = {}) {
-  if (region?.zone !== "accessory_jewelry") return false;
-  const text = [
-    region?.label,
-    region?.category,
-    region?.accessory,
-    region?.display_label,
-    region?.segment_label,
-    region?.name,
-  ].map(normalizeText).filter(Boolean).join(" ");
-  return /\b(hat|cap|beanie|headwear|head\s*wear|beret|visor|helmet|bonnet|fedora|bucket\s*hat|baseball\s*cap|skullcap|toque)\b/.test(text);
-}
-
-function getStrongDominantDinoRegionColor(region = {}) {
-  const dominantHex = safeHex(region?.dominant_hex);
-  const topColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
-  const topHex = safeHex(topColor?.hex);
-  const topPct = normalizeColorPct(topColor?.pct);
-  if (!dominantHex || !topHex || topPct < 0.65) return null;
-  const closeToDominant = topHex === dominantHex || colorDistanceLab(topHex, dominantHex) <= 10;
-  if (!closeToDominant) return null;
-  return compactRegionColor({ ...topColor, hex: dominantHex, pct: topPct });
-}
-
-function preferPreservedRegionColorFirst(regionColors = [], preservedColor = null) {
-  const compactPreserved = compactRegionColor(preservedColor);
-  if (!compactPreserved?.hex) return regionColors;
-  return [
-    compactPreserved,
-    ...(regionColors || []).filter((color) => safeHex(color?.hex) !== compactPreserved.hex),
-  ];
-}
-
-function dedupeDinoRegionsByZoneAndOverlap(regions = [], overlapThreshold = 0.72) {
-  const merged = [];
-  for (const region of regions || []) {
-    const zone = region?.zone || "unknown";
-    const bbox = getRegionBBox(region);
-    const matchIndex = merged.findIndex((candidate) =>
-      candidate?.zone === zone && bbox && getRegionBBox(candidate) && getBboxIoU(bbox, getRegionBBox(candidate)) >= overlapThreshold
-    );
-
-    if (matchIndex < 0) {
-      merged.push(region);
-      continue;
-    }
-
-    const current = merged[matchIndex];
-    const best = Number(region?.confidence || 0) > Number(current?.confidence || 0) ? region : current;
-    const other = best === region ? current : region;
-    const mergedShape = { ...other, ...best };
-    const regionColors = mergeRegionColors(current?.region_colors || [], region?.region_colors || []);
-    const strongDominantCandidates = [current, region]
-      .map((candidate) => ({
-        region: candidate,
-        color: getStrongDominantDinoRegionColor(candidate),
-      }))
-      .filter((candidate) => candidate.color?.hex)
-      .sort((a, b) => normalizeColorPct(b.color?.pct) - normalizeColorPct(a.color?.pct));
-    const preservedDominant = isHeadwearAccessoryDinoRegion({ ...mergedShape, zone })
-      ? strongDominantCandidates[0] || null
-      : null;
-    const mergedRegionColors = preferPreservedRegionColorFirst(regionColors, preservedDominant?.color);
-    const dominant = preservedDominant?.color?.hex || mergedRegionColors[0]?.hex || safeHex(best?.dominant_hex || other?.dominant_hex || "") || null;
-
-    merged[matchIndex] = {
-      ...mergedShape,
-      confidence: Math.max(Number(current?.confidence || 0), Number(region?.confidence || 0)),
-      coverage: round2(Math.max(Number(current?.coverage || 0), Number(region?.coverage || 0))),
-      dominant_hex: dominant,
-      region_colors: mergedRegionColors,
-      mask_geometry: best?.mask_geometry || other?.mask_geometry || null,
-      duplicate_detection_ids: [
-        ...(Array.isArray(current?.duplicate_detection_ids) ? current.duplicate_detection_ids : [current?.id].filter(Boolean)),
-        region?.id,
-      ].filter(Boolean),
-      ...(preservedDominant?.color?.hex ? {
-        dedupe_preserved_dominant_hex: preservedDominant.color.hex,
-        dedupe_preserved_from_id: preservedDominant.region?.id || null,
-        dedupe_preservation_reason: "headwear_accessory_confident_top_color",
-      } : {}),
-    };
-  }
-  return merged;
-}
-
-function buildDinoSegmentedRegions(detections = []) {
-  if (!Array.isArray(detections) || !detections.length) return [];
-
-  return detections
-    .map((detection, idx) => {
-      if (isIgnoredDinoLabel(detection?.label)) return null;
-
-      const mapping = mapDinoLabel(detection?.label);
-      if (!mapping?.zone || mapping.zone === "unknown") return null;
-
-      const confidence = Math.round(clamp100(Number(detection?.confidence || 0) * 100));
-      if (confidence < Math.round(clamp100(Number(mapping?.confidence_floor || 0) * 100))) return null;
-
-      const bbox = detection?.bbox || null;
-      const bboxArea = getDinoBboxArea(bbox);
-
-      return {
-        id: `dino_${idx + 1}`,
-        segment_label: mapping.label || detection?.label || `dino_${idx + 1}`,
-        label: detection?.label || mapping.label || "object",
-        category: mapping.category || "piece",
-        zone: mapping.zone,
-        confidence,
-        source_type: "grounding_dino",
-        bbox,
-        coverage: bboxArea,
-        dominant_hex: null,
-        region_colors: [],
-        mask_geometry: bbox ? { bbox, coverage: bboxArea } : null,
-        color_debug: null,
-      };
-    })
-    .filter(Boolean);
-}
-
-function buildDinoGarmentRegions(detections = []) {
-  return buildDinoSegmentedRegions(detections);
-}
-
-
-function getGarmentZoneSource(samRegions = [], dinoRegions = []) {
-  const hasSam = Array.isArray(samRegions) && samRegions.length > 0;
-  const hasDino = Array.isArray(dinoRegions) && dinoRegions.length > 0;
-  if (hasSam && hasDino) return "hybrid";
-  if (hasSam) return "sam";
-  if (hasDino) return "dino";
-  return "none";
-}
-
-function parseGroundingDinoOutputToDetections(output) {
-  if (!output) return [];
-
-  const boxes = Array.isArray(output?.boxes) ? output.boxes : [];
-  const labels = Array.isArray(output?.labels)
-    ? output.labels
-    : Array.isArray(output?.phrases)
-      ? output.phrases
-      : Array.isArray(output?.detected_labels)
-        ? output.detected_labels
-        : [];
-  const scores = Array.isArray(output?.scores)
-    ? output.scores
-    : Array.isArray(output?.logits)
-      ? output.logits
-      : Array.isArray(output?.confidences)
-        ? output.confidences
-        : [];
-
-  const rows = Array.isArray(output)
-    ? output
-    : Array.isArray(output?.detections)
-      ? output.detections
-      : Array.isArray(output?.predictions)
-        ? output.predictions
-        : boxes.map((box, idx) => ({
-            bbox: box,
-            label: labels[idx],
-            confidence: scores[idx],
-          }));
-
-  return rows
-    .map((row, idx) => {
-      const label = String(row?.label || row?.class || row?.name || row?.phrase || row?.text || labels[idx] || "object")
-        .trim()
-        .toLowerCase();
-      const confidenceValue = row?.confidence ?? row?.score ?? row?.logit ?? row?.probability ?? scores[idx] ?? 0;
-      const confidence = clamp01(Number(confidenceValue));
-      const bbox = normalizeGroundingDinoBbox(row?.bbox || row?.box || row?.bounding_box || row?.bounds || boxes[idx]);
-
-      return {
-        label: label || "object",
-        confidence: round2(confidence),
-        bbox,
-      };
-    })
-    .filter((detection) => {
-      if (!detection) return false;
-      if (!detection.bbox) return true;
-      return Number(detection.bbox.width || 0) > 0 && Number(detection.bbox.height || 0) > 0;
-    });
-}
-
-function parseSamOutputToRegions(output) {
-  if (!output) return [];
-
-  if (Array.isArray(output?.individual_masks)) {
-    return output.individual_masks.map((maskUrl, idx) => ({
-      id: `sam_${idx + 1}`,
-      segment_label: `segment_${idx + 1}`,
-      zone: "unknown",
-      confidence: 70,
-      coverage: 0.2,
-      mask_url: maskUrl,
-      dominant_hex: null,
-      region_colors: [],
-      source_type: "sam_segment",
-    }));
-  }
-
-  const rows = Array.isArray(output)
-    ? output
-    : Array.isArray(output?.segments)
-      ? output.segments
-      : Array.isArray(output?.predictions)
-        ? output.predictions
-        : [];
-
-  return rows
-    .map((row, idx) => {
-      const segmentLabel = String(
-        row?.label || row?.class || row?.name || row?.segment_label || `segment_${idx + 1}`
-      );
-      const zone = getZoneFromLabel(segmentLabel);
-
-      return {
-        id: row?.id || `sam_${idx + 1}`,
-        segment_label: segmentLabel,
-        zone,
-        confidence: Math.round(clamp100(Number(row?.confidence || row?.score || 65))),
-        coverage: clamp01(Number(row?.coverage || row?.area || row?.weight || 0.2)),
-        mask_url: row?.mask || row?.mask_url || row?.url || null,
-        dominant_hex: safeHex(row?.dominant_hex || row?.hex || row?.color || ""),
-        region_colors: [],
-        source_type: "sam_segment",
-      };
-    })
-    .filter((r) => r.zone !== "unknown" || r.mask_url || r.dominant_hex);
-}
-
-async function fetchImageBuffer(url) {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`Failed to fetch image (${resp.status})`);
-  const arr = await resp.arrayBuffer();
-  return Buffer.from(arr);
-}
-
-function decodeImageRgba(buffer, urlHint = "") {
-  const hint = String(urlHint || "").toLowerCase();
-
-  if (hint.includes(".png")) {
-    try {
-      const png = PNG.sync.read(buffer);
-      return { width: png.width, height: png.height, data: png.data };
-    } catch {}
-  }
-
-  try {
-    const jpg = jpeg.decode(buffer, { useTArray: true });
-    return { width: jpg.width, height: jpg.height, data: jpg.data };
-  } catch {}
-
-  try {
-    const png = PNG.sync.read(buffer);
-    return { width: png.width, height: png.height, data: png.data };
-  } catch {}
-
-  throw new Error("Unsupported image format");
-}
-
-function getMaskStrength(maskRgba, idx) {
-  const alpha = Number(maskRgba[idx + 3] || 0);
-  if (alpha > 0) return alpha;
-  return (Number(maskRgba[idx] || 0) + Number(maskRgba[idx + 1] || 0) + Number(maskRgba[idx + 2] || 0)) / 3;
-}
-
-function extractMaskedRegionColors(baseImage, maskImage, limit = 6) {
-  const baseW = Number(baseImage?.width || 0);
-  const baseH = Number(baseImage?.height || 0);
-  const maskW = Number(maskImage?.width || 0);
-  const maskH = Number(maskImage?.height || 0);
-  if (!baseW || !baseH || !maskW || !maskH) return [];
-
-  const buckets = new Map();
-  let pixelCount = 0;
-
-  for (let my = 0; my < maskH; my += 1) {
-    for (let mx = 0; mx < maskW; mx += 1) {
-      const mIdx = (my * maskW + mx) * 4;
-      if (getMaskStrength(maskImage.data, mIdx) < 25) continue;
-
-      const bx = Math.max(0, Math.min(baseW - 1, Math.floor((mx / maskW) * baseW)));
-      const by = Math.max(0, Math.min(baseH - 1, Math.floor((my / maskH) * baseH)));
-      const bIdx = (by * baseW + bx) * 4;
-      const alpha = Number(baseImage.data[bIdx + 3] || 0);
-      if (alpha < 20) continue;
-
-      const r = Number(baseImage.data[bIdx] || 0);
-      const g = Number(baseImage.data[bIdx + 1] || 0);
-      const b = Number(baseImage.data[bIdx + 2] || 0);
-      const key = `${Math.round(r / 16)}_${Math.round(g / 16)}_${Math.round(b / 16)}`;
-
-      if (!buckets.has(key)) buckets.set(key, { count: 0, rSum: 0, gSum: 0, bSum: 0 });
-      const row = buckets.get(key);
-      row.count += 1;
-      row.rSum += r;
-      row.gSum += g;
-      row.bSum += b;
-      pixelCount += 1;
-    }
-  }
-
-  if (!pixelCount) return [];
-
-  return Array.from(buckets.values())
-    .map((row) => {
-      const hex = safeHex(
-        chroma(
-          Math.round(row.rSum / row.count),
-          Math.round(row.gSum / row.count),
-          Math.round(row.bSum / row.count)
-        ).hex()
-      );
-      return {
-        hex,
-        pct: row.count / pixelCount,
-      };
-    })
-    .filter((c) => !!c.hex)
-    .sort((a, b) => b.pct - a.pct)
-    .slice(0, limit);
-}
-
-
-function getPixelBboxFromDinoBbox(bbox = null, imageWidth = 0, imageHeight = 0) {
-  if (!bbox || !imageWidth || !imageHeight) return null;
-  const xMin = Number(bbox.x_min);
-  const yMin = Number(bbox.y_min);
-  const xMax = Number(bbox.x_max);
-  const yMax = Number(bbox.y_max);
-  if (![xMin, yMin, xMax, yMax].every(Number.isFinite)) return null;
-  const normalized = xMin >= 0 && yMin >= 0 && xMax <= 1 && yMax <= 1;
-  const left = normalized ? xMin * imageWidth : xMin;
-  const top = normalized ? yMin * imageHeight : yMin;
-  const right = normalized ? xMax * imageWidth : xMax;
-  const bottom = normalized ? yMax * imageHeight : yMax;
-  const x1 = Math.max(0, Math.min(imageWidth - 1, Math.floor(Math.min(left, right))));
-  const y1 = Math.max(0, Math.min(imageHeight - 1, Math.floor(Math.min(top, bottom))));
-  const x2 = Math.max(0, Math.min(imageWidth, Math.ceil(Math.max(left, right))));
-  const y2 = Math.max(0, Math.min(imageHeight, Math.ceil(Math.max(top, bottom))));
-  if (x2 <= x1 || y2 <= y1) return null;
-  return { x1, y1, x2, y2, width: x2 - x1, height: y2 - y1 };
-}
-
-function isNearWhiteOrBlackPixel(r, g, b) {
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  return max >= 242 || (max <= 18 && max - min <= 12);
-}
-
-function getDinoSamplePixelBbox(pixelBbox, zone = "", category = "") {
-  return getDinoSamplePixelBboxes(pixelBbox, zone, category)[0];
-}
-
-function buildRelativePixelBbox(pixelBbox, xStart, xEnd, yStart, yEnd, label = "center") {
-  const x1 = Math.max(pixelBbox.x1, Math.min(pixelBbox.x2 - 1, Math.floor(pixelBbox.x1 + pixelBbox.width * xStart)));
-  const x2 = Math.max(x1 + 1, Math.min(pixelBbox.x2, Math.ceil(pixelBbox.x1 + pixelBbox.width * xEnd)));
-  const y1 = Math.max(pixelBbox.y1, Math.min(pixelBbox.y2 - 1, Math.floor(pixelBbox.y1 + pixelBbox.height * yStart)));
-  const y2 = Math.max(y1 + 1, Math.min(pixelBbox.y2, Math.ceil(pixelBbox.y1 + pixelBbox.height * yEnd)));
-  return { label, x1, y1, x2, y2, width: x2 - x1, height: y2 - y1 };
-}
-
-function getDinoSamplePixelBboxes(pixelBbox, zone = "", category = "") {
-  const zoneKey = normalizeText(zone);
-  const categoryKey = normalizeText(category);
-
-  if (zoneKey === "lower_garment") {
-    return [
-      buildRelativePixelBbox(pixelBbox, 0.24, 0.76, 0.18, 0.46, "upper-center"),
-      buildRelativePixelBbox(pixelBbox, 0.10, 0.48, 0.34, 0.70, "left-center"),
-      buildRelativePixelBbox(pixelBbox, 0.52, 0.90, 0.34, 0.70, "right-center"),
-      buildRelativePixelBbox(pixelBbox, 0.26, 0.74, 0.60, 0.92, "lower-center"),
-    ];
-  }
-
-  let xStart = 0.18;
-  let xEnd = 0.82;
-  let yStart = 0.15;
-  let yEnd = 0.85;
-
-  if (zoneKey === "upper_garment") {
-    xStart = 0.24;
-    xEnd = 0.76;
-    yStart = 0.12;
-    yEnd = 0.75;
-  } else if (zoneKey === "footwear") {
-    xStart = 0.14;
-    xEnd = 0.86;
-    yStart = 0.30;
-    yEnd = 0.92;
-  } else if (zoneKey === "bag") {
-    xStart = 0.15;
-    xEnd = 0.85;
-    yStart = 0.15;
-    yEnd = 0.85;
-  } else if (zoneKey === "accessory_jewelry" || categoryKey.includes("hat") || categoryKey.includes("accessory")) {
-    xStart = 0.20;
-    xEnd = 0.80;
-    yStart = 0.20;
-    yEnd = 0.80;
-  }
-
-  return [buildRelativePixelBbox(pixelBbox, xStart, xEnd, yStart, yEnd)];
-}
-
-function getRgbTraits(r, g, b) {
-  const [h, s, l] = chroma(r, g, b).hsl();
-  return {
-    hue: Number.isFinite(h) ? h : 0,
-    saturation: Number.isFinite(s) ? s : 0,
-    lightness: Number.isFinite(l) ? l : 0,
-  };
-}
-
-function isSkinLikePixel(r, g, b) {
-  const { hue, saturation, lightness } = getRgbTraits(r, g, b);
-  return hue >= 8 && hue <= 48 && saturation >= 0.16 && saturation <= 0.68 && lightness >= 0.32 && lightness <= 0.82 && r > b && g > b * 0.72;
-}
-
-function isChromaticGreenOrOlive(color) {
-  const hex = safeHex(color?.hex || color || "");
-  if (!hex) return false;
-  const [lightness, chromaValue, hue] = chroma(hex).lch();
-  return Number.isFinite(hue) && Number.isFinite(chromaValue) && hue >= 55 && hue <= 170 && chromaValue >= 8 && lightness <= 62;
-}
-
-function isNeutralDarkColor(color) {
-  const hex = safeHex(color?.hex || color || "");
-  if (!hex) return false;
-  const [hue, saturation, lightness] = chroma(hex).hsl();
-  const [, chromaValue] = chroma(hex).lch();
-  return lightness <= 0.30 && (!Number.isFinite(hue) || saturation <= 0.18 || chromaValue < 8);
-}
-
-function sortLowerGarmentColors(colorRows = [], context = {}) {
-  const repeatedGreenSupport = Number(context?.greenWindowSupport || 0) >= 2;
-  const greenMultiplier = repeatedGreenSupport ? 2.15 : 1.55;
-  return [...colorRows].sort((a, b) => {
-    const aGreen = isChromaticGreenOrOlive(a);
-    const bGreen = isChromaticGreenOrOlive(b);
-    const aNeutralDark = isNeutralDarkColor(a);
-    const bNeutralDark = isNeutralDarkColor(b);
-    const aScore = a.pct * (aGreen ? greenMultiplier : 1) * (aNeutralDark ? 0.72 : 1);
-    const bScore = b.pct * (bGreen ? greenMultiplier : 1) * (bNeutralDark ? 0.72 : 1);
-    return bScore - aScore;
-  });
-}
-
-function isHeadwearDinoContext(context = {}) {
-  const values = [
-    context?.zone,
-    context?.category,
-    context?.label,
-    context?.object_type,
-    context?.accessory_type,
-  ].map(normalizeText);
-  return values.some((value) => /\b(hat|cap|beanie|headwear)\b/.test(value));
-}
-
-function getHeadwearColorBiasScore(cluster = {}) {
-  const hex = safeHex(cluster?.base || cluster?.hex || "");
-  if (!hex) return 0;
-  const hue = getHue(hex);
-  const sat = getSat(hex);
-  const light = getLight(hex);
-  const [, chromaValue] = chroma(hex).lch();
-  const pct = Number(cluster?.pct || 0);
-  const strongObjectColor = sat >= 0.48 && chromaValue >= 34 && light >= 0.18 && light <= 0.78;
-  const saturatedFabricHue =
-    (hue >= 345 || hue <= 25) || // red / rose
-    (hue >= 185 && hue <= 260) || // blue
-    (hue >= 35 && hue <= 175) || // yellow / green
-    (hue >= 275 && hue <= 335); // purple / magenta
-  if (!strongObjectColor || !saturatedFabricHue || pct < 0.06) return 0;
-  return pct * (1 + sat) * (1 + Math.min(chromaValue, 80) / 80);
-}
-
-function isMutedSkinLikeHeadwearCluster(cluster = {}) {
-  const hex = safeHex(cluster?.base || cluster?.hex || "");
-  if (!hex) return false;
-  const hue = getHue(hex);
-  const sat = getSat(hex);
-  const light = getLight(hex);
-  const [, chromaValue] = chroma(hex).lch();
-  return hue >= 335 || hue <= 55
-    ? sat <= 0.34 && chromaValue <= 32 && light >= 0.34 && light <= 0.68
-    : false;
-}
-
-function applyHeadwearDinoColorBias(clusters = [], context = {}) {
-  const preBiasTopHex = safeHex(clusters?.[0]?.base || clusters?.[0]?.hex || "");
-  const debug = {
-    headwear_color_bias_applied: false,
-    pre_bias_top_hex: preBiasTopHex || null,
-    post_bias_top_hex: preBiasTopHex || null,
-    reason: isHeadwearDinoContext(context) ? "no_meaningful_saturated_headwear_cluster" : "not_headwear_context",
-  };
-  if (!isHeadwearDinoContext(context) || clusters.length < 2) return { clusters, debug };
-
-  const top = clusters[0];
-  const topPct = Number(top?.pct || 0);
-  const topIsMutedSkinLike = isMutedSkinLikeHeadwearCluster(top);
-  const candidate = clusters
-    .slice(1)
-    .map((cluster) => ({ cluster, score: getHeadwearColorBiasScore(cluster) }))
-    .filter((row) => row.score > 0 && Number(row.cluster?.pct || 0) >= Math.max(0.06, topPct * (topIsMutedSkinLike ? 0.22 : 0.34)))
-    .sort((a, b) => b.score - a.score)[0]?.cluster;
-
-  if (!candidate) return { clusters, debug };
-  const candidateHex = safeHex(candidate?.base || candidate?.hex || "");
-  if (!candidateHex || candidateHex === preBiasTopHex) return { clusters, debug };
-
-  const biasedClusters = [candidate, ...clusters.filter((cluster) => cluster !== candidate)];
-  return {
-    clusters: biasedClusters,
-    debug: {
-      headwear_color_bias_applied: true,
-      pre_bias_top_hex: preBiasTopHex || null,
-      post_bias_top_hex: candidateHex,
-      reason: topIsMutedSkinLike
-        ? "promoted_saturated_headwear_cluster_over_muted_skin_like_top"
-        : "promoted_meaningful_saturated_headwear_cluster",
-    },
-  };
-}
-
-function getDinoZoneColorWeight(sample, zone = "") {
-  const zoneKey = normalizeText(zone);
-  const { hue, saturation, lightness } = sample;
-  let weight = 1;
-  const greenOrBrown = (hue >= 65 && hue <= 165 && saturation >= 0.18 && lightness <= 0.55) || (hue >= 18 && hue <= 58 && saturation >= 0.22 && lightness <= 0.58);
-  const warmNeutral = hue >= 24 && hue <= 62 && saturation >= 0.10 && saturation <= 0.48 && lightness >= 0.38 && lightness <= 0.78;
-
-  if (["accessory_jewelry", "lower_garment", "hat"].includes(zoneKey) && greenOrBrown) weight *= zoneKey === "lower_garment" ? 1.6 : 1.35;
-  if (zoneKey === "upper_garment" && warmNeutral) weight *= 1.35;
-  if (["bag", "footwear"].includes(zoneKey) && hue >= 15 && hue <= 55 && saturation >= 0.20 && lightness <= 0.62) weight *= 1.25;
-  if (sample.bg) weight *= 0.35;
-  if (sample.skin) weight *= 0.2;
-  return weight;
-}
-
-function extractDinoBboxRegionColors(baseImage, bbox, limit = 6, context = {}) {
-  const baseW = Number(baseImage?.width || 0);
-  const baseH = Number(baseImage?.height || 0);
-  const data = baseImage?.data;
-  const pixelBbox = getPixelBboxFromDinoBbox(bbox, baseW, baseH);
-  if (!data || !pixelBbox) return { colors: [], debug: null };
-
-  const zone = context?.zone || "";
-  const zoneKey = normalizeText(zone);
-  const previousSampleBbox = zoneKey === "lower_garment"
-    ? buildRelativePixelBbox(pixelBbox, 0.24, 0.76, 0.28, 0.86, "previous-center-crop")
-    : getDinoSamplePixelBbox(pixelBbox, zone, context?.category || context?.label || "");
-  const sampleBboxes = getDinoSamplePixelBboxes(pixelBbox, zone, context?.category || context?.label || "");
-  const samples = [];
-  const lowerWindowStats = [];
-  let backgroundLike = 0;
-
-  for (const sampleBbox of sampleBboxes) {
-    const stride = Math.max(1, Math.floor(Math.sqrt((sampleBbox.width * sampleBbox.height) / 3000)));
-    const windowSamples = [];
-    for (let y = sampleBbox.y1; y < sampleBbox.y2; y += stride) {
-      for (let x = sampleBbox.x1; x < sampleBbox.x2; x += stride) {
-        const idx = (y * baseW + x) * 4;
-        const alpha = Number(data[idx + 3] ?? 255);
-        if (alpha < 20) continue;
-        const r = Number(data[idx] || 0);
-        const g = Number(data[idx + 1] || 0);
-        const b = Number(data[idx + 2] || 0);
-        const traits = getRgbTraits(r, g, b);
-        const bg = isNearWhiteOrBlackPixel(r, g, b);
-        const skin = isSkinLikePixel(r, g, b);
-        if (bg) backgroundLike += 1;
-        const sample = { r, g, b, bg, skin, ...traits };
-        samples.push(sample);
-        windowSamples.push(sample);
-      }
-    }
-    if (zoneKey === "lower_garment") {
-      const usableWindow = windowSamples.filter((sample) => !sample.bg && !sample.skin);
-      const greenCount = usableWindow.filter((sample) =>
-        sample.hue >= 65 && sample.hue <= 165 && sample.saturation >= 0.18 && sample.lightness <= 0.55
-      ).length;
-      lowerWindowStats.push({
-        label: sampleBbox.label || null,
-        sample_count: usableWindow.length,
-        green_share: usableWindow.length ? round2(greenCount / usableWindow.length) : 0,
-      });
-    }
-  }
-  const greenWindowSupport = lowerWindowStats.filter((row) => row.sample_count >= 8 && row.green_share >= 0.12).length;
-
-  if (!samples.length) {
-    return {
-      colors: [],
-      debug: {
-        color_sample_bbox: sampleBboxes[0],
-        color_sample_bboxes: sampleBboxes,
-        sample_windows_before: zoneKey === "lower_garment" ? [previousSampleBbox] : null,
-        sample_windows_after: zoneKey === "lower_garment" ? sampleBboxes : null,
-        previous_color_sample_bbox: zoneKey === "lower_garment" ? previousSampleBbox : null,
-        sample_count: 0,
-        filtered_sample_count: 0,
-        dominant_hex_before_cluster: null,
-        expected_dominant_color: null,
-      },
-    };
-  }
-  const nonBgSamples = samples.filter((sample) => !sample.bg);
-  const nonSkinSamples = samples.filter((sample) => !sample.skin);
-  let usableSamples = nonBgSamples.length >= Math.max(20, samples.length * 0.08) ? nonBgSamples : samples;
-  const nonSkinUsable = usableSamples.filter((sample) => !sample.skin);
-  if (!["skin", "face", "body"].includes(normalizeText(zone)) && nonSkinUsable.length >= Math.max(20, usableSamples.length * 0.12)) {
-    usableSamples = nonSkinUsable;
-  } else if (nonSkinSamples.length >= Math.max(20, samples.length * 0.12)) {
-    usableSamples = nonSkinSamples;
-  }
-
-  const buckets = new Map();
-
-  for (const sample of usableSamples) {
-    const key = `${Math.round(sample.r / 16)}_${Math.round(sample.g / 16)}_${Math.round(sample.b / 16)}`;
-    if (!buckets.has(key)) buckets.set(key, { count: 0, weight: 0, rSum: 0, gSum: 0, bSum: 0 });
-    const row = buckets.get(key);
-    const weight = getDinoZoneColorWeight(sample, zone);
-    row.count += 1;
-    row.weight += weight;
-    row.rSum += sample.r * weight;
-    row.gSum += sample.g * weight;
-    row.bSum += sample.b * weight;
-  }
-
-  const totalWeight = Array.from(buckets.values()).reduce((sum, row) => sum + row.weight, 0) || usableSamples.length;
-  const colorRows = Array.from(buckets.values())
-    .map((row) => ({
-      hex: safeHex(chroma(Math.round(row.rSum / Math.max(row.weight, 0.0001)), Math.round(row.gSum / Math.max(row.weight, 0.0001)), Math.round(row.bSum / Math.max(row.weight, 0.0001))).hex()),
-      pct: row.weight / totalWeight,
-      count: row.count,
-    }))
-    .filter((row) => !!row.hex)
-    .sort((a, b) => b.pct - a.pct);
-
-  const rankedColorRows = zoneKey === "lower_garment" ? sortLowerGarmentColors(colorRows, { greenWindowSupport }) : colorRows;
-  const clusters = buildColorClusters(rankedColorRows);
-  const rankedClustersBeforeHeadwearBias = zoneKey === "lower_garment" ? sortLowerGarmentColors(clusters.map((cluster) => ({ ...cluster, hex: cluster.base })), { greenWindowSupport }) : clusters;
-  const { clusters: rankedClusters, debug: headwearColorBiasDebug } = applyHeadwearDinoColorBias(rankedClustersBeforeHeadwearBias, context);
-  const colors = rankedClusters.slice(0, limit).map((cluster) => ({
-    hex: safeHex(cluster.base),
-    pct: round2(cluster.pct),
-    name: getColorName(cluster.base),
-  })).filter((color) => !!color.hex);
-  return {
-    colors,
-    debug: {
-      color_sample_bbox: sampleBboxes[0],
-      color_sample_bboxes: sampleBboxes,
-      sample_windows_before: zoneKey === "lower_garment" ? [previousSampleBbox] : null,
-      sample_windows_after: zoneKey === "lower_garment" ? sampleBboxes : null,
-      previous_color_sample_bbox: zoneKey === "lower_garment" ? previousSampleBbox : null,
-      lower_window_stats: zoneKey === "lower_garment" ? lowerWindowStats : null,
-      green_window_support: zoneKey === "lower_garment" ? greenWindowSupport : 0,
-      sample_count: samples.length,
-      filtered_sample_count: usableSamples.length,
-      dominant_hex_before_cluster: colorRows[0]?.hex || null,
-      expected_dominant_color: zoneKey === "lower_garment" ? (colors[0]?.hex || null) : null,
-      ...headwearColorBiasDebug,
-    },
-  };
-}
-
-function chooseDinoBboxDominantHex(region = {}, sampledRegionColors = []) {
-  const existingDominantHex = safeHex(region?.dominant_hex || "");
-  const existingTopColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
-  const existingTopPct = Number(existingTopColor?.pct || 0);
-  const sampledTopColor = Array.isArray(sampledRegionColors) ? sampledRegionColors[0] : null;
-  const sampledTopHex = safeHex(sampledTopColor?.hex || "");
-  const sampledTopPct = Number(sampledTopColor?.pct || 0);
-
-  let dominantHex = sampledTopHex || existingDominantHex || null;
-  let preservedExisting = false;
-  let reason = sampledTopHex ? "sampled_top_default" : "existing_only_or_no_sample";
-
-  if (existingDominantHex && existingTopPct >= 0.75) {
-    dominantHex = existingDominantHex;
-    preservedExisting = true;
-    reason = "existing_top_pct_strong_ge_0_75";
-  } else if (!existingDominantHex) {
-    dominantHex = sampledTopHex || null;
-    reason = "existing_dominant_missing";
-  } else if (existingTopPct < 0.55) {
-    dominantHex = sampledTopHex || existingDominantHex;
-    preservedExisting = !sampledTopHex;
-    reason = sampledTopHex ? "existing_top_pct_weak_lt_0_55" : "existing_top_pct_weak_but_sample_missing";
-  } else if (sampledTopHex && sampledTopPct >= existingTopPct + 0.10) {
-    dominantHex = sampledTopHex;
-    reason = "sampled_top_pct_clearly_stronger_than_existing_by_0_10";
-  } else {
-    dominantHex = existingDominantHex;
-    preservedExisting = true;
-    reason = "existing_top_pct_not_weaker_than_sampled";
-  }
-
-  return {
-    dominantHex,
-    debug: {
-      existing_dominant_hex: existingDominantHex || null,
-      existing_top_pct: Number.isFinite(existingTopPct) ? round2(existingTopPct) : 0,
-      sampled_top_hex: sampledTopHex || null,
-      sampled_top_pct: Number.isFinite(sampledTopPct) ? round2(sampledTopPct) : 0,
-      preserved_existing: preservedExisting,
-      reason,
-    },
-  };
-}
-
-function extractColorsFromDinoBboxes(imageBuffer, dinoRegions = []) {
-  if (!imageBuffer || !Array.isArray(dinoRegions) || !dinoRegions.length) return dinoRegions || [];
-  let baseImage;
-  try {
-    baseImage = decodeImageRgba(imageBuffer);
-  } catch {
-    return dinoRegions;
-  }
-
-  return dinoRegions.map((region) => {
-    if (!region?.bbox) return region;
-    const extraction = extractDinoBboxRegionColors(baseImage, region.bbox, 6, {
-      zone: region?.zone,
-      category: region?.category,
-      label: region?.label || region?.segment_label,
-      object_type: region?.object_type,
-      accessory_type: region?.accessory_type,
-    });
-    const regionColors = extraction.colors || [];
-    if (!regionColors.length) return region;
-    const { dominantHex, debug: dominantHexPreservation } = chooseDinoBboxDominantHex(region, regionColors);
-    return {
-      ...region,
-      dominant_hex: dominantHex || null,
-      region_colors: regionColors,
-      color_debug: {
-        ...(region?.color_debug || {}),
-        dino_bbox_sampling: {
-          ...extraction.debug,
-          dominant_hex_preservation: dominantHexPreservation,
-        },
-      },
-      coverage: round2(Math.max(Number(region?.coverage || 0), getDinoBboxArea(region.bbox))),
-      mask_geometry: region?.mask_geometry || { bbox: region.bbox, coverage: getDinoBboxArea(region.bbox) },
-    };
-  });
-}
-
-function extractMaskGeometry(maskImage) {
-  const maskW = Number(maskImage?.width || 0);
-  const maskH = Number(maskImage?.height || 0);
-  if (!maskW || !maskH) return null;
-
-  const isOn = (x, y) => {
-    if (x < 0 || y < 0 || x >= maskW || y >= maskH) return false;
-    const idx = (y * maskW + x) * 4;
-    return getMaskStrength(maskImage.data, idx) >= 25;
-  };
-
-  let onCount = 0;
-  let sumX = 0;
-  let sumY = 0;
-  let minX = maskW;
-  let minY = maskH;
-  let maxX = -1;
-  let maxY = -1;
-  let boundaryPx = 0;
-  let imageEdgePx = 0;
-
-  for (let y = 0; y < maskH; y += 1) {
-    for (let x = 0; x < maskW; x += 1) {
-      if (!isOn(x, y)) continue;
-      onCount += 1;
-      sumX += x;
-      sumY += y;
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-
-      const touchesImageEdge = x === 0 || y === 0 || x === maskW - 1 || y === maskH - 1;
-      if (touchesImageEdge) imageEdgePx += 1;
-
-      if (!isOn(x - 1, y) || !isOn(x + 1, y) || !isOn(x, y - 1) || !isOn(x, y + 1)) {
-        boundaryPx += 1;
-      }
-    }
-  }
-
-  if (!onCount || maxX < minX || maxY < minY) return null;
-
-  const bboxW = maxX - minX + 1;
-  const bboxH = maxY - minY + 1;
-  const bboxArea = bboxW * bboxH;
-
-  return {
-    coverage: clamp01(onCount / (maskW * maskH)),
-    centroid_x: clamp01(sumX / onCount / maskW),
-    centroid_y: clamp01(sumY / onCount / maskH),
-    bbox: {
-      x: clamp01(minX / maskW),
-      y: clamp01(minY / maskH),
-      w: clamp01(bboxW / maskW),
-      h: clamp01(bboxH / maskH),
-    },
-    bbox_area: clamp01(bboxArea / (maskW * maskH)),
-    aspect_ratio: bboxH > 0 ? bboxW / bboxH : 0,
-    fill_ratio: bboxArea > 0 ? clamp01(onCount / bboxArea) : 0,
-    boundary_ratio: onCount > 0 ? clamp01(boundaryPx / onCount) : 0,
-    image_edge_ratio: onCount > 0 ? clamp01(imageEdgePx / onCount) : 0,
-  };
-}
-
-function mergeNormalizedBBoxes(boxes = []) {
-  const valid = (boxes || []).filter((b) => b && Number.isFinite(b.x) && Number.isFinite(b.y) && Number.isFinite(b.w) && Number.isFinite(b.h));
-  if (!valid.length) return null;
-  const minX = Math.max(0, Math.min(1, Math.min(...valid.map((b) => b.x))));
-  const minY = Math.max(0, Math.min(1, Math.min(...valid.map((b) => b.y))));
-  const maxX = Math.max(0, Math.min(1, Math.max(...valid.map((b) => b.x + b.w))));
-  const maxY = Math.max(0, Math.min(1, Math.max(...valid.map((b) => b.y + b.h))));
-  if (maxX <= minX || maxY <= minY) return null;
-  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
-}
-
-function estimateGenericMaskZone(region = {}, context = {}) {
-  const geometry = region?.mask_geometry || {};
-  const bbox = geometry?.bbox || null;
-  const coverage = Number(geometry?.coverage || region?.coverage || 0);
-  const centroidX = Number(geometry?.centroid_x || (bbox ? bbox.x + bbox.w / 2 : 0.5));
-  const centroidY = Number(geometry?.centroid_y || (bbox ? bbox.y + bbox.h / 2 : 0.5));
-  const boundaryRatio = Number(geometry?.boundary_ratio || 0);
-  const imageEdgeRatio = Number(geometry?.image_edge_ratio || 0);
-  const fillRatio = Number(geometry?.fill_ratio || 0);
-  const aspectRatio = Number(geometry?.aspect_ratio || 0);
-  const colors = Array.isArray(region?.region_colors) ? region.region_colors : [];
-  const hasContrast = hasHighContrastColorSignal(colors);
-  const colorSet = new Set(
-    colors
-      .map((c) => safeHex(c?.hex || ""))
-      .filter(Boolean)
-  );
-  const hasNontrivialRegionColors =
-    colorSet.size >= 2 &&
-    (Number(colors?.[0]?.pct || 0) <= 0.92 || Number(colors?.[1]?.pct || 0) >= 0.05);
-  const bodyBox = context?.body_bbox || null;
-  const outerBox = context?.outer_bbox || null;
-  const torsoTop = bodyBox ? bodyBox.y : 0.2;
-  const headCutoffY = bodyBox ? bodyBox.y + bodyBox.h * 0.32 : 0.32;
-  const centerAligned = centroidX >= 0.2 && centroidX <= 0.8;
-  const compact = coverage >= 0.008 && coverage <= 0.14;
-  const torsoBand = centroidY >= torsoTop && centroidY <= 0.82;
-  const expandsPastBody =
-    !!bodyBox &&
-    !!bbox &&
-    (bbox.x < bodyBox.x - 0.025 ||
-      bbox.x + bbox.w > bodyBox.x + bodyBox.w + 0.025 ||
-      bbox.y < bodyBox.y - 0.025 ||
-      bbox.y + bbox.h > bodyBox.y + bodyBox.h + 0.02);
-  const nearOuterBoundary =
-    !!outerBox &&
-    !!bbox &&
-    Math.abs((bbox.x + bbox.w / 2) - (outerBox.x + outerBox.w / 2)) <= 0.42 &&
-    Math.abs((bbox.y + bbox.h / 2) - (outerBox.y + outerBox.h / 2)) <= 0.42;
-  const hasBoundaryIrregularity = boundaryRatio >= 0.45 || fillRatio <= 0.72;
-  const extremeCoverage = coverage > 0.75;
-  const wholeBodyGarmentCandidate = extremeCoverage && torsoBand && expandsPastBody;
-
-  let eyewearScore = 0;
-  const eyewearWhy = [];
-  if (compact) {
-    eyewearScore += 2;
-    eyewearWhy.push("compact_coverage");
-  }
-  if (centerAligned) {
-    eyewearScore += 1.5;
-    eyewearWhy.push("center_aligned");
-  }
-  if (centroidY <= headCutoffY) {
-    eyewearScore += 2.5;
-    eyewearWhy.push("upper_face_position");
-  }
-  if (hasContrast) {
-    eyewearScore += 1;
-    eyewearWhy.push("lens_like_contrast");
-  }
-  if (aspectRatio >= 0.35 && aspectRatio <= 3.2) eyewearScore += 0.5;
-
-  let outerwearScore = 0;
-  const outerwearWhy = [];
-  if (coverage >= 0.16) {
-    outerwearScore += 2;
-    outerwearWhy.push("large_coverage");
-  }
-  if (torsoBand) {
-    outerwearScore += 1.5;
-    outerwearWhy.push("torso_band");
-  }
-  if (expandsPastBody) {
-    outerwearScore += 2.5;
-    outerwearWhy.push("surrounds_body_silhouette");
-  }
-  if (hasContrast) {
-    outerwearScore += 1;
-    outerwearWhy.push("material_contrast");
-  }
-  if (hasBoundaryIrregularity) {
-    outerwearScore += 0.75;
-    outerwearWhy.push("boundary_irregularity");
-  }
-  if (hasNontrivialRegionColors) {
-    outerwearScore += 0.75;
-    outerwearWhy.push("nontrivial_region_colors");
-  }
-  if (wholeBodyGarmentCandidate) {
-    outerwearScore += 1.5;
-    outerwearWhy.push("whole_body_garment_candidate");
-  }
-
-  const explicitOuterwearAcceptance =
-    coverage >= 0.16 &&
-    torsoBand &&
-    expandsPastBody &&
-    (hasContrast || hasBoundaryIrregularity || hasNontrivialRegionColors);
-
-  let furTrimScore = 0;
-  const furTrimWhy = [];
-  if (coverage >= 0.01 && coverage <= 0.22) {
-    furTrimScore += 1.5;
-    furTrimWhy.push("trim_sized_region");
-  }
-  if (hasContrast) {
-    furTrimScore += 1.5;
-    furTrimWhy.push("light_dark_contrast");
-  }
-  if (boundaryRatio >= 0.45 || fillRatio <= 0.72) {
-    furTrimScore += 2;
-    furTrimWhy.push("irregular_boundary");
-  }
-  if (nearOuterBoundary || expandsPastBody) {
-    furTrimScore += 1.5;
-    furTrimWhy.push("near_outerwear_edge");
-  }
-  if (imageEdgeRatio >= 0.12) {
-    furTrimScore += 0.5;
-    furTrimWhy.push("image_edge_adjacent");
-  }
-
-  const ranked = [
-    { zone: "eyewear", score: eyewearScore, reasons: eyewearWhy },
-    { zone: "outerwear", score: outerwearScore, reasons: outerwearWhy },
-    { zone: "fur_trim", score: furTrimScore, reasons: furTrimWhy },
-  ].sort((a, b) => b.score - a.score);
-  const top = ranked[0];
-  const thresholds = {
-    eyewear: 5,
-    outerwear: explicitOuterwearAcceptance || wholeBodyGarmentCandidate ? 3.75 : 4.5,
-    fur_trim: 4.5,
-  };
-  const thresholdUsed = Number(thresholds[top.zone] || 99);
-  const acceptedByScore = top.score >= thresholdUsed && coverage >= 0.01;
-  const acceptedByOuterwearRule = top.zone === "outerwear" && explicitOuterwearAcceptance;
-  const accepted = acceptedByScore || acceptedByOuterwearRule;
-  const decisionWhyAccepted = [];
-  const decisionWhyRejected = [];
-  if (acceptedByOuterwearRule) decisionWhyAccepted.push("explicit_outerwear_acceptance_rule");
-  if (acceptedByScore) decisionWhyAccepted.push("score_meets_threshold");
-  if (!accepted) {
-    decisionWhyRejected.push("insufficient_contextual_fit");
-    if (top.zone === "outerwear" && explicitOuterwearAcceptance === false) {
-      decisionWhyRejected.push("missing_explicit_outerwear_rule_inputs");
-    }
-    if (top.score < thresholdUsed) {
-      decisionWhyRejected.push(`score_below_threshold:${round2(top.score)}<${round2(thresholdUsed)}`);
-    }
-  }
-  return {
-    estimated_role: top.zone,
-    proposed_zone: accepted ? top.zone : null,
-    accepted,
-    acceptance_reasons: accepted ? top.reasons : [],
-    rejection_reasons: accepted ? [] : [...decisionWhyRejected, ...top.reasons.slice(0, 2)],
-    scores: Object.fromEntries(ranked.map((r) => [r.zone, round2(r.score)])),
-    top_score: round2(top.score),
-    threshold_used: round2(thresholdUsed),
-    expandsPastBody,
-    nearOuterBoundary,
-    body_bbox: bodyBox || null,
-    bbox: bbox || null,
-    decision_formula: {
-      accepted_by_score: acceptedByScore,
-      accepted_by_explicit_outerwear_rule: acceptedByOuterwearRule,
-      explicit_outerwear_acceptance_rule: explicitOuterwearAcceptance,
-      whole_body_garment_candidate: wholeBodyGarmentCandidate,
-      extreme_coverage: extremeCoverage,
-      accepted_why: decisionWhyAccepted,
-      rejected_why: decisionWhyRejected,
-    },
-  };
-}
-
-async function enrichSamRegionsWithMaskedColors(imageUrl, regions = []) {
-  if (!imageUrl || !Array.isArray(regions) || !regions.length) return regions || [];
-
-  let baseImage;
-  try {
-    const baseBuffer = await fetchImageBuffer(imageUrl);
-    baseImage = decodeImageRgba(baseBuffer, imageUrl);
-  } catch {
-    return regions;
-  }
-
-  return Promise.all(
-    regions.map(async (region) => {
-      if (!region?.mask_url) return region;
-
-      try {
-        const maskBuffer = await fetchImageBuffer(region.mask_url);
-        const maskImage = decodeImageRgba(maskBuffer, region.mask_url);
-        const regionColors = extractMaskedRegionColors(baseImage, maskImage, 6);
-        const maskGeometry = extractMaskGeometry(maskImage);
-        const dominantHex = safeHex(regionColors[0]?.hex || region?.dominant_hex || "");
-
-        return {
-          ...region,
-          coverage: round2(Math.max(Number(region?.coverage || 0), Number(maskGeometry?.coverage || 0))),
-          dominant_hex: dominantHex || region?.dominant_hex || null,
-          region_colors: regionColors,
-          mask_geometry: maskGeometry,
-        };
-      } catch {
-        return region;
-      }
-    })
-  );
-}
-
-async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DINO_QUERY) {
-  const token = process.env.REPLICATE_API_TOKEN;
-  if (!token) {
-    console.warn("[GDINO DEBUG] Missing REPLICATE_API_TOKEN: skipping Grounding DINO detection");
-    return {
-      enabled: false,
-      ok: false,
-      reason: "missing_REPLICATE_API_TOKEN",
-      detections: [],
-    };
-  }
-
-  try {
-    const groundingDinoVersion = process.env.REPLICATE_GROUNDING_DINO_VERSION || DEFAULT_REPLICATE_GROUNDING_DINO_VERSION;
-    const createUrl = "https://api.replicate.com/v1/predictions";
-    console.info("[GDINO DEBUG] Starting Grounding DINO detection request", {
-      imageUrl,
-      query,
-      version: groundingDinoVersion,
-      createUrl,
-    });
-
-    let createResp;
-    try {
-      createResp = await replicateRequest(createUrl, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          version: groundingDinoVersion,
-          input: {
-            image: imageUrl,
-            query,
-          },
-        }),
-      });
-    } catch (error) {
-      console.error("[GDINO DEBUG] Grounding DINO create request failed", {
-        failure_stage: "create",
-        message: error?.message || String(error),
-      });
-      throw error;
-    }
-
-    console.info("[GDINO DEBUG] Grounding DINO create response received", {
-      predictionId: createResp?.id || null,
-      status: createResp?.status || "unknown",
-    });
-
-    const statusUrl = createResp?.urls?.get;
-    if (!statusUrl) {
-      console.error("[GDINO DEBUG] Grounding DINO create response missing poll URL", {
-        predictionId: createResp?.id || null,
-      });
-      return { enabled: true, ok: false, reason: "missing_poll_url", detections: [] };
-    }
-
-    const startedAt = Date.now();
-    let prediction = createResp;
-
-    while (Date.now() - startedAt < REPLICATE_SAM_TIMEOUT_MS) {
-      if (["succeeded", "failed", "canceled"].includes(prediction?.status)) break;
-      await new Promise((resolve) => setTimeout(resolve, REPLICATE_SAM_POLL_MS));
-      let retryAttempt = 0;
-      let pollError = null;
-      while (retryAttempt < REPLICATE_SAM_POLL_RETRY_MAX) {
-        try {
-          prediction = await replicateRequest(statusUrl, {
-            method: "GET",
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          pollError = null;
-          break;
-        } catch (error) {
-          pollError = error;
-          const transient = isTransientPollingError(error);
-          retryAttempt += 1;
-          console.warn("[GDINO DEBUG] Grounding DINO poll request retry evaluation", {
-            failure_stage: "poll",
-            poll_retry_attempt: retryAttempt,
-            poll_retry_reason: error?.message || String(error),
-            retryable: transient,
-            retries_remaining: Math.max(REPLICATE_SAM_POLL_RETRY_MAX - retryAttempt, 0),
-          });
-          if (!transient || retryAttempt >= REPLICATE_SAM_POLL_RETRY_MAX) break;
-          await new Promise((resolve) => setTimeout(resolve, randomPollRetryDelayMs()));
-        }
-      }
-      if (pollError) throw pollError;
-      console.info("[GDINO DEBUG] Grounding DINO prediction poll", {
-        id: prediction?.id || createResp?.id || null,
-        status: prediction?.status || "unknown",
-      });
-    }
-
-    if (prediction?.status !== "succeeded") {
-      console.error("[GDINO DEBUG] Grounding DINO detection did not succeed", {
-        predictionId: prediction?.id || createResp?.id || null,
-        status: prediction?.status || "unknown",
-        error: prediction?.error || null,
-        elapsedMs: Date.now() - startedAt,
-      });
-      return { enabled: true, ok: false, reason: prediction?.error || prediction?.status || "unknown_failure", detections: [] };
-    }
-
-    console.info("[GDINO DEBUG] RAW Grounding DINO OUTPUT", {
-      outputPreview: JSON.stringify(prediction?.output)?.slice(0, 1000),
-    });
-    const detections = parseGroundingDinoOutputToDetections(prediction?.output);
-    console.info("[GDINO DEBUG] Grounding DINO detection succeeded", {
-      detectionCount: detections.length,
-      predictionId: prediction?.id || null,
-      elapsedMs: Date.now() - startedAt,
-    });
-
-    return {
-      enabled: true,
-      ok: detections.length > 0,
-      detections,
-    };
-  } catch (error) {
-    console.error("[GDINO DEBUG] Grounding DINO request error", {
-      failure_stage: "outer",
-      message: error?.message || String(error),
-    });
-    return {
-      enabled: true,
-      ok: false,
-      detections: [],
-      reason: error?.message || "grounding_dino_request_error",
-    };
-  }
-}
-
-async function runSamSegmentation(imageUrl) {
-  const token = process.env.REPLICATE_API_TOKEN;
-  if (!token) {
-    console.warn("[SAM DEBUG] Missing REPLICATE_API_TOKEN: skipping SAM segmentation");
-    return {
-      enabled: false,
-      ok: false,
-      reason: "missing_REPLICATE_API_TOKEN",
-      regions: [],
-    };
-  }
-
-  try {
-    const samVersion = process.env.REPLICATE_SAM_VERSION || DEFAULT_REPLICATE_SAM_VERSION;
-    const createUrl = "https://api.replicate.com/v1/predictions";
-    console.info("[SAM DEBUG] Starting SAM segmentation request", {
-      imageUrl,
-      version: samVersion,
-      createUrl,
-    });
-    let createResp;
-    try {
-      createResp = await replicateRequest(createUrl, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          version: samVersion,
-          input: {
-            image: imageUrl,
-          },
-        }),
-      });
-    } catch (error) {
-      console.error("[SAM DEBUG] SAM create request failed", {
-        failure_stage: "create",
-        message: error?.message || String(error),
-      });
-      throw error;
-    }
-    console.info("[SAM DEBUG] SAM create response received", {
-      predictionId: createResp?.id || null,
-      status: createResp?.status || "unknown",
-    });
-
-    const statusUrl = createResp?.urls?.get;
-    if (!statusUrl) {
-      console.error("[SAM DEBUG] SAM create response missing poll URL", {
-        predictionId: createResp?.id || null,
-      });
-      return {
-        enabled: true,
-        ok: false,
-        reason: "missing_poll_url",
-        regions: [],
-      };
-    }
-
-    const startedAt = Date.now();
-    let prediction = createResp;
-
-    while (Date.now() - startedAt < REPLICATE_SAM_TIMEOUT_MS) {
-      if (["succeeded", "failed", "canceled"].includes(prediction?.status)) break;
-      await new Promise((resolve) => setTimeout(resolve, REPLICATE_SAM_POLL_MS));
-      let retryAttempt = 0;
-      let pollError = null;
-      while (retryAttempt < REPLICATE_SAM_POLL_RETRY_MAX) {
-        try {
-          prediction = await replicateRequest(statusUrl, {
-            method: "GET",
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          pollError = null;
-          break;
-        } catch (error) {
-          pollError = error;
-          const retryReason = error?.message || String(error);
-          const transient = isTransientPollingError(error);
-          retryAttempt += 1;
-          console.warn("[SAM DEBUG] SAM poll request retry evaluation", {
-            failure_stage: "poll",
-            poll_retry_attempt: retryAttempt,
-            poll_retry_reason: retryReason,
-            retryable: transient,
-            retries_remaining: Math.max(REPLICATE_SAM_POLL_RETRY_MAX - retryAttempt, 0),
-          });
-          if (!transient || retryAttempt >= REPLICATE_SAM_POLL_RETRY_MAX) break;
-          const retryDelayMs = randomPollRetryDelayMs();
-          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-        }
-      }
-      if (pollError) {
-        const exhaustionReason = pollError?.message || String(pollError);
-        console.error("[SAM DEBUG] SAM poll retry exhausted", {
-          failure_stage: "poll",
-          final_retry_exhaustion_reason: exhaustionReason,
-          poll_retry_attempts: retryAttempt,
-        });
-        throw pollError;
-      }
-      console.info("[SAM DEBUG] SAM prediction poll", {
-        id: prediction?.id || createResp?.id || null,
-        status: prediction?.status || "unknown",
-      });
-    }
-
-    if (prediction?.status === "failed" || prediction?.status === "canceled") {
-      console.error("[SAM DEBUG] SAM segmentation did not succeed", {
-        predictionId: prediction?.id || createResp?.id || null,
-        status: prediction?.status || "unknown",
-        error: prediction?.error || null,
-        elapsedMs: Date.now() - startedAt,
-      });
-      return {
-        enabled: true,
-        ok: false,
-        reason: prediction?.error || prediction?.status || "unknown_failure",
-        regions: [],
-      };
-    }
-
-    if (prediction?.status !== "succeeded") {
-      return {
-        enabled: true,
-        ok: false,
-        reason: "sam_timeout",
-        regions: [],
-      };
-    }
-
-    console.info("[SAM DEBUG] RAW SAM OUTPUT", {
-      outputPreview: JSON.stringify(prediction?.output)?.slice(0, 1000),
-    });
-    const parsedRegions = parseSamOutputToRegions(prediction?.output);
-    const enrichedRegions = await enrichSamRegionsWithMaskedColors(imageUrl, parsedRegions);
-    console.info("[SAM DEBUG] SAM segmentation succeeded", {
-      regionCount: enrichedRegions.length,
-      predictionId: prediction?.id || null,
-      elapsedMs: Date.now() - startedAt,
-    });
-
-    return {
-      enabled: true,
-      ok: enrichedRegions.length > 0,
-      reason: enrichedRegions.length ? null : "malformed_output",
-      regions: enrichedRegions,
-    };
-  } catch (error) {
-    console.error("[SAM DEBUG] SAM request error", {
-      failure_stage: "outer",
-      message: error?.message || String(error),
-    });
-    return {
-      enabled: true,
-      ok: false,
-      reason: error?.message || "sam_request_error",
-      regions: [],
-    };
-  }
-}
-
-/* =========================
-   IMAGE OPS
-========================= */
-async function uploadToCloudinary(file) {
-  const dataUri = `data:${file.mimetype};base64,${file.buffer.toString("base64")}`;
-  const result = await cloudinary.uploader.upload(dataUri, {
-    folder: "cie",
-    resource_type: "image",
-  });
-
-  if (!result?.secure_url) {
-    throw new Error("Cloudinary upload failed (no secure_url)");
-  }
-
-  return result.secure_url;
-}
-
-async function callPixelcutRemoveBg(imageUrl) {
-  const apiKey = process.env.PIXELCUT_API_KEY;
-  const endpoint = process.env.PIXELCUT_ENDPOINT;
-
-  if (!apiKey || !endpoint) {
-    throw new Error("Missing Pixelcut env vars (PIXELCUT_API_KEY / PIXELCUT_ENDPOINT)");
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PIXELCUT_TIMEOUT_MS);
-
-  try {
-    const resp = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-API-KEY": apiKey,
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        image_url: imageUrl,
-        format: "png",
-      }),
-      signal: controller.signal,
-    });
-
-    const text = await resp.text();
-
-    if (!resp.ok) {
-      throw new Error(`Pixelcut failed: ${resp.status} ${text || "No response body"}`);
-    }
-
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      throw new Error("Pixelcut returned a non-JSON response");
-    }
-
-    if (!data?.result_url) {
-      throw new Error("Pixelcut response missing result_url");
-    }
-
-    return data.result_url;
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      throw new Error("Pixelcut request timed out");
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function analyzeGhostColors(ghostUrl) {
-  const res = await cloudinary.uploader.upload(ghostUrl, {
-    folder: "cie/ghost",
-    resource_type: "image",
-    colors: true,
-  });
-
-  const colors = Array.isArray(res.colors) ? res.colors : [];
-  if (!colors.length) {
-    throw new Error("Color analysis failed (no colors returned)");
-  }
-
-  const dominantHex = safeHex(String(colors[0][0])) || "#000000";
-  const topColors = colors
-    .slice(0, 10)
-    .map(([hex, pct]) => {
-      const safe = safeHex(hex) || "#000000";
-      const profile = buildColorProfile(safe, pct);
-      const importance = buildVisualImportance(safe, pct);
-
-      return {
-        hex: safe,
-        name: profile?.name || getColorName(safe),
-        pct,
-        lab: profile?.lab || getLab(safe),
-        perceptual: profile?.perceptual || getPerceptualTraits(safe),
-        color_identity: profile?.color_identity || buildColorIdentity({ name: getColorName(safe), hex: safe }),
-        importance,
-      };
-    })
-    .filter((x) => !!x.hex);
-
-  const groundingDino = await runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_QUERY);
-  const dinoDetections = Array.isArray(groundingDino?.detections) ? groundingDino.detections : [];
-  let dinoGarmentRegions = buildDinoSegmentedRegions(dinoDetections);
-  let decodedImage = null;
-  let dinoColorEnrichmentReason = dinoGarmentRegions.length ? "no_bbox_color_enrichment" : "no_dino_garment_regions";
-  try {
-    if (dinoGarmentRegions.some((region) => !!region?.bbox)) {
-      const ghostBuffer = await fetchImageBuffer(ghostUrl);
-      decodedImage = decodeImageRgba(ghostBuffer, ghostUrl);
-      dinoGarmentRegions = extractColorsFromDinoBboxes(ghostBuffer, dinoGarmentRegions);
-      dinoColorEnrichmentReason = "bbox_color_extraction_complete";
-    } else if (dinoGarmentRegions.length) {
-      dinoColorEnrichmentReason = "no_dino_bboxes";
-    }
-  } catch (error) {
-    dinoColorEnrichmentReason = error?.message || "bbox_color_extraction_failed";
-  }
-  if (!decodedImage) {
-    try {
-      decodedImage = decodeImageRgba(await fetchImageBuffer(ghostUrl), ghostUrl);
-    } catch (error) {
-      console.warn("[PERCEPTION V6] Decoded-image evidence unavailable", { reason: error?.message || "decode_failed" });
-    }
-  }
-  const dinoColorEnrichmentCount = dinoGarmentRegions.filter((region) => safeHex(region?.dominant_hex) && Array.isArray(region?.region_colors) && region.region_colors.length > 0).length;
-  const dinoColorEnrichmentOk = dinoColorEnrichmentCount > 0;
-  const dinoDebug = {
-    enabled: !!groundingDino?.enabled,
-    ok: !!groundingDino?.ok,
-    reason: groundingDino?.reason || null,
-    detection_count: dinoDetections.length,
-    garment_region_count: dinoGarmentRegions.length,
-    dino_color_enrichment_count: dinoColorEnrichmentCount,
-    dino_color_enrichment_ok: dinoColorEnrichmentOk,
-    dino_color_enrichment_reason: dinoColorEnrichmentReason,
-    detections: dinoDetections,
-    garment_regions: dinoGarmentRegions,
-    dino_4_lifecycle_stage: summarizeDinoStageForTrace("debug.dino.garment_regions", dinoGarmentRegions),
-  };
-  console.info("[GDINO DEBUG] Temporary detection validation", {
-    enabled: !!groundingDino?.enabled,
-    ok: !!groundingDino?.ok,
-    detectionCount: dinoDetections.length,
-  });
-
-  const sam = await runSamSegmentation(ghostUrl);
-  const samRegions = Array.isArray(sam?.regions) ? sam.regions : [];
-  const samOk = !!sam?.ok && samRegions.length > 0;
-  const dinoOk = !!groundingDino?.ok && dinoDetections.length > 0;
-  const dinoGarmentOk = dinoGarmentRegions.length > 0;
-  const detectionSegmentationOk = samOk || dinoGarmentOk;
-  const garmentZoneSource = getGarmentZoneSource(samOk ? samRegions : [], dinoGarmentRegions);
-  const segmentationProvider = samOk ? "sam" : null;
-  const detectionProvider = dinoOk ? "grounding_dino" : null;
-
-  return {
-    dominantHex,
-    dominantName: getColorName(dominantHex),
-    topColors,
-    decodedImage,
-    segmentedRegions: samOk ? samRegions : dinoGarmentRegions,
-    dinoGarmentRegions,
-    dino_debug: dinoDebug,
-    pipeline: {
-      sam_enabled: !!sam?.enabled,
-      sam_ok: samOk,
-      sam_reason: sam?.reason || null,
-      sam_version: process.env.REPLICATE_SAM_MODEL || DEFAULT_REPLICATE_SAM_MODEL,
-      sam_throttled: isReplicateThrottleError(sam?.reason),
-      dino_enabled: !!groundingDino?.enabled,
-      dino_ok: dinoOk,
-      dino_reason: groundingDino?.reason || null,
-      dino_detection_count: dinoDetections.length,
-      dino_garment_region_count: dinoGarmentRegions.length,
-      dino_region_count: dinoGarmentRegions.length,
-      dino_color_enrichment_count: dinoColorEnrichmentCount,
-      dino_color_enrichment_ok: dinoColorEnrichmentOk,
-      dino_color_enrichment_reason: dinoColorEnrichmentReason,
-      dino_query: DEFAULT_GROUNDING_DINO_QUERY,
-      detection_segmentation_ok: detectionSegmentationOk,
-      detection_provider: detectionProvider,
-      segmentation_provider: segmentationProvider,
-      mask_provider: segmentationProvider,
-      fallback_mode: !samOk,
-      garment_zone_source: garmentZoneSource,
-    },
-  };
-}
-
-/* =========================
-   ROUTES
-========================= */
-app.post("/api/images/transform", upload.any(), async (req, res) => {
-  try {
-    const files = Array.isArray(req.files) ? req.files : [];
-    const file = files[0];
-
-    if (!file) {
-      return res.status(400).json({
-        success: false,
-        step: "multer_parse",
-        error: "No image uploaded (missing multipart file).",
-      });
-    }
-
-    let publicUrl;
-    try {
-      publicUrl = await uploadToCloudinary(file);
-    } catch (error) {
-      return sendStepError(res, 500, "upload_cloudinary", error);
-    }
-
-    let ghostUrl;
-    try {
-      ghostUrl = await callPixelcutRemoveBg(publicUrl);
-    } catch (error) {
-      return sendStepError(res, 502, "pixelcut_remove_bg", error);
-    }
-
-    let analysis;
-    try {
-      analysis = await analyzeGhostColors(ghostUrl);
-    } catch (error) {
-      return sendStepError(res, 500, "analyze_cloudinary_colors", error);
-    }
-    const segmentedRegions = Array.isArray(analysis?.segmentedRegions) ? analysis.segmentedRegions : [];
-    if (!analysis?.pipeline?.detection_segmentation_ok || !segmentedRegions.length) {
-      const samReason = analysis?.pipeline?.sam_reason || "sam_failed";
-      console.warn("[SAM DEBUG] Continuing /api/images/transform without SAM segmented regions", {
-        reason: samReason,
-        sam_enabled: !!analysis?.pipeline?.sam_enabled,
-        sam_ok: !!analysis?.pipeline?.sam_ok,
-        sam_throttled: !!analysis?.pipeline?.sam_throttled,
-        dino_ok: !!analysis?.pipeline?.dino_ok,
-        dino_detection_count: Number(analysis?.pipeline?.dino_detection_count || 0),
-        regionCount: segmentedRegions.length,
-      });
-    }
-
-    let v2;
-    let outfitAnalysis;
-    try {
-      v2 = generatePalettesV2(analysis.dominantHex);
-      outfitAnalysis = buildOutfitAnalysis({
-        dominantHex: analysis.dominantHex,
-        topColors: analysis.topColors,
-        segmentedRegions,
-        decodedImage: analysis.decodedImage,
-        perception_v6_mode: MARKET_PERCEPTION_V6_MODE,
-        dinoGarmentRegions: analysis.dinoGarmentRegions,
-        pipeline: analysis.pipeline,
-      });
-    } catch (error) {
-      return sendStepError(res, 500, "palette_engine", error);
-    }
-
-    const externalSemantic = await runOpenAISemanticObserverV1({
-      mode: EXTERNAL_INTELLIGENCE_MODE,
-      imageUrl: publicUrl,
-      visionCoreEvidence: buildExternalSemanticEvidence(outfitAnalysis),
-      visionCoreDecision: buildExternalCompositeDecision(outfitAnalysis),
-      cache: externalSemanticCache,
-      cacheKey: `${publicUrl}:visioncore_external_handoff_v1:${process.env.OPENAI_SEMANTIC_MODEL || "gpt-5.6-luna"}`,
-    });
-    console.info("[EXTERNAL INTELLIGENCE] semantic observer", {
-      mode: EXTERNAL_INTELLIGENCE_MODE,
-      ok: externalSemantic.ok,
-      skipped: externalSemantic.skipped,
-      cached: externalSemantic.cached,
-      reason: externalSemantic.reason || null,
-      disposition: externalSemantic?.handoff?.disposition || null,
-      publication_changed: externalSemantic?.handoff?.publication_changed || false,
-      latency_ms: externalSemantic.latency_ms || 0,
-      estimated_cost_usd: externalSemantic.estimated_cost_usd || 0,
-    });
-
-    return res.json({
-      success: true,
-      engine: "V2",
-      ghostImageUrl: ghostUrl,
-      dominantHex: v2.dominantHex,
-      dominantName: v2.dominantName,
-      garmentColorFamily: v2.classification.family,
-      colorLane: v2.classification.lane,
-      classification: v2.classification,
-      topColors: analysis.topColors,
-      palettes: v2.palettes,
-      outfit_analysis: outfitAnalysis,
-      debug: {
-        dino: analysis.dino_debug,
-        dino_lifecycle_trace: {
-          target_id: "dino_4",
-          stages: [
-            analysis?.dino_debug?.dino_4_lifecycle_stage,
-            ...((outfitAnalysis?.dino_lifecycle_trace?.stages || []).filter((stage) => stage?.stage !== "debug.dino.garment_regions")),
-          ].filter(Boolean),
-          change_summary: buildDinoLifecycleChangeSummary([
-            analysis?.dino_debug?.dino_4_lifecycle_stage,
-            ...((outfitAnalysis?.dino_lifecycle_trace?.stages || []).filter((stage) => stage?.stage !== "debug.dino.garment_regions")),
-          ].filter(Boolean)),
-        },
-        pipeline: {
-          ...analysis.pipeline,
-          lower_sampling_version: LOWER_SAMPLING_VERSION,
-        },
-        external_intelligence: {
-          mode: EXTERNAL_INTELLIGENCE_MODE,
-          ok: externalSemantic.ok,
-          skipped: externalSemantic.skipped,
-          cached: externalSemantic.cached || false,
-          reason: externalSemantic.reason || null,
-          disposition: externalSemantic?.handoff?.disposition || null,
-          publication_changed: false,
-          authority_owner: "visioncore",
-        },
-      },
-      summary:
-        "Primary color detected. Use Balance, Contrast, Cohesion, Natural, or Explore for structured mode-specific directions.",
-    });
-  } catch (err) {
-    console.error("transform error:", err?.message || err);
-    return res.status(500).json({
-      success: false,
-      step: "transform_unknown",
-      error: err?.message || "Unknown error",
-    });
-  }
-});
-
-app.post("/api/recommendations", async (req, res) => {
-  try {
-    const {
-      ghostImageUrl,
-      mode,
-      itemType,
-      sourceItem,
-      targetItem,
-      industry,
-      matchStrictness,
-      resultCount,
-      inventory,
-      occasion,
-      usePreviewInventory = true,
-    } = req.body || {};
-
-    if (!ghostImageUrl) {
-      return res.status(400).json({
-        success: false,
-        error: "ghostImageUrl is required",
-      });
-    }
-
-    let analysis;
-    try {
-      analysis = await analyzeGhostColors(ghostImageUrl);
-    } catch (error) {
-      return sendStepError(res, 500, "analyze_cloudinary_colors", error);
-    }
-
-    let v2;
-    let outfitAnalysis;
-    try {
-      v2 = generatePalettesV2(analysis.dominantHex);
-      outfitAnalysis = buildOutfitAnalysis({
-        dominantHex: analysis.dominantHex,
-        topColors: analysis.topColors,
-        segmentedRegions: analysis.segmentedRegions,
-        dinoGarmentRegions: analysis.dinoGarmentRegions,
-        pipeline: analysis.pipeline,
-        decodedImage: analysis.decodedImage,
-        perception_v6_mode: MARKET_PERCEPTION_V6_MODE,
-      });
-    } catch (error) {
-      return sendStepError(res, 500, "palette_engine", error);
-    }
-
-    const m = String(mode || "").toLowerCase().trim();
-    const modeMap = {
-      balance: "balance",
-      contrast: "contrast",
-      cohesion: "cohesion",
-      emphasis: "emphasis",
-      natural: "natural",
-      explore: "explore",
-      neutrals: "balance",
-      earth: "natural",
-      earthtones: "natural",
-      earth_tones: "natural",
-      bold: "emphasis",
-    };
-
-    const key = modeMap[m] || "balance";
-    const pack = v2.palettes[key];
-
-    let retrievalIntent = null;
-    let rankedProducts = null;
-    let shoppingAssist = null;
-
-    if (targetItem) {
-      retrievalIntent = buildRetrievalIntent(outfitAnalysis, {
-        selectedMode: mode,
-        sourceItem: sourceItem || itemType || "piece",
-        targetItem,
-        industry: industry || "fashion",
-        matchStrictness: matchStrictness || "medium",
-        resultCount: resultCount || 24,
-        occasion,
-      });
-
-      const inputInventory =
-        Array.isArray(inventory) && inventory.length
-          ? inventory
-          : usePreviewInventory
-            ? generateRetrievalPreviewProducts(retrievalIntent)
-            : [];
-
-      rankedProducts = inputInventory.length ? rankProducts(inputInventory, retrievalIntent) : [];
-      shoppingAssist = buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts);
-    }
-
-    return res.json({
-      success: true,
-      engine: "V2",
-      mode: key,
-      itemType: itemType || null,
-      dominantHex: v2.dominantHex,
-      dominantName: v2.dominantName,
-      garmentColorFamily: v2.classification.family,
-      colorLane: v2.classification.lane,
-      recommendation: {
-        paletteHexes: pack.hexes,
-        paletteNamedHexes: pack.named_hexes,
-        reason: pack.reason,
-      },
-      retrieval_intent: retrievalIntent,
-      ranked_products: rankedProducts,
-      shopping_assist: shoppingAssist,
-    });
-  } catch (err) {
-    console.error("recommendations error:", err?.message || err);
-    return res.status(500).json({
-      success: false,
-      step: "recommendations_unknown",
-      error: err?.message || "Unknown error",
-    });
-  }
-});
-
-app.post("/api/retrieval/preview", async (req, res) => {
-  try {
-    const {
-      ghostImageUrl,
-      outfitAnalysis: providedOutfitAnalysis,
-      sourceItem,
-      targetItem,
-      selectedMode,
-      industry,
-      matchStrictness,
-      resultCount,
-      inventory,
-      occasion,
-      usePreviewInventory = true,
-    } = req.body || {};
-
-    if (!providedOutfitAnalysis && !ghostImageUrl) {
-      return res.status(400).json({
-        success: false,
-        error: "Provide either outfitAnalysis or ghostImageUrl.",
-      });
-    }
-
-    let outfitAnalysis = providedOutfitAnalysis || null;
-    let dominantHex = null;
-    let dominantName = null;
-
-    if (!outfitAnalysis && ghostImageUrl) {
-      let analysis;
-      try {
-        analysis = await analyzeGhostColors(ghostImageUrl);
-      } catch (error) {
-        return sendStepError(res, 500, "analyze_cloudinary_colors", error);
-      }
-
-      dominantHex = analysis.dominantHex;
-      dominantName = analysis.dominantName;
-
-      try {
-        outfitAnalysis = buildOutfitAnalysis({
-          dominantHex: analysis.dominantHex,
-          topColors: analysis.topColors,
-          segmentedRegions: analysis.segmentedRegions,
-          decodedImage: analysis.decodedImage,
-        perception_v6_mode: MARKET_PERCEPTION_V6_MODE,
-          dinoGarmentRegions: analysis.dinoGarmentRegions,
-          pipeline: analysis.pipeline,
-        });
-      } catch (error) {
-        return sendStepError(res, 500, "palette_engine", error);
-      }
-    }
-
-    const retrievalIntent = buildRetrievalIntent(outfitAnalysis, {
-      selectedMode,
-      sourceItem: sourceItem || "piece",
-      targetItem,
-      industry: industry || "fashion",
-      matchStrictness: matchStrictness || "medium",
-      resultCount: resultCount || 24,
-      occasion,
-    });
-
-    const inputInventory =
-      Array.isArray(inventory) && inventory.length
-        ? inventory
-        : usePreviewInventory
-          ? generateRetrievalPreviewProducts(retrievalIntent)
-          : [];
-
-    const rankedProducts = rankProducts(inputInventory, retrievalIntent);
-    const shoppingAssist = buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts);
-
-    return res.json({
-      success: true,
-      engine: "V2",
-      dominantHex,
-      dominantName,
-      outfit_analysis: outfitAnalysis,
-      retrieval_intent: retrievalIntent,
-      ranked_products: rankedProducts,
-      shopping_assist: shoppingAssist,
-      summary:
-        "Retrieval preview generated. VisionCore used selected mode, target piece, color roles, and piece scoring to rank products.",
-    });
-  } catch (err) {
-    console.error("retrieval/preview error:", err?.message || err);
-    return res.status(500).json({
-      success: false,
-      step: "retrieval_preview_unknown",
-      error: err?.message || "Unknown error",
-    });
-  }
-});
-
-/* =========================
-   MULTER ERROR HANDLER
-========================= */
-app.use((err, _req, res, _next) => {
-  if (err?.name === "MulterError") {
-    return res.status(400).json({
-      success: false,
-      step: "multer_parse",
-      error: err.message || "Upload failed: server could not parse your image.",
-    });
-  }
-
-  if (String(err?.message || "").toLowerCase().includes("multipart")) {
-    return res.status(400).json({
-      success: false,
-      step: "multer_parse",
-      error: "Upload failed: malformed multipart request.",
-    });
-  }
-
-  return res.status(500).json({
-    success: false,
-    step: "server_error",
-    error: err?.message || "Server error",
-  });
-});
-
-/* =========================
-   START
-========================= */
-if (process.env.NODE_ENV !== "test") {
-  app.listen(PORT, () => {
-    console.log(`âœ… CIE Core backend running on port ${PORT}`);
-  });
-}
-
-
-export { buildOutfitAnalysis, inferZoneColorRead, inferGarmentZones, MARKET_PERCEPTION_V6_MODE, extractDinoBboxRegionColors };
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éí×M9÷Dèµ©hºÚn¶X§zÍKËÈÜ˜ËÜÙ\™\‹šœÂ‹ËÈ•S‘UÔ’UH8 %š\Ú[ÛÛÜ™H˜XÚÙ[™‹ËÂ‹ËÈ“ÕUTÂ‹ËÈ8§!HÑUÂ‹ËÈ8§!HÑUÚX[‹ËÈ8§!HÑUØ\KÙXYËÜÝ]\Â‹ËÈ8§!HÔÕØ\KÚ[XYÙ\ËÝ˜[œÙ›Ü›B‹ËÈ8§!HÔÕØ\KÜ™XÛÛ[Y[™][ÛœÂ‹ËÈ8§!HÔÕØ\KÜ™]šY]˜[Ü™]šY]Â‹ËÂ‹ËÈ‘PUT‘TÂ‹ËÈ8§!H][\‹Z\™[™Y\ØYÂ‹ËÈ8§!HÛÝY[˜\žH\ØY
+ÈÛÛÜˆ[˜[\Ú\Â‹ËÈ8§!H^[Ý]˜XÚÙÜ›Ý[™™[[Ý˜[Ú][Y[Ý][™[™Â‹ËÈ8§!HŒˆ[]H[™Ú[™B‹ËÈ8§!HÝ]š]ØÛÜš[™Â‹ËÈ8§!HÝ[HY[]HÞ\Ý[B‹ËÈ8§!H[ÙKX]Ø\™HÝYÙÙ\ÝYY\ÝY[Â‹ËÈ8§!H™]šY]˜[[[‹ËÈ8§!HÚÜ[™È\ÜÚ\Ý‹ËÈ8§!H[X[ˆÛÛÜˆ˜[Z[™ÈXÜ›ÜÜÈSÝ\™˜XÙYÛÛÜœÂ‹ËÈ8§!H™[Z][HÈ^\žH˜[Z[™È›ØØX[\žB‹ËÈ8§!HÝ\X˜\ÙY\œ›ÜœÂ‹ËÈ8§!HPˆÈ\˜Ù\X[[[YÙ[˜ÙH^Y\ˆYYØY™[B‹ËÈ8§!Hš\ÝX[[\Ü[˜ÙH^Y\ˆYYØY™[B‹ËÈ8§!HÝXÝ\˜[ÛÛÜˆ[[YÙ[˜ÙH
+ÐÒJHYYØY™[B‹ËÂ‹ËÈ‘TURT‘QS•‚‹ËÈHÓÕQST–WÐÓÕQÓSQB‹ËÈHÓÕQST–WÐTWÒÑVB‹ËÈHÓÕQST–WÐTWÔÑPÔ‘U‹ËÈHVSÕUÐTWÒÑVB‹ËÈHVSÕUÑS‘ÒS•‹ËÈHSPV“Ó—ÔT•‘T—ÕQÈ
+Ü[Û˜[
+B‚š[\Ü^™\ÜÈœ›ÛH™^™\ÜÈŽÂš[\ÜÛÜœÈœ›ÛH˜ÛÜœÈŽÂš[\Ü][\ˆœ›ÛH›][\ˆŽÂš[\ÜÝ[ˆœ›ÛH™Ý[ˆŽÂš[\ÜÈŒˆ\ÈÛÝY[˜\žHHœ›ÛH˜ÛÝY[˜\žHŽÂš[\ÜÚ›ÛXHœ›ÛH˜Ú›ÛXKZœÈŽÂš[\ÜœYÈœ›ÛHšœYËZœÈŽÂš[\ÜÈ‘ÈHœ›ÛHœ™ÚœÈŽÂš[\ÜÈ[˜[^™T\˜Ù\[Û•HHœ›ÛH‹‹Ú[[YÙ[˜ÙKÜ\˜Ù\[Û•KÚ[™^šœÈŽÂš[\ÜÈ[˜[^™T\˜Ù\[Û•ˆHœ›ÛH‹‹Ú[[YÙ[˜ÙKÜ\˜Ù\[Û•‹Ú[™^šœÈŽÂš[\ÜÈ]XÚÛÛÜ‘]šY[˜ÙUÖ›Û™\ÈHœ›ÛH‹‹Ú[[YÙ[˜ÙKØÛÛÜ‘]šY[˜ÙKÚ[™^šœÈŽÂš[\ÜÈ\TYXÙPÛÛÜ“ÝÛ™\œÚ\ŒHHœ›ÛH‹‹Ú[[YÙ[˜ÙKÜYXÙPÛÛÜ“ÝÛ™\œÚ\ŒKšœÈŽÂš[\ÜÈ\SÝÙ\‘Ø\›Y[\š]UŒˆHœ›ÛH‹‹Ú[[YÙ[˜ÙKÛÝÙ\‘Ø\›Y[\š]UŒ‹šœÈŽÂš[\ÜÈ\U\\‘Ø\›Y[\š]UŒHHœ›ÛH‹‹Ú[[YÙ[˜ÙKÝ\\‘Ø\›Y[\š]UŒKšœÈŽÂš[\ÜÈZ[X›\ÚYØ\›Y[›Û™\ÕŒˆHœ›ÛH‹‹Ú[[YÙ[˜ÙKÜX›\ÚYØ\›Y[›Û™\ÕŒ‹šœÈŽÂš[\ÜÈ\TÚYÛ˜]\™PÛÛÜ]]Üš]UŒˆHœ›ÛH‹‹Ú[[YÙ[˜ÙKÜÚYÛ˜]\™PÛÛÜ]]Üš]UŒ‹šœÈŽÂš[\ÜÈZ[ØÙ[™SÝÛ™\œÚ\ŒHHœ›ÛH‹‹Ú[[YÙ[˜ÙKÜØÙ[™SÝÛ™\œÚ\ŒKšœÈŽÂš[\ÜÈ[“Ü[RTÙ[X[XÓØœÙ\™\•ŒHHœ›ÛH‹‹Ú[[YÙ[˜ÙKÙ^\›˜[ÛÜ[˜ZTÙ[X[XÓØœÙ\™\•ŒKšœÈŽÂš[\ÜÈ›Ü›X[^™Q^\›˜[[[YÙ[˜ÙS[ÙHHœ›ÛH‹‹Ú[[YÙ[˜ÙKÝš\Ú[ÛÛÜ™Q^\›˜[[[YÙ[˜ÙTÛXÞUŒKšœÈŽÂš[\ÜÈ]˜[X]PØ\\™T]X[]UŒHHœ›ÛH‹‹Ú[[YÙ[˜ÙKØØ\\™T]X[]QØ]UŒKšœÈŽÂš[\ÜÈZ[ÛÛœÝ[Y\‘]šY[˜ÙUŒHHœ›ÛH‹‹Ú[[YÙ[˜ÙKØÛÛœÝ[Y\‘]šY[˜ÙUŒKšœÈŽÂš[\ÜÈÙ]›Û™Qœ›ÛSX™[Hœ›ÛH‹‹Ù[™Ú[™\ËÞ›Û™SX\\‹Ú[™^šœÈŽÂš[\ÜÈX\[›ÓX™[Hœ›ÛH‹‹Ù[™Ú[™\ËÛÛÛÙÞKÙ[›ÓX\[™ÜËšœÈŽÂš[\ÜÂˆZ[˜[YY^ˆZ[˜[YY^\ËˆÙ]ÛÛÜ“˜[YKˆ›Ü›X[^™PØ]YÛÜžSX™[ˆ›Ü›X[^™S[ÙSX™[ŸHœ›ÛH‹‹Ù[™Ú[™\ËÛX™[X\\‹Ú[™^šœÈŽÂš[\ÜÂˆ\š]™TÝ[RY[]H\È\š]™TÝ[RY[]Qœ›ÛTÝ[RY[]KŸHœ›ÛH‹‹Ù[™Ú[™\ËÜÝ[RY[]KÚ[™^šœÈŽÂš[\ÜÈ[™™\XØÙ\ÜÛÜžQ\Ü^SY]Y]HHœ›ÛH‹‹ÝZKØXØÙ\ÜÛÜžQ\Ü^KšœÈŽÂš[\ÜÂˆX\šÙ]XYÙX\”X›XØ][Û‘[˜X›YˆÚÝ[X›\ÚX\šÙ]XØÙ\ÜÛÜžRY[]KŸHœ›ÛH‹‹ÝZKÛX\šÙ]X›XØ][Û”ÛXÞKšœÈŽÂš[\ÜÂˆÐUQÓÔ–WÐÓÓTUP’SUKˆÐUQÓÔ–WÔÑPTÒÒÑVUÓÔ‘ËˆÐUQÓÔ–WÔÕP•TTËŸHœ›ÛH‹‹Ù[™Ú[™\ËÛÛÛÙÞKÙØ\›Y[^Û›Û^KšœÈŽÂš[\ÜÂˆÐÐÐTÒSÓ—ÒQËˆÐÐÐTÒSÓ—ÐÐUQÓÔ’QTËˆÐÐÐTÒSÓ—ÓSÑTËŸHœ›ÛH‹‹Ù[™Ú[™\ËÛÛÛÙÞKÛØØØ\Ú[Û“ÛÛÙÞKšœÈŽÂ‚›]ØÛÜ™Q[™Ú[™HH[ÂžHÂˆØÛÜ™Q[™Ú[™HH]ØZ][\Ü
+‹‹Ù[™Ú[™\ËÜØÛÜ™KÚ[™^šœÈŠNÂŸHØ]Ú
+\œ›ÜŠHÂˆÛÛœÛÛKØ\›Š”ØÛÜ™H[™Ú[™H[˜]˜Z[X›NÈ\Ú[™ÈYØXÞHØÛÜš[™È˜[˜XÚËˆ‹\œ›ÜË›Y\ÜØYÙH\œ›ÜŠNÂŸB‚™Ý[‹˜ÛÛ™šYÊ
+NÂ‚˜ÛÛœÝ\H^™\ÜÊ
+NÂ˜ÛÛœÝÔ•H›ØÙ\ÜË™[‹”Ô•LÂ˜ÛÛœÝVSÕUÕSQSÕUÓTÈHLÂ˜ÛÛœÝÕÑT—ÔÐSTS‘×Õ‘T”ÒSÓˆH›][WÝÚ[™Ý×ÝŒHŽÂ˜ÛÛœÝTÑTSÓ—Õ—ÓSÑTÈH™]ÈÙ]
+ÈœÚYÝÈ‹˜\ÜÚ\Ý‹˜]]Üš]]]™H—JNÂ‚™[˜Ý[Ûˆ›Ü›X[^™T\˜Ù\[Û•“[ÙJ˜[YK˜[˜XÚÈHœÚYÝÈŠHÂˆÛÛœÝ™\]Y\ÝYHÝš[™Ê˜[YHˆŠKš[J
+KÓÝÙ\Ø\ÙJ
+NÂˆYˆ
+TÑTSÓ—Õ—ÓSÑTËš\Ê™\]Y\ÝY
+JH™]\›ˆ™\]Y\ÝYÂˆ™]\›ˆTÑTSÓ—Õ—ÓSÑTËš\Ê˜[˜XÚÊHÈ˜[˜XÚÈˆœÚYÝÈŽÂŸB‚˜ÛÛœÝPT’ÑUÔTÑTSÓ—Õ—ÓSÑHH›Ü›X[^™T\˜Ù\[Û•“[ÙJˆ›ØÙ\ÜË™[‹”TÑTSÓ—Õ—ÓSÑKˆ˜\ÜÚ\Ý‚ŠNÂ‚‹ËÈX\šÙ]ØY™]NˆXYÙX\ˆ\˜Ù\[Ûˆ™[XZ[œÈ]˜Z[X›H[\›˜[K]Ý\ÝÛY\‹Y˜XÚ[™Â‹ËÈ\ÜÚ\ÝX›XØ][ÛˆÝ^\ÈÙ™ˆ[[Z\‹]œËZXYÙX\ˆ\ØÜš[Z[˜][Ûˆ\È˜[Y]Y‚˜ÛÛœÝPT’ÑUÒPQÑPT—ÔP“PÐUSÓ—ÑSP“QHX\šÙ]XYÙX\”X›XØ][Û‘[˜X›Y
+›ØÙ\ÜË™[ŠNÂ‹ËÈX\šÙ]Y˜][\ÈÚYÝÎˆÜ[RHX^HØœÙ\™HÙ[X[XÜÈÚ[ˆH›ÝXÝYÙ^H\Â‹ËÈ™\Ù[]]Ø[ˆ™]™\ˆÚ[™ÙHÛÛÜˆX]ÜˆX›XØ][Û‹ˆZ\ÜÚ[™ÈÜ™Y[X[Â‹ËÈÝ[ÚÚ\ÛX[›H[™™\Ù\™HHš\Ú[ÛÛÜ™H™\Ý[‚˜ÛÛœÝVT“SÒS•SQÑSÑWÓSÑHH›Ü›X[^™Q^\›˜[[[YÙ[˜ÙS[ÙJ›ØÙ\ÜË™[‹•’TÒSÓÓÔ‘WÑVT“SÒS•SQÑSÑWÓSÑKœÚYÝÈŠNÂ˜ÛÛœÝÔSRWÔÑSPS•P×ÓSÑSH›ØÙ\ÜË™[‹“ÔSRWÔÑSPS•P×ÓSÑS™ÜMK‹[[˜HŽÂ˜ÛÛœÝ^\›˜[Ù[X[XÐØXÚHH™]ÈX\
+
+NÂ‚™[˜Ý[ÛˆZ[^\›˜[Ù[X[XÑ]šY[˜ÙJÝ]š][˜[\Ú\ÈHßJHÂˆÛÛœÝ›Û™\ÈHÝ]š][˜[\Ú\ÏË™Ø\›Y[Þ›Û™\ÏËž›Û™\ÈßNÂˆ™]\›ˆÂˆ\[[™WÝ™\œÚ[ÛŽˆš\Ú[Û˜ÛÜ™WÙ^\›˜[Ú[™Ù™—ÝŒH‹ˆ›Û™\ÎˆØš™XÝ™œ›ÛQ[šY\ÊØš™XÝ™[šY\Ê›Û™\ÊK›X\
+
+Þ›Û™RÙ^K›Û™WJHOˆÞ›Û™RÙ^KÂˆX›XØ][Û—ÜÝ]Nˆ›Û™OËœX›XØ][Û—ÜÝ]H[ˆØ\›Y[Ý\Nˆ›Û™OË™Ø\›Y[Ý\H›Û™OË›X™[[ˆÛÛÜ—Û[ÙNˆ›Û™OË˜ÛÛÜ—Û[ÙH›Û™OËš[\œ™]][Ûˆ[ˆÛÛ™šY[˜ÙNˆ›Û™OË[šYšYYØÛÛ™šY[˜ÙHÏÈ›Û™OË˜Ø[Xœ˜]YØÛÛ™šY[˜ÙHÏÈ›Û™OË˜ÛÛ™šY[˜ÙHÏÈ[ˆWJJKˆNÂŸB‚™[˜Ý[ÛˆZ[^\›˜[ÛÛ\ÜÚ]QXÚ\Ú[ÛŠÝ]š][˜[\Ú\ÈHßJHÂˆÛÛœÝ›Û™\ÈHØš™XÝ˜[Y\ÊÝ]š][˜[\Ú\ÏË™Ø\›Y[Þ›Û™\ÏËž›Û™\ÈßJK™š[\Š›ÛÛX[ŠNÂˆÛÛœÝÛÛ™š\›YYH›Û™\Ë›[™Ýˆ	‰ˆ›Û™\Ë™]™\žJ
+›Û™JHOˆ›Û™OËœX›XØ][Û—ÜÝ]HOOH˜ÛÛ™š\›YYˆ›Û™OËœX›XØ][Û—ÙXÚ\Ú[ÛˆOOHœX›\ÚŠNÂˆ™]\›ˆÈX›XØ][Û—ÜÝ]NˆÛÛ™š\›YYÈ˜ÛÛ™š\›YYˆˆœÜÜÚX›HˆNÂŸB‚‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆÓÔ”ÂOOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â˜\\ÙJˆÛÜœÊÂˆÜšYÚ[ŽˆŠˆ‹ˆY]ÙÎˆÈ‘ÑU‹”ÔÕ‹“ÔSÓ”È—Kˆ[ÝÙYXY\œÎˆÈÛÛ[U\H‹]]Üš^˜][Ûˆ‹–PTKRÑVH—KˆJBŠNÂ˜\›Ü[ÛœÊŠˆ‹ÛÜœÊ
+JNÂ‚‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆ“ÑHT”ÒS‘ÂOOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â˜\\ÙJ^™\ÜËšœÛÛŠÈ[Z]ˆŒLXˆˆJJNÂ˜\\ÙJ^™\ÜË\›[˜ÛÙY
+È^[™YˆYHJJNÂ‚‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆUST‚OOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â˜ÛÛœÝ\ØYH][\ŠÂˆÝÜ˜YÙNˆ][\‹›Y[[ÜžTÝÜ˜YÙJ
+Kˆ[Z]ÎˆÈš[TÚ^™NˆL
+ˆL
+ˆLKŸJNÂ‚‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆÓÕQST–BOOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â˜ÛÝY[˜\žK˜ÛÛ™šYÊÂˆÛÝYÛ˜[YNˆ›ØÙ\ÜË™[‹ÓÕQST–WÐÓÕQÓSQKˆ\WÚÙ^Nˆ›ØÙ\ÜË™[‹ÓÕQST–WÐTWÒÑVKˆ\WÜÙXÜ™]ˆ›ØÙ\ÜË™[‹ÓÕQST–WÐTWÔÑPÔ‘UˆÙXÝ\™NˆYKŸJNÂ‚‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆTÒPÈ“ÕUTÂOOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â˜\™Ù]
+‹È‹
+Ü™\K™\ÊHOˆÂˆ™\ËšœÛÛŠÈÚÎˆYKÙ\šXÙNˆ˜ÚYKXÛÜ™KX˜XÚÙ[™ˆJNÂŸJNÂ‚˜\™Ù]
+‹ÚX[‹
+Ü™\K™\ÊHOˆÂˆ™\ËšœÛÛŠÈÚÎˆYHJNÂŸJNÂ‚˜\™Ù]
+‹Ø\KÙXYËÜÝ]\È‹
+Ü™\K™\ÊHOˆÂˆ™\ËšœÛÛŠÂˆÚÎˆYKˆÙ\šXÙNˆ˜ÚYKXÛÜ™KX˜XÚÙ[™‹ˆÜˆÔ•ˆ[ŽˆÂˆÓÕQST–WÐÓÕQÓSQNˆH\›ØÙ\ÜË™[‹ÓÕQST–WÐÓÕQÓSQKˆÓÕQST–WÐTWÒÑVNˆH\›ØÙ\ÜË™[‹ÓÕQST–WÐTWÒÑVKˆÓÕQST–WÐTWÔÑPÔ‘UˆH\›ØÙ\ÜË™[‹ÓÕQST–WÐTWÔÑPÔ‘UˆVSÕUÐTWÒÑVNˆH\›ØÙ\ÜË™[‹”VSÕUÐTWÒÑVKˆVSÕUÑS‘ÒS•ˆH\›ØÙ\ÜË™[‹”VSÕUÑS‘ÒS•ˆSPV“Ó—ÔT•‘T—ÕQÎˆH\›ØÙ\ÜË™[‹SPV“Ó—ÔT•‘T—ÕQËˆÔSRWÐTWÒÑVNˆH\›ØÙ\ÜË™[‹“ÔSRWÐTWÒÑVKˆ’TÒSÓÓÔ‘WÑVT“SÒS•SQÑSÑWÓSÑNˆVT“SÒS•SQÑSÑWÓSÑKˆÔSRWÔÑSPS•P×ÓSÑSˆKˆJNÂŸJNÂ‚‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆT”“ÔˆST”ÂOOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â™[˜Ý[ÛˆÙ[™Ý\\œ›ÜŠ™\ËÝ]\ËÝ\\œ›Ü‹^˜HHßJHÂˆ™]\›ˆ™\ËœÝ]\ÊÝ]\ÊKšœÛÛŠÂˆÝXØÙ\ÜÎˆ˜[ÙKˆÝ\ˆ\œ›ÜŽˆ\œ›ÜË›Y\ÜØYÙHÝš[™Ê\œ›ÜŠH•[šÛ›ÝÛˆ\œ›Üˆ‹ˆ‹‹™^˜KˆJNÂŸB‚‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆÑS‘T’PÈST”ÂOOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â™[˜Ý[ÛˆÛ[\J
+HÂˆ™]\›ˆX]›X^
+X]›Z[ŠK
+JNÂŸB‚™[˜Ý[ÛˆÛ[\L
+
+HÂˆ™]\›ˆX]›X^
+X]›Z[ŠL
+JNÂŸB‚™[˜Ý[Ûˆ›Ý[™Š
+HÂˆ™]\›ˆX]œ›Ý[™
+[X™\Š
+H
+ˆL
+HÈLÂŸB‚™[˜Ý[ÛˆØY™R^
+^
+HÂˆžHÂˆ™]\›ˆÚ›ÛXJ^
+Kš^
+
+KÕ\\Ø\ÙJ
+NÂˆHØ]ÚÂˆ™]\›ˆ[ÂˆBŸB‚™[˜Ý[Ûˆ]™Ê[\ÊHÂˆÛÛœÝÛX[ˆH
+[\È×JK™š[\Š
+ŠHOˆ[X™\‹š\Ñš[š]JŠJNÂˆYˆ
+XÛX[‹›[™Ý
+H™]\›ˆÂˆ™]\›ˆÛX[‹œ™YXÙJ
+KŠHOˆH
+È‹
+HÈÛX[‹›[™ÝÂŸB‚™[˜Ý[Ûˆ[š\R^\Ê\œŠHÂˆÛÛœÝÙY[ˆH™]ÈÙ]
+
+NÂˆÛÛœÝÝ]H×NÂˆ›Üˆ
+ÛÛœÝ^Ùˆ\œˆ×JHÂˆÛÛœÝØY™HHØY™R^
+^
+NÂˆYˆ
+\ØY™JHÛÛ[YNÂˆYˆ
+ÙY[‹š\ÊØY™JJHÛÛ[YNÂˆÙY[‹˜Y
+ØY™JNÂˆÝ]œ\Ú
+ØY™JNÂˆBˆ™]\›ˆÝ]ÂŸB‚™[˜Ý[Ûˆ]PØ\ÙJ˜[YJHÂˆÛÛœÝÈHÝš[™Ê˜[YHˆŠKš[J
+KÓÝÙ\Ø\ÙJ
+NÂˆ™]\›ˆÈÈË˜Ú\]
+
+KÕ\\Ø\ÙJ
+H
+ÈËœÛXÙJJHˆˆŽÂŸB‚™[˜Ý[Ûˆ›Ü›X[^™U^
+˜[YJHÂˆ™]\›ˆÝš[™Ê˜[YHˆŠKš[J
+KÓÝÙ\Ø\ÙJ
+NÂŸB‚™[˜Ý[ÛˆÙ]YJ^
+HÂˆžHÂˆÛÛœÝÚHHÚ›ÛXJ^
+KšÛ
+
+NÂˆ™]\›ˆ[X™\‹š\Ñš[š]J
+HÈˆÂˆHØ]ÚÂˆ™]\›ˆÂˆBŸB‚™[˜Ý[ÛˆÙ]Ø]
+^
+HÂˆžHÂˆÛÛœÝË×HHÚ›ÛXJ^
+KšÛ
+
+NÂˆ™]\›ˆÛ[\JÈ
+NÂˆHØ]ÚÂˆ™]\›ˆÂˆBŸB‚™[˜Ý[ÛˆÙ]YÚ
+^
+HÂˆžHÂˆÛÛœÝËHHÚ›ÛXJ^
+KšÛ
+
+NÂˆ™]\›ˆÛ[\J
+NÂˆHØ]ÚÂˆ™]\›ˆÂˆBŸB‚™[˜Ý[Ûˆ\Ð›YRYJ
+HÂˆ™]\›ˆHŒH	‰ˆHLŽÂŸB‚™[˜Ý[Ûˆ\Ó˜]žPØ[™Y]J^
+HÂˆÛÛœÝØY™HHØY™R^
+^
+NÂˆYˆ
+\ØY™JH™]\›ˆ˜[ÙNÂˆÛÛœÝHÙ]YJØY™JNÂˆÛÛœÝÈHÙ]Ø]
+ØY™JNÂˆÛÛœÝHÙ]YÚ
+ØY™JNÂˆÛÛœÝ˜Z]ÈHÙ]\˜Ù\X[˜Z]ÊØY™JNÂˆÛÛœÝÚ›ÛXSXYÛš]YHH[X™\Š˜Z]ÏË˜Ú›ÛXWÛXYÛš]YH
+NÂ‚ˆYˆ
+Z\Ð›YRYJ
+JH™]\›ˆ˜[ÙNÂˆYˆ
+ŒŽ	‰ˆ
+ÈŒˆÚ›ÛXSXYÛš]YHŒŠJH™]\›ˆ˜[ÙNÂˆ™]\›ˆÈHŒN	‰ˆÚ›ÛXSXYÛš]YHHŒÂŸB‚™[˜Ý[Ûˆ\Ñ\šÓÛ]™Q˜[Z[J^
+HÂˆÛÛœÝØY™HHØY™R^
+^
+NÂˆYˆ
+\ØY™JH™]\›ˆ˜[ÙNÂ‚ˆÛÛœÝYHHÙ]YJØY™JNÂˆÛÛœÝØ]\˜][ÛˆHÙ]Ø]
+ØY™JNÂˆÛÛœÝYÚ™\ÜÈHÙ]YÚ
+ØY™JNÂˆÛÛœÝÜ™YÜ™Y[‹›YWHHÚ›ÛXJØY™JKœ™ØŠ
+NÂˆÛÛœÝÜ™Y[’YÚ\ÝÜ•YYHÜ™Y[ˆH™Y	‰ˆÜ™Y[ˆH›YNÂ‚ˆ™]\›ˆ
+ˆYÚ™\ÜÈŒN	‰‚ˆYHHŒ	‰‚ˆYHLH	‰‚ˆØ]\˜][ÛˆHŒˆ	‰‚ˆÜ™Y[’YÚ\ÝÜ•YYˆ
+NÂŸB‚‚™[˜Ý[ÛˆYQ\Ý[˜ÙJKŠHÂˆÛÛœÝHHÙ]YJJNÂˆÛÛœÝˆHÙ]YJŠNÂˆÛÛœÝHX]˜XœÊHHŠNÂˆ™]\›ˆX]›Z[ŠÍŒH
+NÂŸB‚™[˜Ý[ÛˆÛÛÜ‘\Ý[˜ÙSXŠKŠHÂˆžHÂˆ™]\›ˆÚ›ÛXK™\Ý[˜ÙJK‹›XˆŠNÂˆHØ]ÚÂˆ™]\›ˆÂˆBŸB‚™[˜Ý[ÛˆÜÛÛÜœÐžTÝ
+ÜÛÛÜœËˆHJHÂˆ™]\›ˆ
+ÜÛÛÜœÈ×JBˆœÛXÙJ
+BˆœÛÜ
+
+KŠHOˆ[X™\ŠËœÝ
+HH[X™\ŠOËœÝ
+JBˆœÛXÙJŠBˆ›X\
+
+
+HOˆš^
+Bˆ™š[\Š›ÛÛX[ŠNÂŸB‚™[˜Ý[Ûˆ›Ý]RYJ^YÊHÂˆÛÛœÝÈHÚ›ÛXJ^
+NÂˆÛÛœÝÚËHHËšÛ
+
+NÂˆÛÛœÝH
+
+
+H
+ÈYÈ
+ÈÍŒ
+H	HÍŒÂˆ™]\›ˆÚ›ÛXKšÛ
+Û[\JÈ
+KÛ[\J
+JKš^
+
+KÕ\\Ø\ÙJ
+NÂŸB‚™[˜Ý[ÛˆÙ]Û™J^ÈÓ][HK][HKYHÐYHHHßJHÂˆÛÛœÝÈHÚ›ÛXJ^
+NÂˆ]ÚËHHËšÛ
+
+NÂˆH[X™\‹š\Ñš[š]J
+HÈˆÂˆÈHÛ[\J
+È
+H
+ˆÓ][
+ÈÐY
+NÂˆHÛ[\J
+
+H
+ˆ][
+ÈY
+NÂˆ™]\›ˆÚ›ÛXKšÛ
+Ë
+Kš^
+
+KÕ\\Ø\ÙJ
+NÂŸB‚‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆPˆÈTÑTPSST”ÂOOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â™[˜Ý[ÛˆÙ]XŠ^
+HÂˆžHÂˆÛÛœÝÛK—HHÚ›ÛXJ^
+K›XŠ
+NÂˆ™]\›ˆÂˆˆ›Ý[™Š
+KˆNˆ›Ý[™ŠJKˆŽˆ›Ý[™ŠŠKˆNÂˆHØ]ÚÂˆ™]\›ˆÂˆˆˆNˆˆŽˆˆNÂˆBŸB‚™[˜Ý[ÛˆÙ]Ú›ÛXSXYÛš]YQœ›ÛSXŠXŠHÂˆÛÛœÝHH[X™\ŠXË˜H
+NÂˆÛÛœÝˆH[X™\ŠXË˜ˆ
+NÂˆ™]\›ˆ›Ý[™ŠX]œÜ\
+H
+ˆH
+Èˆ
+ˆŠJNÂŸB‚™[˜Ý[ÛˆÙ]\˜Ù\X[˜Z]Ê^
+HÂˆÛÛœÝØY™HHØY™R^
+^
+NÂˆYˆ
+\ØY™JHÂˆ™]\›ˆÂˆ\ˆ›ZY‹ˆ[\\˜]\™Nˆ˜˜[[˜ÙY‹ˆšX\Îˆ›™]]˜[‹ˆ[[œÚ]Nˆ˜˜[[˜ÙY‹ˆÚ›ÛXWÛXYÛš]YNˆˆNÂˆB‚ˆÛÛœÝXˆHÙ]XŠØY™JNÂˆÛÛœÝÚ›ÛXSXYÛš]YHHÙ]Ú›ÛXSXYÛš]YQœ›ÛSXŠXŠNÂ‚ˆ]\H›ZYŽÂˆYˆ
+X‹›Ì
+H\H™Y\ŽÂˆ[ÙHYˆ
+X‹›ˆÍJH\H›YÚŽÂ‚ˆ][\\˜]\™HH˜˜[[˜ÙYŽÂˆYˆ
+X‹˜HHX‹˜ˆH
+H[\\˜]\™HHØ\›HŽÂˆ[ÙHYˆ
+X‹˜HHNX‹˜ˆHN
+H[\\˜]\™HH˜ÛÛÛŽÂ‚ˆ]šX\ÈH›™]]˜[ŽÂˆYˆ
+X]˜XœÊX‹˜JHˆX]˜XœÊX‹˜ŠJHÂˆYˆ
+X‹˜Hˆ
+HšX\ÈHœ™YŽÂˆ[ÙHYˆ
+X‹˜HN
+HšX\ÈH™Ü™Y[ˆŽÂˆH[ÙHÂˆYˆ
+X‹˜ˆˆ
+HšX\ÈHžY[ÝÈŽÂˆ[ÙHYˆ
+X‹˜ˆN
+HšX\ÈH˜›YHŽÂˆB‚ˆ][[œÚ]HH˜˜[[˜ÙYŽÂˆYˆ
+Ú›ÛXSXYÛš]YHN
+H[[œÚ]HH›]]YŽÂˆ[ÙHYˆ
+Ú›ÛXSXYÛš]YHˆMJH[[œÚ]HHš]šYŽÂ‚ˆ™]\›ˆÂˆ\ˆ[\\˜]\™KˆšX\Ëˆ[[œÚ]KˆÚ›ÛXWÛXYÛš]YNˆÚ›ÛXSXYÛš]YKˆNÂŸB‚‚˜ÛÛœÝÓÓÔ—ÒQS•UWÕS”ÓUSÓ”ÈHÂˆ‘Ü˜\]HŽˆÛÛÛÜ˜^H‹ˆ‘Y\Üš[\ÛÛˆŽˆ‘\šÈ™Y‹ˆ”ÛÙ[™[ˆŽˆ“Ù™ˆÚ]H‹ˆ•Ø\›HØ[™Žˆ‘ÛÛ[ˆ™ZYÙH‹ˆÛÙÛ˜XÈŽˆØ\˜[Y[œ›ÝÛˆ‹ˆ‘›Ü™\ÝÜ™Y[ˆŽˆ‘\šÈÜ™Y[ˆ‹ˆ‘Y\˜]žHŽˆ‘\šÈ›YH‹ˆ‘Y\Û]™HŽˆ“Û]™HÜ™Y[ˆ‹ˆ”›ÜÙHŽˆ”™YT[šÈ‹ˆ‘Ü˜\]H›XÚÈŽˆ‘\šÈÜ˜^H‹ŸNÂ‚™[˜Ý[ÛˆÙ]ÛÛÜ’Y[]UÛ™J˜[YK˜Z]ÈHßJHÂˆÛÛœÝ^HÝš[™Ê˜[YHˆŠKÓÝÙ\Ø\ÙJ
+NÂˆYˆ
+^š[˜ÛY\Ê™Y\ŠH^š[˜ÛY\Ê™\šÈŠH^š[˜ÛY\Ê˜›XÚÈŠH˜Z]Ë™\OOH™Y\ŠH™]\›ˆ™Y\ŽÂˆYˆ
+^š[˜ÛY\ÊœÛÙŠH^š[˜ÛY\Ê›]]YŠH˜Z]Ëš[[œÚ]HOOH›]]YŠH™]\›ˆœÛÙŽÂˆYˆ
+^š[˜ÛY\Ê›YÚŠH^š[˜ÛY\Ê›[™[ˆŠH˜Z]Ë™\OOH›YÚŠH™]\›ˆ›YÚŽÂˆYˆ
+^š[˜ÛY\Êš]šYŠH^š[˜ÛY\Ê˜œšYÚŠH˜Z]Ëš[[œÚ]HOOHš]šYŠH™]\›ˆš]šYŽÂˆYˆ
+^š[˜ÛY\ÊØ\›HŠH˜Z]Ë[\\˜]\™HOOHØ\›HŠH™]\›ˆØ\›HŽÂˆYˆ
+^š[˜ÛY\Ê˜ÛÛÛŠH˜Z]Ë[\\˜]\™HOOH˜ÛÛÛŠH™]\›ˆ˜ÛÛÛŽÂˆ™]\›ˆ˜Z]Ë™\˜˜[[˜ÙYŽÂŸB‚™[˜Ý[ÛˆÙ]]™\žY^PÛÛÜ‘˜[Z[J^Û\ÜÚYšXØ][ÛˆH[˜Z]ÈH[
+HÂˆÛÛœÝØY™HHØY™R^
+^
+NÂˆYˆ
+\ØY™JH™]\›ˆ›™]]˜[ŽÂˆÛÛœÝY]HHÛ\ÜÚYšXØ][ÛˆÛ\ÜÚYžPÛÛÜ•ŒŠØY™JNÂˆÛÛœÝ\˜Ù\X[H˜Z]ÈÙ]\˜Ù\X[˜Z]ÊØY™JNÂˆÛÛœÝYÚHÙ]YÚ
+ØY™JNÂˆÛÛœÝØ]HÙ]Ø]
+ØY™JNÂˆÛÛœÝ[™HHY]OË›[™H›Ý\ˆŽÂ‚ˆYˆ
+Ø]ŒLŠHÂˆYˆ
+YÚŒN
+H™]\›ˆ˜›XÚÈŽÂˆYˆ
+YÚˆŽŠH™]\›ˆÚ]HŽÂˆ™]\›ˆ™Ü˜^HŽÂˆBˆYˆ
+[™HOOH˜ÞX[ˆŠH™]\›ˆ˜›YKYÜ™Y[ˆŽÂˆYˆ
+Y]OË™˜[Z[HOOH™X\ˆ	‰ˆÈ›Ü˜[™ÙH‹žY[ÝÈ—Kš[˜ÛY\Ê[™JJH™]\›ˆ˜œ›ÝÛˆŽÂˆYˆ
+[™HOOHœ[šÈŠH™]\›ˆœ[šÈŽÂˆYˆ
+[™H	‰ˆ[™HOOH›Ý\ˆŠH™]\›ˆ[™NÂˆ™]\›ˆ\˜Ù\X[Ë˜šX\ÈY]OË™˜[Z[H›™]]˜[ŽÂŸB‚™[˜Ý[Ûˆ]Q]™\žY^Q˜[Z[J˜[Z[JHÂˆ™]\›ˆÝš[™Ê˜[Z[H›™]]˜[ŠBˆœÜ]
+‹HŠBˆ›X\
+
+\
+HOˆ]PØ\ÙJ\
+JBˆš›Ú[Š‹HŠNÂŸB‚™[˜Ý[ÛˆÙ[™\˜]PÛÛÜ’Y[]U˜[œÛ][ÛŠÈ˜[YK^˜[Z[KÛ™K˜Z]ÈHßHJHÂˆÛÛœÝ^HÝš[™Ê˜[YHˆŠKÓÝÙ\Ø\ÙJ
+NÂˆÛÛœÝ]™\žY^Q˜[Z[HH˜[Z[HÙ]]™\žY^PÛÛÜ‘˜[Z[J^[˜Z]ÊNÂˆÛÛœÝ˜[Z[SX™[H]Q]™\žY^Q˜[Z[J]™\žY^Q˜[Z[JNÂ‚ˆYˆ
+^š[˜ÛY\Ê]\HŠJH™]\›ˆœ›ÝÛˆÜ˜^HŽÂˆYˆ
+^š[˜ÛY\ÊX[ŠJH™]\›ˆÛ™HOOH™Y\ˆÈ‘\šÈ›YKQÜ™Y[ˆˆˆ›YKQÜ™Y[ˆŽÂˆYˆ
+^š[˜ÛY\Ê›Û]™HŠJH™]\›ˆÛ™HOOH™Y\ˆÈ“Û]™HÜ™Y[ˆˆˆÛ™HOOHœÛÙˆÈ”ÛÙÜ™Y[ˆˆˆ‘Ü™Y[ˆŽÂˆYˆ
+^š[˜ÛY\Ê›[™[ˆŠH^š[˜ÛY\Êš]›ÜžHŠH^š[˜ÛY\Ê˜Ü™X[HŠJH™]\›ˆ“Ù™ˆÚ]HŽÂˆYˆ
+^š[˜ÛY\Ê›˜]žHŠJH™]\›ˆ‘\šÈ›YHŽÂˆYˆ
+^š[˜ÛY\Ê˜Üš[\ÛÛˆŠH^š[˜ÛY\Ê˜\™Ý[™HŠJH™]\›ˆÛ™HOOH™Y\ˆÈ‘\šÈ™Yˆˆ”™YŽÂˆYˆ
+^š[˜ÛY\Ê˜ÛÙÛ˜XÈŠJH™]\›ˆØ\˜[Y[œ›ÝÛˆŽÂˆYˆ
+^š[˜ÛY\ÊœØ[™ŠH^š[˜ÛY\Ê˜™ZYÙHŠJH™]\›ˆ˜Z]Ë[\\˜]\™HOOHØ\›Hˆ^š[˜ÛY\ÊØ\›HŠHÈ‘ÛÛ[ˆ™ZYÙHˆˆ™ZYÙHŽÂ‚ˆYˆ
+Û™HOOH™Y\ŠH™]\›ˆ\šÈ	Ù˜[Z[SX™[XÂˆYˆ
+Û™HOOHœÛÙˆÛ™HOOH›]]YŠH™]\›ˆÛÙ	Ù˜[Z[SX™[XÂˆYˆ
+Û™HOOH›YÚŠH™]\›ˆ]™\žY^Q˜[Z[HOOHÚ]HˆÈ“Ù™ˆÚ]HˆˆYÚ	Ù˜[Z[SX™[XÂˆ™]\›ˆ˜[Z[SX™[ÂŸB‚™[˜Ý[ÛˆZ[ÛÛÜ’Y[]JÈ˜[YK^˜[Z[HH[Û™HH[\˜Ù\X[H[HHßJHÂˆÛÛœÝØY™HHØY™R^
+^
+NÂˆÛÛœÝš\Ú[Û“˜[YHHÝš[™Ê˜[YH
+ØY™HÈÙ]ÛÛÜ“˜[YJØY™JHˆ•[šÛ›ÝÛˆŠJKš[J
+NÂˆÛÛœÝÛ\ÜÚYšXØ][ÛˆHØY™HÈÛ\ÜÚYžPÛÛÜ•ŒŠØY™JHˆ[ÂˆÛÛœÝ˜Z]ÈH\˜Ù\X[
+ØY™HÈÙ]\˜Ù\X[˜Z]ÊØY™JHˆßJNÂˆÛÛœÝY[]Q˜[Z[HH˜[Z[HÙ]]™\žY^PÛÛÜ‘˜[Z[JØY™KÛ\ÜÚYšXØ][Û‹˜Z]ÊNÂˆÛÛœÝY[]UÛ™HHÛ™HÙ]ÛÛÜ’Y[]UÛ™Jš\Ú[Û“˜[YK˜Z]ÊNÂˆÛÛœÝ˜[œÛ][ÛˆHÓÓÔ—ÒQS•UWÕS”ÓUSÓ”ÖÝš\Ú[Û“˜[YWHÙ[™\˜]PÛÛÜ’Y[]U˜[œÛ][ÛŠÂˆ˜[YNˆš\Ú[Û“˜[YKˆ^ˆØY™Kˆ˜[Z[NˆY[]Q˜[Z[KˆÛ™NˆY[]UÛ™Kˆ˜Z]ËˆJNÂ‚ˆ™]\›ˆÂˆ˜[YNˆš\Ú[Û“˜[YKˆ˜[œÛ][Û‹ˆ˜[Z[NˆY[]Q˜[Z[KˆÛ™NˆY[]UÛ™KˆNÂŸB‚™[˜Ý[ÛˆÚ]ÛÛÜ’Y[]JÛÛÜŠHÂˆYˆ
+XÛÛÜŠH™]\›ˆÛÛÜŽÂˆÛÛœÝ^HØY™R^
+ÛÛÜËš^ÛÛÜË˜˜\ÙJNÂˆÛÛœÝ˜[YHHÛÛÜË›˜[YH
+^ÈÙ]ÛÛÜ“˜[YJ^
+Hˆ•[šÛ›ÝÛˆŠNÂˆ™]\›ˆÂˆ‹‹˜ÛÛÜ‹ˆÛÛÜ—ÚY[]NˆÛÛÜ‹˜ÛÛÜ—ÚY[]HZ[ÛÛÜ’Y[]JÂˆ˜[YKˆ^ˆ˜[Z[NˆÛÛÜË™˜[Z[KˆÛ™NˆÛÛÜËÛ™Kˆ\˜Ù\X[ˆÛÛÜËœ\˜Ù\X[ÛÛÜËœ\˜Ù\X[Ý˜Z]ËˆJKˆNÂŸB‚™[˜Ý[ÛˆZ[ÛÛÜ’Y[]TÝ[[X\žJY[]K›ÛHH™ÛZ[˜[ÛÛÜˆ˜[Z[HŠHÂˆYˆ
+ZY[]OË›˜[YJH™]\›ˆ[Âˆ™]\›ˆ	ÚY[]K›˜[Y_H
+	ÚY[]K˜[œÛ][ÛŸJH\ÈH	Ü›Û_K˜ÂŸB‚™[˜Ý[ÛˆZ[Ø\›Y[Y[]Jš[X\žPÛÛÜ‹ÙXÛÛ™\žPÛÛÜœÈH×JHÂˆÛÛœÝš[X\žRY[]HHš[X\žPÛÛÜË˜ÛÛÜ—ÚY[]HÚ]ÛÛÜ’Y[]Jš[X\žPÛÛÜŠOË˜ÛÛÜ—ÚY[]H[Âˆ™]\›ˆÂˆš[X\žWÚY[]Nˆš[X\žRY[]HÈÂˆ˜[YNˆš[X\žRY[]K›˜[YKˆ˜[œÛ][ÛŽˆš[X\žRY[]K˜[œÛ][Û‹ˆHˆ[ˆÙXÛÛ™\žWÚY[]Y\Îˆ
+ÙXÛÛ™\žPÛÛÜœÈ×JBˆ›X\
+
+ÛÛÜŠHOˆÛÛÜË˜ÛÛÜ—ÚY[]HÚ]ÛÛÜ’Y[]JÛÛÜŠOË˜ÛÛÜ—ÚY[]JBˆ™š[\Š›ÛÛX[ŠBˆ›X\
+
+Y[]JHOˆ
+È˜[YNˆY[]K›˜[YK˜[œÛ][ÛŽˆY[]K˜[œÛ][ÛˆJJKˆNÂŸB‚‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆÓÓÔˆ“Ñ’STÂOOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â™[˜Ý[ÛˆZ[ÛÛÜ”›Ùš[J^ÝH
+HÂˆÛÛœÝØY™HHØY™R^
+^
+NÂˆYˆ
+\ØY™JH™]\›ˆ[Â‚ˆÛÛœÝÛ\ÜÚYšXØ][ÛˆHÛ\ÜÚYžPÛÛÜ•ŒŠØY™JNÂˆÛÛœÝXˆHÙ]XŠØY™JNÂˆÛÛœÝ˜Z]ÈHÙ]\˜Ù\X[˜Z]ÊØY™JNÂ‚ˆ™]\›ˆÚ]ÛÛÜ’Y[]JÂˆ^ˆØY™Kˆ˜[YNˆÙ]ÛÛÜ“˜[YJØY™JKˆÝˆ›Ý[™ŠÝ
+KˆYNˆ›Ý[™ŠÙ]YJØY™JJKˆØ]ˆ›Ý[™ŠÙ]Ø]
+ØY™JJKˆYÚˆ›Ý[™ŠÙ]YÚ
+ØY™JJKˆX‹ˆ\˜Ù\X[ˆ˜Z]Ëˆ˜[Z[NˆÛ\ÜÚYšXØ][Û‹™˜[Z[Kˆ[™NˆÛ\ÜÚYšXØ][Û‹›[™Kˆš]šYˆÛ\ÜÚYšXØ][Û‹š]šYˆÛÛÜ—ÚY[]NˆZ[ÛÛÜ’Y[]JÂˆ˜[YNˆÙ]ÛÛÜ“˜[YJØY™JKˆ^ˆØY™Kˆ˜[Z[NˆÙ]]™\žY^PÛÛÜ‘˜[Z[JØY™KÛ\ÜÚYšXØ][Û‹˜Z]ÊKˆ\˜Ù\X[ˆ˜Z]ËˆJKˆJNÂŸB‚™[˜Ý[Ûˆ\ÑØ\›Y[›Û™RÙ^J›Û™RÙ^JHÂˆ™]\›ˆÈ\\—ÙØ\›Y[‹›ÝÙ\—ÙØ\›Y[‹›Ý]\ÙX\ˆ‹˜›ÙWÙØ\›Y[—Kš[˜ÛY\Ê›Û™RÙ^JNÂŸB‚™[˜Ý[ÛˆÛÛ\XÝÛÛÜ”™XY
+ÛÛÜŠHÂˆÛÛœÝØY™HHØY™R^
+ÛÛÜËš^ÛÛÜË˜˜\ÙJNÂˆYˆ
+\ØY™JH™]\›ˆ[ÂˆÛÛœÝ™XYHÂˆ^ˆØY™Kˆ˜[YNˆÛÛÜË›˜[YHÙ]ÛÛÜ“˜[YJØY™JKˆÝˆ›Ý[™ŠÛÛÜËœÝ
+KˆNÂˆYˆ
+ÛÛÜË™\Ü^WÜÝOOH[™Yš[™Y
+HÂˆ™XY™\Ü^WÜÝH›Ý[™Š›Ü›X[^™PÛÛÜ”Ý
+ÛÛÜ‹™\Ü^WÜÝ
+JNÂˆ™XYœ\˜Ù[YÙHH›Ü›X]ÛÛÜ”Ý
+™XY™\Ü^WÜÝ
+NÂˆH[ÙHYˆ
+ÛÛÜËœ\˜Ù[YÙHOOH[™Yš[™Y
+HÂˆ™XYœ\˜Ù[YÙHHÛÛÜ‹œ\˜Ù[YÙNÂˆBˆ™]\›ˆÚ]ÛÛÜ’Y[]J™XY
+NÂŸB‚™[˜Ý[Ûˆ›Ú[’[X[“\Ý
+˜[Y\ÈH×JHÂˆÛÛœÝÛX[ˆH˜[Y\Ë›X\
+
+ŠHOˆÝš[™ÊˆˆŠKš[J
+JK™š[\Š›ÛÛX[ŠNÂˆYˆ
+ÛX[‹›[™ÝHJH™]\›ˆÛX[–ÌHˆŽÂˆYˆ
+ÛX[‹›[™ÝOOHŠH™]\›ˆ	ØÛX[–Ì_H[™	ØÛX[–ÌW_XÂˆ™]\›ˆ	ØÛX[‹œÛXÙJLJKš›Ú[Š‹Š_K[™	ØÛX[–ØÛX[‹›[™ÝHW_XÂŸB‚™[˜Ý[ÛˆÛÛÜ’\ÔÛÙ™]]˜[
+ÛÛÜŠHÂˆÛÛœÝ^HØY™R^
+ÛÛÜËš^ÛÛÜË˜˜\ÙJNÂˆYˆ
+Z^
+H™]\›ˆ˜[ÙNÂˆÛÛœÝÛ\ÜÚYšXØ][ÛˆHÛ\ÜÚYžPÛÛÜ•ŒŠ^
+NÂˆÛÛœÝ˜Z]ÈHÙ]\˜Ù\X[˜Z]Ê^
+NÂˆ™]\›ˆÛ\ÜÚYšXØ][Û‹™˜[Z[HOOH›™]]˜[ˆ[X™\Š˜Z]Ë˜Ú›ÛXWÛXYÛš]YH
+HŒŽÂŸB‚™[˜Ý[ÛˆZ[ÛÛÜ”ÝÜžJš[X\žPÛÛÜ‹ÙXÛÛ™\žPÛÛÜœÈH×KXØÙ[ÛÛÜœÈH×JHÂˆYˆ
+\š[X\žPÛÛÜË›˜[YJH™]\›ˆ[Â‚ˆÛÛœÝÙXÛÛ™\žS˜[Y\ÈHÙXÛÛ™\žPÛÛÜœË›X\
+
+ÊHOˆË›˜[YJK™š[\Š›ÛÛX[ŠNÂˆÛÛœÝXØÙ[˜[Y\ÈHXØÙ[ÛÛÜœË›X\
+
+ÊHOˆË›˜[YJK™š[\Š›ÛÛX[ŠNÂˆÛÛœÝXZ[“˜[Y\ÈHÜš[X\žPÛÛÜ‹›˜[YK‹‹œÙXÛÛ™\žS˜[Y\×K™š[\Š›ÛÛX[ŠNÂ‚ˆYˆ
+\ÙXÛÛ™\žS˜[Y\Ë›[™Ý	‰ˆXXØÙ[˜[Y\Ë›[™Ý
+HÂˆ™]\›ˆ\ÈØ\›Y[\Èš[X\š[H	Üš[X\žPÛÛÜ‹›˜[Y_K˜ÂˆB‚ˆÛÛœÝXZ[”˜\ÙHH›Ú[’[X[“\Ý
+XZ[“˜[Y\ÊNÂˆYˆ
+XXØÙ[˜[Y\Ë›[™Ý
+HÂˆ™]\›ˆ\ÈØ\›Y[ÛÛXš[™\È	ÛXZ[”˜\Ù_K˜ÂˆB‚ˆÛÛœÝ[XØÙ[Ð\™S™]]˜[HXØÙ[ÛÛÜœË›[™Ýˆ	‰ˆXØÙ[ÛÛÜœË™]™\žJÛÛÜ’\ÔÛÙ™]]˜[
+NÂˆÛÛœÝXØÙ[˜\ÙHH[XØÙ[Ð\™S™]]˜[ˆÈœÛÙ™]]˜[XØÙ[È‚ˆˆ	Ú›Ú[’[X[“\Ý
+XØÙ[˜[Y\Ê_HXØÙ[ØÂ‚ˆ™]\›ˆ\ÈØ\›Y[ÛÛXš[™\È	ÛXZ[”˜\Ù_HÚ]	ØXØÙ[˜\Ù_K˜ÂŸB‚™[˜Ý[ÛˆZ[Ø\›Y[ÛÛÜ”›Ùš[JÈ›Û™RÙ^K[ÙKÛZ[˜[ÛÛÜ‹Ý\ÜÛÛÜœÈH×KXØÙ[ÛÛÜœÈH×HJHÂˆYˆ
+Z\ÑØ\›Y[›Û™RÙ^J›Û™RÙ^JHVÈ›][XÛÛÜˆ‹›][WØÛÛÜˆ—Kš[˜ÛY\Ê[ÙJJH™]\›ˆßNÂ‚ˆÛÛœÝš[X\žPÛÛÜˆHÛÛ\XÝÛÛÜ”™XY
+ÛZ[˜[ÛÛÜŠNÂˆYˆ
+\š[X\žPÛÛÜŠH™]\›ˆßNÂ‚ˆÛÛœÝÙXÛÛ™\žPÛÛÜœÈH
+Ý\ÜÛÛÜœÈ×JK›X\
+ÛÛ\XÝÛÛÜ”™XY
+K™š[\Š›ÛÛX[ŠNÂˆÛÛœÝXØÙ[ÈH
+XØÙ[ÛÛÜœÈ×JK›X\
+ÛÛ\XÝÛÛÜ”™XY
+K™š[\Š›ÛÛX[ŠNÂ‚ˆ™]\›ˆÂˆš[X\žWØÛÛÜŽˆš[X\žPÛÛÜ‹ˆÙXÛÛ™\žWØÛÛÜœÎˆÙXÛÛ™\žPÛÛÜœËˆXØÙ[ØÛÛÜœÎˆXØÙ[ËˆÛÛÜ—ÜÝÜžNˆZ[ÛÛÜ”ÝÜžJš[X\žPÛÛÜ‹ÙXÛÛ™\žPÛÛÜœËXØÙ[ÊKˆNÂŸB‚™[˜Ý[Ûˆ›Ü›X[^™PÛÛÜ”Ý
+ÝH
+HÂˆÛÛœÝ˜[YHH[X™\ŠÝ
+NÂˆYˆ
+S[X™\‹š\Ñš[š]J˜[YJH˜[YHH
+H™]\›ˆÂˆ™]\›ˆ˜[YHˆHÈ˜[YHÈLˆ˜[YNÂŸB‚™[˜Ý[Ûˆ›Ü›X]ÛÛÜ”Ý
+ÝH
+HÂˆ™]\›ˆ	ÓX]œ›Ý[™
+›Ü›X[^™PÛÛÜ”Ý
+Ý
+H
+ˆL
+_IXÂŸB‚™[˜Ý[ÛˆÛÛ\XÝ™YÚ[ÛÛÛÜŠÛÛÜŠHÂˆÛÛœÝ^HØY™R^
+ÛÛÜËš^ÛÛÜË˜˜\ÙJNÂˆYˆ
+Z^
+H™]\›ˆ[ÂˆÛÛœÝÝH›Ý[™Š›Ü›X[^™PÛÛÜ”Ý
+ÛÛÜËœÝ
+JNÂˆ™]\›ˆÚ]ÛÛÜ’Y[]JÂˆ^ˆ˜[YNˆÛÛÜË›˜[YHÙ]ÛÛÜ“˜[YJ^
+KˆÝˆ\˜Ù[YÙNˆ›Ü›X]ÛÛÜ”Ý
+Ý
+KˆJNÂŸB‚™[˜Ý[Ûˆ\š]™TÚYÛ˜]\™PÛÛÜ‘\Ü^T™XY
+›Û™T™XYHßK›Û™RÙ^HHˆŠHÂˆÛÛœÝ\Ü^UÛÜTÝHÈ˜˜YÈ‹™›ÛÝÙX\ˆ‹˜XØÙ\ÜÛÜžWÚ™]Ù[žH‹™^Y]ÙX\ˆ—Kš[˜ÛY\Ê›Û™RÙ^JHÈŒHˆŒLŽÂˆÛÛœÝ\Ý[˜Ý\Ý[˜ÙHHMÂˆÛÛœÝÛZ[˜[^HØY™R^
+›Û™T™XYË™ÛZ[˜[ØÛÛÜËš^ˆŠNÂˆÛÛœÝš[X\žR^HØY™R^
+›Û™T™XYËœš[X\žWØÛÛÜËš^ˆŠNÂˆÛÛœÝ[˜ÚÜ’^Hš[X\žR^ÛZ[˜[^ÂˆÛÛœÝ™YÚ[ÛÛÛÜœÈH\œ˜^Kš\Ð\œ˜^J›Û™T™XYËœ™YÚ[Û—ØÛÛÜœÊBˆÈ›Û™T™XYœ™YÚ[Û—ØÛÛÜœË›X\
+ÛÛ\XÝ™YÚ[ÛÛÛÜŠK™š[\Š›ÛÛX[ŠBˆˆ×NÂˆÛÛœÝ\Ñ\Ý[˜Ýœ›ÛP[˜ÚÜˆH
+ÛÛÜŠHOˆÂˆÛÛœÝ^HØY™R^
+ÛÛÜËš^ˆŠNÂˆYˆ
+Z^X[˜ÚÜ’^
+H™]\›ˆ˜[ÙNÂˆYˆ
+^OOH[˜ÚÜ’^
+H™]\›ˆ˜[ÙNÂˆ™]\›ˆÛÛÜ‘\Ý[˜ÙSXŠ^[˜ÚÜ’^
+HH\Ý[˜Ý\Ý[˜ÙNÂˆNÂˆÛÛœÝÔÚYÛ˜]\™PÛÛÜˆH
+ÛÛÜ‹ÛÝ\˜ÙK™X\ÛÛŠHOˆÂˆÛÛœÝ^HØY™R^
+ÛÛÜËš^ˆŠNÂˆYˆ
+Z^
+H™]\›ˆ[Âˆ™]\›ˆÂˆ^ˆ˜[YNˆÛÛÜË›˜[YHÙ]ÛÛÜ“˜[YJ^
+Kˆ™X\ÛÛ‹ˆÛÝ\˜ÙKˆ\Ü^WÛÛ›NˆYKˆNÂˆNÂ‚ˆÛÛœÝÙXÛÛ™\žT™YÚ[ÛÛÛÜˆH™YÚ[ÛÛÛÜœÂˆœÛXÙJJBˆ™š[™
+
+ÛÛÜŠHOˆ›Ü›X[^™PÛÛÜ”Ý
+ÛÛÜËœÝ
+HH\Ü^UÛÜTÝ	‰ˆ\Ñ\Ý[˜Ýœ›ÛP[˜ÚÜŠÛÛÜŠJNÂˆYˆ
+ÙXÛÛ™\žT™YÚ[ÛÛÛÜŠHÂˆ™]\›ˆÔÚYÛ˜]\™PÛÛÜŠˆÙXÛÛ™\žT™YÚ[ÛÛÛÜ‹ˆœ™YÚ[Û—ØÛÛÜœÈ‹ˆ“YX[š[™Ù[ÙXÛÛ™\žHÛÛÜˆœ›ÛHš[˜[^™Y™YÚ[Û—ØÛÛÜœËˆ‚ˆ
+NÂˆB‚ˆÛÛœÝÜ™YÚ[ÛÛÛÜˆH™YÚ[ÛÛÛÜœÖÌNÂˆYˆ
+ˆÜ™YÚ[ÛÛÛÜˆ	‰‚ˆ›Ü›X[^™PÛÛÜ”Ý
+Ü™YÚ[ÛÛÛÜËœÝ
+HH\Ü^UÛÜTÝ	‰‚ˆš[X\žR^	‰‚ˆÛZ[˜[^	‰‚ˆš[X\žR^OOHÛZ[˜[^	‰‚ˆØY™R^
+Ü™YÚ[ÛÛÛÜ‹š^
+HOOHš[X\žR^	‰‚ˆÛÛÜ‘\Ý[˜ÙSXŠÜ™YÚ[ÛÛÛÜ‹š^š[X\žR^
+HH\Ý[˜Ý\Ý[˜ÙBˆ
+HÂˆ™]\›ˆÔÚYÛ˜]\™PÛÛÜŠˆÜ™YÚ[ÛÛÛÜ‹ˆœ™YÚ[Û—ØÛÛÜœÈ‹ˆ‘\Ý[˜Ýš[˜[^™Y™YÚ[ÛˆÛÛÜˆ›ÝšY\È\Ü^K[Û›HÝ[HY[]Kˆ‚ˆ
+NÂˆB‚ˆYˆ
+ÛZ[˜[^	‰ˆš[X\žR^	‰ˆÛZ[˜[^OOHš[X\žR^	‰ˆÛÛÜ‘\Ý[˜ÙSXŠÛZ[˜[^š[X\žR^
+HH\Ý[˜Ý\Ý[˜ÙJHÂˆ™]\›ˆÔÚYÛ˜]\™PÛÛÜŠˆ›Û™T™XY™ÛZ[˜[ØÛÛÜ‹ˆ™ÛZ[˜[ØÛÛÜˆ‹ˆ‘ÛZ[˜[ÛÛÜˆY™™\œÈœ›ÛHš[˜[^™Yš[X\žHÛÛÜˆ[™\È\ÙY[\È\Ü^K[Û›HÛÛ^ˆ‚ˆ
+NÂˆB‚ˆÛÛœÝY[]HH›Û™T™XYË™ÛZ[˜[ØÛÛÜË˜ÛÛÜ—ÚY[]H›Û™T™XYËœš[X\žWØÛÛÜË˜ÛÛÜ—ÚY[]H[ÂˆÛÛœÝY[]S˜[YHHÝš[™ÊY[]OË›˜[YHˆŠKš[J
+NÂˆÛÛœÝY[]R^HØY™R^
+Y[]OËš^ÛZ[˜[^š[X\žR^ˆŠNÂˆÛÛœÝ™XY˜[YHHÝš[™Ê›Û™T™XYË™ÛZ[˜[ØÛÛÜË›˜[YH›Û™T™XYËœš[X\žWØÛÛÜË›˜[YHˆŠKš[J
+NÂˆYˆ
+Y[]R^	‰ˆY[]S˜[YH	‰ˆ™XY˜[YH	‰ˆY[]S˜[YKÓÝÙ\Ø\ÙJ
+HOOH™XY˜[YKÓÝÙ\Ø\ÙJ
+JHÂˆ™]\›ˆÂˆ^ˆY[]R^ˆ˜[YNˆY[]S˜[YKˆ™X\ÛÛŽˆ‘š[˜[^™YÛÛÜ—ÚY[]HYÈ\Ü^K[Û›HÝ[HÛÛ^ˆ‹ˆÛÝ\˜ÙNˆ˜ÛÛÜ—ÚY[]H‹ˆ\Ü^WÛÛ›NˆYKˆNÂˆB‚ˆ™]\›ˆ[ÂŸB‚‚™[˜Ý[ÛˆÙ]ÛÛÜ”Ý[[X\žS˜[YJÛÛÜˆHßJHÂˆÛÛœÝ^HØY™R^
+ÛÛÜËš^ÛÛÜË˜˜\ÙJNÂˆ™]\›ˆÝš[™ÊÛÛÜË›˜[YH
+^ÈÙ]ÛÛÜ“˜[YJ^
+Hˆ•[šÛ›ÝÛˆŠJKš[J
+NÂŸB‚™[˜Ý[ÛˆY\™ÙPÛÛÜ”Ý[[X\žQ˜[Z[Y\ÊÛÛÜœÈH×JHÂˆÛÛœÝÜ›Ý\ÈH™]ÈX\
+
+NÂˆ›Üˆ
+ÛÛœÝÛÛÜˆÙˆÛÛÜœÈ×JHÂˆÛÛœÝÛÛ\XÝHÛÛ\XÝ™YÚ[ÛÛÛÜŠÛÛÜŠNÂˆYˆ
+XÛÛ\XÝË›˜[YJHÛÛ[YNÂˆÛÛœÝÙ^HHÛÛ\XÝ›˜[YKÓÝÙ\Ø\ÙJ
+NÂˆÛÛœÝ^\Ý[™ÈHÜ›Ý\Ë™Ù]
+Ù^JNÂˆÛÛœÝÝH›Ü›X[^™PÛÛÜ”Ý
+ÛÛ\XÝœÝ
+NÂˆYˆ
+^\Ý[™ÊHÂˆ^\Ý[™ËœÝH›Ý[™Š›Ü›X[^™PÛÛÜ”Ý
+^\Ý[™ËœÝ
+H
+ÈÝ
+NÂˆ^\Ý[™Ëœ\˜Ù[YÙHH›Ü›X]ÛÛÜ”Ý
+^\Ý[™ËœÝ
+NÂˆYˆ
+Ýˆ[X™\Š^\Ý[™Ë—ÝÜÝ
+JHÂˆ^\Ý[™Ëš^HÛÛ\XÝš^Âˆ^\Ý[™Ë˜ÛÛÜ—ÚY[]HHÛÛ\XÝ˜ÛÛÜ—ÚY[]NÂˆ^\Ý[™Ë—ÝÜÝHÝÂˆBˆH[ÙHÂˆÜ›Ý\ËœÙ]
+Ù^KÈ‹‹˜ÛÛ\XÝÝ\˜Ù[YÙNˆ›Ü›X]ÛÛÜ”Ý
+Ý
+KÝÜÝˆÝJNÂˆBˆBˆÛÛœÝY\™ÙYÛÛÜœÈH\œ˜^K™œ›ÛJÜ›Ý\Ë˜[Y\Ê
+JNÂˆÛÛœÝÝ[ÝHY\™ÙYÛÛÜœËœ™YXÙJ
+Ý[KÛÛÜŠHOˆÝ[H
+È›Ü›X[^™PÛÛÜ”Ý
+ÛÛÜËœÝ
+K
+NÂˆ™]\›ˆY\™ÙYÛÛÜœÂˆ›X\
+
+ÈÝÜÝ‹‹˜ÛÛÜˆJHOˆÂˆÛÛœÝ\Ü^TÝHÝ[ÝˆÈ›Ü›X[^™PÛÛÜ”Ý
+ÛÛÜ‹œÝ
+HÈÝ[ÝˆÂˆ™]\›ˆÚ]ÛÛÜ’Y[]JÂˆ‹‹˜ÛÛÜ‹ˆ\Ü^WÜÝˆ›Ý[™Š\Ü^TÝ
+Kˆ\˜Ù[YÙNˆ›Ü›X]ÛÛÜ”Ý
+\Ü^TÝ
+KˆJNÂˆJBˆœÛÜ
+
+KŠHOˆ[X™\ŠËœÝ
+HH[X™\ŠOËœÝ
+JNÂŸB‚™[˜Ý[ÛˆY\™ÙPÛÛÜ”™XYÝ[[X\žQ˜[Z[Y\ÊÛÛÜœÈH×JHÂˆ™]\›ˆY\™ÙPÛÛÜ”Ý[[X\žQ˜[Z[Y\ÊÛÛÜœÊK›X\
+ÛÛ\XÝÛÛÜ”™XY
+K™š[\Š›ÛÛX[ŠNÂŸB‚™[˜Ý[ÛˆY\™ÙPÛ\Ý\”Ý[[X\žQ˜[Z[Y\ÊÛ\Ý\œÈH×JHÂˆ™]\›ˆY\™ÙPÛÛÜ”Ý[[X\žQ˜[Z[Y\Ê
+Û\Ý\œÈ×JK›X\
+
+ÊHOˆ
+Âˆ^ˆÏË˜˜\ÙHÏËš^ˆ˜[YNˆÏË›˜[YHÙ]ÛZ[˜[Û\Ý\’[œ]˜[YJÊHÙ]ÛÛÜ”Ý[[X\žS˜[YJÊKˆÝˆÏËœÝˆJJJNÂŸB‚™[˜Ý[ÛˆÚÝ[™\Ù\™QÛZ[˜[XØÙ\ÜÛÜžPÛÛÜŠ›Û™RÙ^KÛ\Ý\œÈH×JHÂˆYˆ
+VÈ˜XØÙ\ÜÛÜžWÚ™]Ù[žH‹˜˜YÈ‹™^Y]ÙX\ˆ‹šXYÙX\ˆ—Kš[˜ÛY\Ê›Û™RÙ^JJH™]\›ˆ˜[ÙNÂˆÛÛœÝÛÜYH
+Û\Ý\œÈ×JBˆ™š[\Š
+ÊHOˆØY™R^
+ÏË˜˜\ÙHÏËš^
+JBˆ›X\
+
+ÊHOˆ
+È‹‹˜ËÝˆ›Ü›X[^™PÛÛÜ”Ý
+ÏËœÝ
+HJJBˆœÛÜ
+
+KŠHOˆ[X™\ŠËœÝ
+HH[X™\ŠOËœÝ
+JNÂˆÛÛœÝÜÝH[X™\ŠÛÜYË–ÌOËœÝ
+NÂˆÛÛœÝÙXÛÛ™ÝH[X™\ŠÛÜYË–ÌWOËœÝ
+NÂˆ™]\›ˆÜÝHÍH	‰ˆÜÝHÙXÛÛ™Ý
+ˆŽÂŸB‚™[˜Ý[ÛˆÙ]ÛZ[˜[Û\Ý\’[œ]˜[YJÛ\Ý\ŠHÂˆÛÛœÝÛÛÜœÈH\œ˜^Kš\Ð\œ˜^JÛ\Ý\Ë˜ÛÛÜœÊHÈÛ\Ý\‹˜ÛÛÜœÈˆ×NÂˆ]™\ÝH[Âˆ›Üˆ
+ÛÛœÝÛÛÜˆÙˆÛÛÜœÊHÂˆÛÛœÝ˜[YHH\[ÙˆÛÛÜË›˜[YHOOHœÝš[™ÈˆÈÛÛÜ‹›˜[YKš[J
+HˆˆŽÂˆYˆ
+[˜[YJHÛÛ[YNÂˆÛÛœÝÝH›Ü›X[^™PÛÛÜ”Ý
+ÛÛÜËœÝ
+NÂˆYˆ
+X™\ÝÝˆ™\ÝœÝ
+H™\ÝHÈ˜[YKÝNÂˆBˆ™]\›ˆ™\ÝË›˜[YH[ÂŸB‚™[˜Ý[ÛˆZ[™\Ù\™YXØÙ\ÜÛÜžPÛÛÜŠÛ\Ý\‹˜[˜XÚÈHßJHÂˆÛÛœÝ^HØY™R^
+Û\Ý\Ë˜˜\ÙH˜[˜XÚÏËš^˜[˜XÚÏË˜˜\ÙJNÂˆYˆ
+Z^
+H™]\›ˆ[ÂˆÛÛœÝ˜[YHHÙ]ÛZ[˜[Û\Ý\’[œ]˜[YJÛ\Ý\ŠH˜[˜XÚÏË›˜[YHÙ]ÛÛÜ“˜[YJ^
+NÂˆ™]\›ˆÚ]ÛÛÜ’Y[]JÂˆ^ˆ˜[YKˆÝˆ›Ý[™ŠÛ\Ý\ËœÝÏÈ˜[˜XÚÏËœÝÏÈ
+KˆJNÂŸB‚™[˜Ý[ÛˆÙ]›Û™PÛÛÜ“[ÙJÛ\Ý\œÈH×JHÂˆÛÛœÝÛÜYH
+Û\Ý\œÈ×JBˆ™š[\Š
+ÊHOˆØY™R^
+ÏË˜˜\ÙHÏËš^
+JBˆ›X\
+
+ÊHOˆ
+È‹‹˜ËÝˆ›Ü›X[^™PÛÛÜ”Ý
+ÏËœÝ
+HJJBˆœÛÜ
+
+KŠHOˆ[X™\ŠËœÝ
+HH[X™\ŠOËœÝ
+JNÂˆÛÛœÝÜÝH[X™\ŠÛÜYË–ÌOËœÝ
+NÂˆÛÛœÝÙXÛÛ™ÝH[X™\ŠÛÜYË–ÌWOËœÝ
+NÂˆÛÛœÝYX[š[™Ù[ÛÝ[HÛÜY™š[\Š
+ÊHOˆ[X™\ŠÏËœÝ
+HHŒ
+K›[™ÝÂˆÛÛœÝ™X\ÛÛˆHÛÜY›[™Ýˆ	‰ˆÜÝMBˆÈÜÜÝÛÌÍMH‚ˆˆÙXÛÛ™ÝHŒNˆÈœÙXÛÛ™ÜÝÙÝWÌÌN‚ˆˆYX[š[™Ù[ÛÝ[HÂˆÈ™YWØÛÛÜœ×ÜÝÙÝWÌÌ‚ˆˆ[Âˆ™]\›ˆÂˆÛÛÜ—Û[ÙNˆ™X\ÛÛˆÈ›][WØÛÛÜˆˆˆœÚ[™ÛWØÛÛÜˆ‹ˆ™X\ÛÛ‹ˆÜÝˆÙXÛÛ™ÝˆYX[š[™Ù[ÛÝ[ˆNÂŸB‚™[˜Ý[ÛˆZ[]šY[˜ÙTÝ[[X\žJÛÛÜ“[ÙKÛ\Ý\œÈH×KÛÝ\˜ÙHH[
+HÂˆÛÛœÝÝ[[X\žPÛÛÜœÈHY\™ÙPÛ\Ý\”Ý[[X\žQ˜[Z[Y\ÊÛ\Ý\œÊNÂˆÛÛœÝš[X\žHHÝ[[X\žPÛÛÜœÏË–ÌH[ÂˆÛÛœÝÙXÛÛ™\žHHÝ[[X\žPÛÛÜœËœÛXÙJK
+NÂˆYˆ
+\š[X\žJH™]\›ˆ“›È™[XX›HÛÛÜˆ]šY[˜ÙH›Üˆ\È›Û™KˆŽÂˆÛÛœÝÛÝ\˜ÙT˜\ÙHHÛÝ\˜ÙHÈœ›ÛH	ÜÛÝ\˜Ù_XˆˆŽÂˆYˆ
+ÛÛÜ“[ÙHOOH›][WØÛÛÜˆŠHÂˆÛÛœÝÝ\ÜHÙXÛÛ™\žK›X\
+
+ÊHOˆ	ØË›˜[Y_H
+	ØËœ\˜Ù[YÙ_JX
+NÂˆ™]\›ˆš[X\žH	Üš[X\žK›˜[Y_H
+	Üš[X\žKœ\˜Ù[YÙ_JIÜÝ\Ü›[™ÝÈÝ\ÜYžH	Ú›Ú[’[X[“\Ý
+Ý\Ü
+_XˆˆŸIÜÛÝ\˜ÙT˜\Ù_K˜ÂˆBˆ™]\›ˆš[X\žH	Üš[X\žK›˜[Y_H
+	Üš[X\žKœ\˜Ù[YÙ_JH\ÈHÛZ[˜[›Û™H™XY	ÜÛÝ\˜ÙT˜\Ù_K˜ÂŸB‚™[˜Ý[Ûˆ\ÐXØÙ\ÜÛÜžQ[›Ô[]V›Û™J›Û™RÙ^JHÂˆ™]\›ˆÈ˜XØÙ\ÜÛÜžWÚ™]Ù[žH‹˜˜YÈ‹˜™[‹™^Y]ÙX\ˆ‹šXYÙX\ˆ‹œØØ\™ˆ‹œØØ\™\È—Kš[˜ÛY\Ê›Û™RÙ^JNÂŸB‚™[˜Ý[ÛˆÙ]XØÙ\ÜÛÜžQ]XÝYÛÛÜ“˜[YJÛÛÜˆHßJHÂˆÛÛœÝ^HØY™R^
+ÛÛÜËš^ÛÛÜË˜˜\ÙJNÂˆYˆ
+Z^
+H™]\›ˆÛÛÜË›˜[YH•[šÛ›ÝÛˆŽÂˆÛÛœÝ˜Z]ÈHÙ]\˜Ù\X[˜Z]Ê^
+NÂˆYˆ
+ˆZ\Ó˜]žPØ[™Y]J^
+H	‰‚ˆÙ]YÚ
+^
+HŒ	‰‚ˆ[X™\Š˜Z]ÏË˜Ú›ÛXWÛXYÛš]YH
+HŒ‚ˆ
+HÂˆ™]\›ˆÙ]›XÚÓX[˜ÙSX™[
+^
+NÂˆBˆ™]\›ˆÛÛÜË›˜[YHÙ]ÛÛÜ“˜[YJ^
+NÂŸB‚™[˜Ý[ÛˆZ[XØÙ\ÜÛÜžQ[›Ñ]XÝY[]J™YÚ[ÛÛÛÜœÈH×JHÂˆ™]\›ˆ
+\œ˜^Kš\Ð\œ˜^J™YÚ[ÛÛÛÜœÊHÈ™YÚ[ÛÛÛÜœÈˆ×JBˆ›X\
+
+ÛÛÜŠHOˆÛÛ\XÝ™YÚ[ÛÛÛÜŠÂˆ‹‹˜ÛÛÜ‹ˆ˜[YNˆÙ]XØÙ\ÜÛÜžQ]XÝYÛÛÜ“˜[YJÛÛÜŠKˆJJBˆ™š[\Š›ÛÛX[ŠNÂŸB‚™[˜Ý[ÛˆÜ]XØÙ\ÜÛÜžQ]XÝY[]T›Û\Ê]XÝY[]HH×JHÂˆÛÛœÝ›ÝÜÈH\œ˜^Kš\Ð\œ˜^J]XÝY[]JHÈ]XÝY[]Hˆ×NÂˆ™]\›ˆÂˆš[X\žNˆ›ÝÜÖÌHÈÛÛ\XÝÛÛÜ”™XY
+›ÝÜÖÌJHˆ[ˆÙXÛÛ™\žNˆ›ÝÜËœÛXÙJJK™š[\Š
+ÛÛÜŠHOˆ›Ü›X[^™PÛÛÜ”Ý
+ÛÛÜËœÝ
+Hˆ
+K›X\
+ÛÛ\XÝÛÛÜ”™XY
+K™š[\Š›ÛÛX[ŠKˆXØÙ[ˆ›ÝÜËœÛXÙJJK™š[\Š
+ÛÛÜŠHOˆ›Ü›X[^™PÛÛÜ”Ý
+ÛÛÜËœÝ
+HH
+K›X\
+ÛÛ\XÝÛÛÜ”™XY
+K™š[\Š›ÛÛX[ŠKˆNÂŸB‚™[˜Ý[Ûˆ\ÐXØÙ\ÜÛÜžQ\Ü^T[]V›Û™J›Û™RÙ^JHÂˆ™]\›ˆÈ˜XØÙ\ÜÛÜžWÚ™]Ù[žH‹˜˜YÈ‹˜™[‹™^Y]ÙX\ˆ‹šXYÙX\ˆ—Kš[˜ÛY\Ê›Û™RÙ^JNÂŸB‚™[˜Ý[Ûˆ\Ðœ›ÝÛ‘˜[Z[R^
+^
+HÂˆÛÛœÝØY™HHØY™R^
+^
+NÂˆYˆ
+\ØY™JH™]\›ˆ˜[ÙNÂˆÛÛœÝYHHÙ]YJØY™JNÂˆÛÛœÝØ]HÙ]Ø]
+ØY™JNÂˆÛÛœÝYÚHÙ]YÚ
+ØY™JNÂˆ™]\›ˆYHH	‰ˆYHHMH	‰ˆØ]HŒŒˆ	‰ˆYÚHŒ	‰ˆYÚHŒŽÂŸB‚™[˜Ý[Ûˆ™\Ù\™PXØÙ\ÜÛÜžT˜]Ô[]JÛÛÜœÈH×JHÂˆ™]\›ˆ
+\œ˜^Kš\Ð\œ˜^JÛÛÜœÊHÈÛÛÜœÈˆ×JBˆ›X\
+
+ÛÛÜŠHOˆÂˆÛÛœÝ^HØY™R^
+ÛÛÜËš^ÛÛÜË˜˜\ÙJNÂˆYˆ
+Z^
+H™]\›ˆ[Âˆ™]\›ˆÂˆ‹‹˜ÛÛÜ‹ˆ^ˆ˜[YNˆÙ]XØÙ\ÜÛÜžQ]XÝYÛÛÜ“˜[YJÈ‹‹˜ÛÛÜ‹^JKˆÝˆÛÛÜËœÝˆNÂˆJBˆ™š[\Š›ÛÛX[ŠNÂŸB‚™[˜Ý[ÛˆXØÙ\ÜÛÜžT[]PÛÛ[Z[˜][Û”™X\ÛÛŠÛÛÜˆHßJHÂˆÛÛœÝ^HØY™R^
+ÛÛÜËš^ÛÛÜË˜˜\ÙJNÂˆYˆ
+Z^
+H™]\›ˆš[˜[YÚ^ŽÂˆÛÛœÝÝH›Ü›X[^™PÛÛÜ”Ý
+ÛÛÜËœÝ
+NÂˆYˆ
+ÝH
+H™]\›ˆ[ÂˆYˆ
+\Ðœ›ÝÛ‘˜[Z[R^
+^
+JH™]\›ˆ[ÂˆÛÛœÝYHHÙ]YJ^
+NÂˆÛÛœÝØ]HÙ]Ø]
+^
+NÂˆÛÛœÝYÚHÙ]YÚ
+^
+NÂˆYˆ
+YÚHŽˆ	‰ˆØ]HŒŠH™]\›ˆšYÚYÚÛÜ—ÙÛ\™HŽÂˆYˆ
+YHH	‰ˆYHHMH	‰ˆØ]HŒLˆ	‰ˆØ]HMH	‰ˆYÚH	‰ˆYÚHŽŠHÂˆ™]\›ˆœÚÚ[—ÛÜ—Ø™ZYÙWØÛÛ[Z[˜][ÛˆŽÂˆBˆ™]\›ˆ[ÂŸB‚™[˜Ý[Ûˆš[\XØÙ\ÜÛÜžQ\Ü^T[]JÛÛÜœÈH×JHÂˆÛÛœÝÙ\H×NÂˆÛÛœÝ™Z™XÝYH×NÂˆ›Üˆ
+ÛÛœÝÛÛÜˆÙˆZ[XØÙ\ÜÛÜžQ[›Ñ]XÝY[]JÛÛÜœÊJHÂˆÛÛœÝ™X\ÛÛˆHXØÙ\ÜÛÜžT[]PÛÛ[Z[˜][Û”™X\ÛÛŠÛÛÜŠNÂˆYˆ
+™X\ÛÛŠH™Z™XÝYœ\Ú
+È^ˆÛÛÜ‹š^ÝˆÛÛÜ‹œÝ™X\ÛÛˆJNÂˆ[ÙHÙ\œ\Ú
+ÛÛÜŠNÂˆBˆ™]\›ˆÈÙ\™Z™XÝYNÂŸB‚™[˜Ý[ÛˆÙ[XÝXØÙ\ÜÛÜžQ\Ü^T[]JÈ™Yš[™YÜ›ÜH×KØ[™Y]T™YÚ[ÛˆH×K˜]Ñ[›ÈH×K]XÝÜˆH×K˜[˜XÚÈH×HHHßJHÂˆÛÛœÝÛÝ\˜Ù\ÈHÂˆÈœ™Yš[™YØÜ›Ü‹™Yš[™YÜ›ÜKˆÈ˜Ø[™Y]WÜ™YÚ[Ûˆ‹Ø[™Y]T™YÚ[Û—KˆÈœ˜]×Ù[›È‹˜]Ñ[›×KˆÈ™]XÝÜˆ‹]XÝÜ—KˆÈ™˜[˜XÚÈ‹˜[˜XÚ×KˆNÂˆÛÛœÝÛÝ\˜ÙWÝ˜XÙHH×NÂˆ›Üˆ
+ÛÛœÝÜÛÝ\˜ÙKÛÛÜœ×HÙˆÛÝ\˜Ù\ÊHÂˆÛÛœÝÈÙ\™Z™XÝYHHš[\XØÙ\ÜÛÜžQ\Ü^T[]JÛÛÜœÊNÂˆÛÝ\˜ÙWÝ˜XÙKœ\Ú
+ÈÛÝ\˜ÙK[œ]ØÛÝ[ˆ\œ˜^Kš\Ð\œ˜^JÛÛÜœÊHÈÛÛÜœË›[™ÝˆÝ\š]š[™×ØÛÝ[ˆÙ\›[™Ý™Z™XÝYJNÂˆYˆ
+Ù\›[™Ý
+HÂˆ™]\›ˆÂˆ[]NˆÙ\ˆÙ[XÝYÜÛÝ\˜ÙNˆÛÝ\˜ÙKˆ˜XÙNˆÂˆÙ[XÝYÜÛÝ\˜ÙNˆÛÝ\˜ÙKˆ™XÙY[˜ÙNˆÈœ™Yš[™YØÜ›Ü‹˜Ø[™Y]WÜ™YÚ[Ûˆ‹œ˜]×Ù[›È‹™]XÝÜˆ‹™˜[˜XÚÈ—Kˆ™X\ÛÛ—Û›ÝÜ™\XÙYˆšYÚ\—Üš[Üš]WØÛÛ™š\›YYÝ˜[Y\×Ø\™WØ]]Üš]]]™H‹ˆÛÝ\˜Ù\ÎˆÛÝ\˜ÙWÝ˜XÙKˆKˆNÂˆBˆBˆ™]\›ˆÂˆ[]Nˆ×KˆÙ[XÝYÜÛÝ\˜ÙNˆ[ˆ˜XÙNˆÂˆÙ[XÝYÜÛÝ\˜ÙNˆ[ˆ™XÙY[˜ÙNˆÈœ™Yš[™YØÜ›Ü‹˜Ø[™Y]WÜ™YÚ[Ûˆ‹œ˜]×Ù[›È‹™]XÝÜˆ‹™˜[˜XÚÈ—Kˆ™X\ÛÛ—Û›ÝÜ™\XÙYˆ››×ÜX›\ÚX›WØXØÙ\ÜÛÜžWÜ[]WÜÝ\š]™Y‹ˆÛÝ\˜Ù\ÎˆÛÝ\˜ÙWÝ˜XÙKˆKˆNÂŸB‚‚™[˜Ý[Ûˆ›Ü›X[^™PÛÛ™šY[˜ÙT\˜Ù[
+˜[YJHÂˆÛÛœÝˆH[X™\Š˜[YH
+NÂˆYˆ
+S[X™\‹š\Ñš[š]JŠJH™]\›ˆÂˆ™]\›ˆˆHHÈÛ[\L
+ˆ
+ˆL
+HˆÛ[\L
+ŠNÂŸB‚™[˜Ý[ÛˆØ[Xœ˜]PÛÛ™šY[˜ÙJ˜[YKÈ]šY[˜ÙUÙZYÚHK›ÛÜˆHKÙZ[[™ÈHNHHHßJHÂˆÛÛœÝ›Ü›X[^™YH›Ü›X[^™PÛÛ™šY[˜ÙT\˜Ù[
+˜[YJNÂˆÛÛœÝÙZYÚYH›Ü›X[^™Y
+ˆÛ[\J[X™\Š]šY[˜ÙUÙZYÚ
+JNÂˆ™]\›ˆX]œ›Ý[™
+X]›X^
+›ÛÜ‹X]›Z[ŠÙZ[[™ËÙZYÚY
+JJNÂŸB‚™[˜Ý[Ûˆ\Ü^T[]Q]šY[˜ÙUÙZYÚ
+ÛÝ\˜ÙJHÂˆYˆ
+ÛÝ\˜ÙHOOHœ™Yš[™YØÜ›ÜŠH™]\›ˆNÂˆYˆ
+ÛÝ\˜ÙHOOH˜Ø[™Y]WÜ™YÚ[ÛˆŠH™]\›ˆŽMNÂˆYˆ
+ÛÝ\˜ÙHOOHœ˜]×Ù[›ÈŠH™]\›ˆŽÂˆYˆ
+ÛÝ\˜ÙHOOH™]XÝÜˆŠH™]\›ˆŽÂˆ™]\›ˆÎÂŸB‚™[˜Ý[ÛˆØ[Xœ˜]Q\Ü^PÛÛÜÛÛ™šY[˜ÙJÂˆ›Û™PÛÛ™šY[˜ÙHHˆÛÛÜ”ÝHˆÛÝ\˜ÙPÛÛ™šY[˜ÙHHˆ]šY[˜ÙUÙZYÚHKŸHHßJHÂˆÛÛœÝ›Û™HH›Ü›X[^™PÛÛ™šY[˜ÙT\˜Ù[
+›Û™PÛÛ™šY[˜ÙJHÈLÂˆÛÛœÝÝHÛ[\J›Ü›X[^™PÛÛÜ”Ý
+ÛÛÜ”Ý
+JNÂˆÛÛœÝÛÝ\˜ÙHH›Ü›X[^™PÛÛ™šY[˜ÙT\˜Ù[
+ÛÝ\˜ÙPÛÛ™šY[˜ÙJHÈLÂˆÛÛœÝÛÛXš[™YH
+›Û™H
+ˆMH
+ÈÝ
+ˆŒÌ
+ÈÛÝ\˜ÙH
+ˆŒMJH
+ˆLÂˆ™]\›ˆØ[Xœ˜]PÛÛ™šY[˜ÙJÛÛXš[™YÈ]šY[˜ÙUÙZYÚ›ÛÜŽˆKÙZ[[™ÎˆNHJNÂŸB‚™[˜Ý[ÛˆÚ]\Ü^PÛÛÜÛÛ™šY[˜ÙJÛÛÜ‹ÛÛ^HßJHÂˆYˆ
+XÛÛÜŠH™]\›ˆÛÛÜŽÂˆ™]\›ˆÂˆ‹‹˜ÛÛÜ‹ˆÛÛ™šY[˜ÙNˆØ[Xœ˜]Q\Ü^PÛÛÜÛÛ™šY[˜ÙJÂˆ›Û™PÛÛ™šY[˜ÙNˆÛÛ^ž›Û™PÛÛ™šY[˜ÙKˆÛÛÜ”ÝˆÛÛÜËœÝˆÛÝ\˜ÙPÛÛ™šY[˜ÙNˆÛÛ^œÛÝ\˜ÙPÛÛ™šY[˜ÙKˆ]šY[˜ÙUÙZYÚˆÛÛ^™]šY[˜ÙUÙZYÚˆJKˆNÂŸB‚™[˜Ý[ÛˆZ[ÛÛ[Z[˜][Û‘]šY[˜ÙTØÛÜ™JÈÛZ[˜[H[™YÚ[ÛÛÝ™\˜YÙHHÝ\™\ÜÚ[Û‘Ø]\ÈHßHHHßJHÂˆÛÛœÝ^HØY™R^
+ÛZ[˜[Ë˜˜\ÙHÛZ[˜[Ëš^ˆŠNÂˆÛÛœÝÝHÛ[\J›Ü›X[^™PÛÛÜ”Ý
+ÛZ[˜[ËœÝ
+JNÂˆÛÛœÝYHH^ÈÙ]YJ^
+HˆÂˆÛÛœÝØ]H^ÈÙ]Ø]
+^
+HˆÂˆÛÛœÝYÚH^ÈÙ]YÚ
+^
+HˆÂˆÛÛœÝÚÚ[“ZÙHH^	‰ˆZ\Ðœ›ÝÛ‘˜[Z[R^
+^
+H	‰ˆYHH	‰ˆYHHMH	‰ˆØ]HŒLˆ	‰ˆØ]HMH	‰ˆYÚHˆ	‰ˆYÚHŽÈHˆÂˆÛÛœÝYÚYÚZÙHH^	‰ˆYÚHŽˆ	‰ˆØ]HŒŒˆÈHˆÂˆÛÛœÝ™]]˜[ÙXZÈHÝ\™\ÜÚ[Û‘Ø]\ÏËš\Ó™]]˜[ÛÛ[Z[˜][ÛˆÈHˆÂˆÛÛœÝÝÔÚYÛ˜[HÝ\™\ÜÚ[Û‘Ø]\ÏË›ÝÔÚYÛ˜[™YÚ[ÛˆÈHˆÂˆÛÛœÝÙXZÑÛZ[˜[HÝ\™\ÜÚ[Û‘Ø]\ÏËš\ÕÙXZÑÛZ[˜[]šY[˜ÙHÈHˆÂˆÛÛœÝYØXÞTÚÚ[‘Ø]HHÝ\™\ÜÚ[Û‘Ø]\ÏËš™]Ù[žTÚÚ[ÛÛ[Z[˜][ÛˆÈHˆÂˆÛÛœÝXÚÓÙÛÝ™\˜YÙHHÛ[\JHH[X™\Š™YÚ[ÛÛÝ™\˜YÙH
+JNÂˆÛÛœÝÛÛ\Û™[ÈHÂˆÚÚ[—ÛZÙNˆ›Ý[™ŠÚÚ[“ZÙH
+ˆŒÍ
+KˆYÚYÚÛZÙNˆ›Ý[™ŠYÚYÚZÙH
+ˆŒ
+Kˆ™]]˜[ÝÙXZÎˆ›Ý[™Š™]]˜[ÙXZÈ
+ˆŒLŠKˆÝ×ÜÚYÛ˜[ˆ›Ý[™ŠÝÔÚYÛ˜[
+ˆŒ
+KˆÙXZ×ÙÛZ[˜[ˆ›Ý[™ŠÙXZÑÛZ[˜[
+ˆŒ
+KˆYØXÞWÜÚÚ[—ÙØ]Nˆ›Ý[™ŠYØXÞTÚÚ[‘Ø]H
+ˆŒ
+KˆÝ×ØÛÝ™\˜YÙNˆ›Ý[™ŠXÚÓÙÛÝ™\˜YÙH
+ˆ
+HHÝ
+H
+ˆŒŠKˆNÂˆÛÛœÝÝ[H›Ý[™ŠØš™XÝ˜[Y\ÊÛÛ\Û™[ÊKœ™YXÙJ
+Ý[K˜[YJHOˆÝ[H
+È[X™\Š˜[YH
+K
+JNÂˆ™]\›ˆÈÝ[ÛÛ\Û™[ÈNÂŸB‚™[˜Ý[Ûˆ›][”™Z™XÝY\Ü^P[\›˜]]™\Ê˜XÙHH[
+HÂˆ™]\›ˆ
+˜XÙOËœÛÝ\˜Ù\È×JK™›]X\
+
+ÛÝ\˜ÙT›ÝÊHO‚ˆ
+ÛÝ\˜ÙT›ÝÏËœ™Z™XÝY×JK›X\
+
+Ø[™Y]JHOˆ
+ÂˆÛÝ\˜ÙNˆÛÝ\˜ÙT›ÝËœÛÝ\˜ÙKˆ^ˆØ[™Y]Kš^[ˆÝˆØ[™Y]KœÝÏÈ[ˆ™Z™XÝ[Û—Ü™X\ÛÛŽˆØ[™Y]Kœ™X\ÛÛˆ››ÝÜÙ[XÝY‹ˆJJBˆ
+NÂŸB‚™[˜Ý[ÛˆZ[˜]Ñ[›ÐÛÛÜÛ\Ý\œÊ™YÚ[ÛÛÛÜœÈH×JHÂˆÛÛœÝÛ\Ý\œÈH×NÂ‚ˆ›Üˆ
+ÛÛœÝÛÛÜˆÙˆ™YÚ[ÛÛÛÜœÈ×JHÂˆÛÛœÝ^HØY™R^
+ÛÛÜËš^
+NÂˆYˆ
+Z^
+HÛÛ[YNÂ‚ˆÛÛœÝÝH›Ü›X[^™PÛÛÜ”Ý
+ÛÛÜËœÝ
+NÂˆYˆ
+ÝH
+HÛÛ[YNÂ‚ˆ]XÙYH˜[ÙNÂˆ›Üˆ
+ÛÛœÝÛ\Ý\ˆÙˆÛ\Ý\œÊHÂˆÛÛœÝØ[YRYQ˜[Z[HHYQ\Ý[˜ÙJ^Û\Ý\‹˜˜\ÙJHHNÂˆÛÛœÝ›Ý™]]˜[HÙ]Ø]
+^
+HŒMˆ	‰ˆÙ]Ø]
+Û\Ý\‹˜˜\ÙJHŒMŽÂˆYˆ
+ÛÛÜ‘\Ý[˜ÙSXŠ^Û\Ý\‹˜˜\ÙJHL	‰ˆ
+Ø[YRYQ˜[Z[H›Ý™]]˜[
+JHÂˆÛ\Ý\‹˜ÛÛÜœËœ\Ú
+ÛÛÜŠNÂˆÛ\Ý\‹ÙZYÚ
+ÏHÝÂˆYˆ
+Ýˆ[X™\ŠÛ\Ý\‹ÜÝ
+JHÂˆÛ\Ý\‹˜˜\ÙHH^ÂˆÛ\Ý\‹ÜÝHÝÂˆBˆXÙYHYNÂˆœ™XZÎÂˆBˆB‚ˆYˆ
+\XÙY
+HÂˆÛ\Ý\œËœ\Ú
+Âˆ˜\ÙNˆ^ˆÛÛÜœÎˆØÛÛÜ—KˆÙZYÚˆÝˆÜÝˆÝˆJNÂˆBˆB‚ˆ™]\›ˆÛ\Ý\œÂˆ›X\
+
+Û\Ý\ŠHOˆ
+Âˆ‹‹˜Û\Ý\‹ˆÝˆ›Ý[™ŠÛ\Ý\‹ÙZYÚ
+KˆJJBˆœÛÜ
+
+KŠHOˆ[X™\ŠËœÝ
+HH[X™\ŠOËœÝ
+JNÂŸB‚‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆ’TÕPSSTÔ•SÑHVQT‚OOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â™[˜Ý[Ûˆ\Ó™X\•Ú]J^
+HÂˆÛÛœÝØY™HHØY™R^
+^
+NÂˆYˆ
+\ØY™JH™]\›ˆ˜[ÙNÂˆÛÛœÝXˆHÙ]XŠØY™JNÂˆÛÛœÝÚ›ÛXSXYÛš]YHHÙ]Ú›ÛXSXYÛš]YQœ›ÛSXŠXŠNÂˆ™]\›ˆX‹›HÎ	‰ˆÚ›ÛXSXYÛš]YHHŒŽÂŸB‚™[˜Ý[Ûˆ\Ó™X\›XÚÊ^
+HÂˆÛÛœÝØY™HHØY™R^
+^
+NÂˆYˆ
+\ØY™JH™]\›ˆ˜[ÙNÂˆÛÛœÝXˆHÙ]XŠØY™JNÂˆÛÛœÝÚ›ÛXSXYÛš]YHHÙ]Ú›ÛXSXYÛš]YQœ›ÛSXŠXŠNÂˆ™]\›ˆX‹›Hˆ	‰ˆÚ›ÛXSXYÛš]YHHŒÂŸB‚™[˜Ý[ÛˆZ[š\ÝX[[\Ü[˜ÙJ^ÝH
+HÂˆÛÛœÝØY™HHØY™R^
+^
+NÂˆYˆ
+\ØY™JH™]\›ˆ[Â‚ˆÛÛœÝXˆHÙ]XŠØY™JNÂˆÛÛœÝ˜Z]ÈHÙ]\˜Ù\X[˜Z]ÊØY™JNÂˆÛÛœÝÛ\ÜÚYšXØ][ÛˆHÛ\ÜÚYžPÛÛÜ•ŒŠØY™JNÂ‚ˆÛÛœÝYÚHÙ]YÚ
+ØY™JNÂˆÛÛœÝØ]HÙ]Ø]
+ØY™JNÂˆÛÛœÝÚ›ÛXSXYÛš]YHH[X™\Š˜Z]Ë˜Ú›ÛXWÛXYÛš]YH
+NÂ‚ˆÛÛœÝYÚYÚÝ™[™ÝH\Ó™X\•Ú]JØY™JBˆÈÛ[\L
+
+X‹›HÌŠH
+ˆ‹Œˆ
+È
+ŒˆHX]›Z[ŠÚ›ÛXSXYÛš]YKŒŠJH
+ˆKJBˆˆÂ‚ˆÛÛœÝÚYÝÔÝ™[™ÝH\Ó™X\›XÚÊØY™JBˆÈÛ[\L
+
+ÌHX‹›
+H
+ˆ‹ˆ
+È
+ŒHX]›Z[ŠÚ›ÛXSXYÛš]YKŒ
+JH
+ˆK
+BˆˆÂ‚ˆÛÛœÝXØÙ[Ý™[™ÝHÛ[\L
+ˆX]›Z[ŠÚ›ÛXSXYÛš]YH
+ˆŠH
+ÂˆX]›Z[ŠÍØ]
+ˆÎ
+H
+ÂˆX]›Z[Š‹X]˜XœÊX‹˜JH
+ˆŒÌˆ
+ÈX]˜XœÊX‹˜ŠH
+ˆŒ
+Bˆ
+NÂ‚ˆÛÛœÝÛÛ˜\ÝÝ[X[HX]œ›Ý[™
+ˆÛ[\L
+ˆYÚYÚÝ™[™Ý
+ˆˆ
+ÂˆÚYÝÔÝ™[™Ý
+ˆˆ
+ÂˆXØÙ[Ý™[™Ý
+ˆŒÌˆ
+Âˆ[X™\ŠÝ
+H
+ˆL‚ˆ
+Bˆ
+NÂ‚ˆÛÛœÝš\ÝX[ÙZYÚHX]œ›Ý[™
+ˆÛ[\L
+ˆ[X™\ŠÝ
+H
+ˆŒˆ
+ÂˆYÚYÚÝ™[™Ý
+ˆŒÎ
+ÂˆÚYÝÔÝ™[™Ý
+ˆŒÎ
+ÂˆXØÙ[Ý™[™Ý
+ˆŒ‚ˆ
+Bˆ
+NÂ‚ˆ™]\›ˆÂˆ^ˆØY™KˆÝˆ›Ý[™ŠÝ
+KˆYÚYÚÜÝ™[™ÝˆX]œ›Ý[™
+YÚYÚÝ™[™Ý
+KˆÚYÝ×ÜÝ™[™ÝˆX]œ›Ý[™
+ÚYÝÔÝ™[™Ý
+KˆXØÙ[ÜÝ™[™ÝˆX]œ›Ý[™
+XØÙ[Ý™[™Ý
+KˆÛÛ˜\ÝÜÝ[X[ˆÛÛ˜\ÝÝ[X[ˆš\ÝX[ÝÙZYÚˆš\ÝX[ÙZYÚˆ›ÛWÚ[‚ˆYÚYÚÝ™[™ÝHŒˆÈšYÚYÚ‚ˆˆÚYÝÔÝ™[™ÝHŒˆÈœÚYÝÈ‚ˆˆXØÙ[Ý™[™ÝHL‚ˆÈ˜XØÙ[‚ˆˆ˜›ÙH‹ˆ˜[Z[NˆÛ\ÜÚYšXØ][Û‹™˜[Z[Kˆ[™NˆÛ\ÜÚYšXØ][Û‹›[™KˆYÚˆ›Ý[™ŠYÚ
+KˆØ]ˆ›Ý[™ŠØ]
+KˆX‹ˆ\˜Ù\X[ˆ˜Z]ËˆNÂŸB‚™[˜Ý[ÛˆÛÛXÝ[\Ü[ÛÛÜœÊÜÛÛÜœËÛZ[˜[^
+HÂˆÛÛœÝÛÝ\˜ÙR^\ÈH[š\R^\ÊÙÛZ[˜[^‹‹ÜÛÛÜœÐžTÝ
+ÜÛÛÜœË
+WJNÂˆÛÛœÝÝ]H×NÂ‚ˆ›Üˆ
+ÛÛœÝ^ÙˆÛÝ\˜ÙR^\ÊHÂˆÛÛœÝÝH[X™\ŠÜÛÛÜœÏË™š[™
+
+
+HOˆØY™R^
+Ëš^
+HOOH^
+OËœÝ
+NÂˆÛÛœÝ[\Ü[˜ÙHHZ[š\ÝX[[\Ü[˜ÙJ^Ý
+NÂˆYˆ
+Z[\Ü[˜ÙJHÛÛ[YNÂˆÝ]œ\Ú
+Âˆ^ˆ˜[YNˆÙ]ÛÛÜ“˜[YJ^
+KˆÝˆ›Ý[™ŠÝ
+Kˆ[\Ü[˜ÙKˆXŽˆ[\Ü[˜ÙK›X‹ˆ\˜Ù\X[ˆ[\Ü[˜ÙKœ\˜Ù\X[ˆJNÂˆB‚ˆÛÛœÝÛÜYžR[\Ü[˜ÙHHË‹‹›Ý]KœÛÜ
+ˆ
+KŠHOˆ[X™\ŠËš[\Ü[˜ÙOËš\ÝX[ÝÙZYÚ
+HH[X™\ŠOËš[\Ü[˜ÙOËš\ÝX[ÝÙZYÚ
+Bˆ
+NÂ‚ˆÛÛœÝÛÜYžPÛÛ˜\ÝHË‹‹›Ý]KœÛÜ
+ˆ
+KŠHOˆ[X™\ŠËš[\Ü[˜ÙOË˜ÛÛ˜\ÝÜÝ[X[
+HH[X™\ŠOËš[\Ü[˜ÙOË˜ÛÛ˜\ÝÜÝ[X[
+Bˆ
+NÂ‚ˆ™]\›ˆÂˆ[\Ü[ØÛÛÜœÎˆÛÜYžR[\Ü[˜ÙKœÛXÙJŠKˆÛÛ˜\ÝØÛÛÜœÎˆÛÜYžPÛÛ˜\ÝœÛXÙJ
+KˆNÂŸB‚™[˜Ý[ÛˆY\™ÙQÛZ[˜[[™[\Ü[ÛÛÜœÊÜÛÛÜœËÛZ[˜[^
+HÂˆÛÛœÝÛZ[˜[ÛÛH[š\R^\ÊÙÛZ[˜[^‹‹ÜÛÛÜœÐžTÝ
+ÜÛÛÜœËŠWJNÂˆÛÛœÝÈ[\Ü[ØÛÛÜœÈHHÛÛXÝ[\Ü[ÛÛÜœÊÜÛÛÜœËÛZ[˜[^
+NÂ‚ˆÛÛœÝY\™ÙY^\ÈH[š\R^\ÊÂˆ‹‹™ÛZ[˜[ÛÛˆ‹‹š[\Ü[ØÛÛÜœË›X\
+
+
+HOˆš^
+KˆJNÂ‚ˆ™]\›ˆY\™ÙY^\ËœÛXÙJ
+K›X\
+
+^Y
+HOˆÂˆÛÛœÝÝBˆYOOHˆÈX]›X^
+ŒË[X™\ŠÜÛÛÜœÏË™š[™
+
+
+HOˆØY™R^
+Ëš^
+HOOH^
+OËœÝ
+HŒÊBˆˆ[X™\ŠÜÛÛÜœÏË™š[™
+
+
+HOˆØY™R^
+Ëš^
+HOOH^
+OËœÝ
+NÂ‚ˆÛÛœÝ›Ùš[HHZ[ÛÛÜ”›Ùš[J^Ý
+NÂˆÛÛœÝ[\Ü[˜ÙHHZ[š\ÝX[[\Ü[˜ÙJ^Ý
+NÂ‚ˆ™]\›ˆÂˆ^ˆ›Ùš[Kš^ˆ˜[YNˆ›Ùš[K›˜[YKˆÝˆ›Ùš[KœÝˆYNˆ›Ùš[KšYKˆØ]ˆ›Ùš[KœØ]ˆYÚˆ›Ùš[K›YÚˆXŽˆ›Ùš[K›X‹ˆ\˜Ù\X[ˆ›Ùš[Kœ\˜Ù\X[ˆ˜[Z[Nˆ›Ùš[K™˜[Z[Kˆ[™Nˆ›Ùš[K›[™Kˆš]šYˆ›Ùš[Kš]šYˆÛÛÜ—ÚY[]Nˆ›Ùš[K˜ÛÛÜ—ÚY[]Kˆ[\Ü[˜ÙKˆNÂˆJNÂŸB‚‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆÕ•PÕTSÓÓÔˆS•SQÑSÑBOOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â™[˜Ý[ÛˆÛ\ÜÚYžTÝXÝ\˜[›ÛJÛÛÜŠHÂˆÛÛœÝX“H[X™\ŠÛÛÜË›XË›
+NÂˆÛÛœÝÚ›ÛXHH[X™\ŠÛÛÜËœ\˜Ù\X[Ë˜Ú›ÛXWÛXYÛš]YH
+NÂˆÛÛœÝ[\Ü[˜ÙHH[X™\ŠÛÛÜËš[\Ü[˜ÙOËš\ÝX[ÝÙZYÚ
+NÂˆÛÛœÝYÚYÚÝ™[™ÝH[X™\ŠÛÛÜËš[\Ü[˜ÙOËšYÚYÚÜÝ™[™Ý
+NÂˆÛÛœÝÚYÝÔÝ™[™ÝH[X™\ŠÛÛÜËš[\Ü[˜ÙOËœÚYÝ×ÜÝ™[™Ý
+NÂ‚ˆYˆ
+X“ˆ	‰ˆÚ›ÛXHH	‰ˆ
+[\Ü[˜ÙHˆÍHYÚYÚÝ™[™ÝˆJJHÂˆ™]\›ˆšYÚYÚŽÂˆB‚ˆYˆ
+X“Ž	‰ˆÚ›ÛXHH	‰ˆ
+[\Ü[˜ÙHˆÍHÚYÝÔÝ™[™ÝˆJJHÂˆ™]\›ˆœÚYÝÈŽÂˆB‚ˆYˆ
+[\Ü[˜ÙHˆH	‰ˆÚ›ÛXHÌ
+HÂˆ™]\›ˆ™Ü˜\XÈŽÂˆB‚ˆYˆ
+Ú›ÛXHˆÛÛÜËš]šY
+HÂˆ™]\›ˆ˜XØÙ[ŽÂˆB‚ˆYˆ
+[\Ü[˜ÙHˆÌ
+HÂˆ™]\›ˆš[HŽÂˆB‚ˆ™]\›ˆ˜›ÙHŽÂŸB‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆ’TÕPSS•SQÑSÑHVQT‚OOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â‚™[˜Ý[ÛˆÛ\ÜÚYžTÝ\™˜XÙT›ÛJÛÛÜ‹ÛZ[˜[^H[
+HÂˆÛÛœÝ^HØY™R^
+ÛÛÜËš^
+NÂˆYˆ
+Z^
+H™]\›ˆ˜›ÙHŽÂ‚ˆÛÛœÝÝH[X™\ŠÛÛÜËœÝ
+NÂˆÛÛœÝX“H[X™\ŠÛÛÜË›XË›
+NÂˆÛÛœÝÚ›ÛXSXYÛš]YHH[X™\ŠÛÛÜËœ\˜Ù\X[Ë˜Ú›ÛXWÛXYÛš]YH
+NÂˆÛÛœÝš\ÝX[ÙZYÚH[X™\ŠÛÛÜËš[\Ü[˜ÙOËš\ÝX[ÝÙZYÚ
+NÂˆÛÛœÝÛÛ˜\ÝÝ[X[H[X™\ŠÛÛÜËš[\Ü[˜ÙOË˜ÛÛ˜\ÝÜÝ[X[
+NÂˆÛÛœÝYÚYÚÝ™[™ÝH[X™\ŠÛÛÜËš[\Ü[˜ÙOËšYÚYÚÜÝ™[™Ý
+NÂˆÛÛœÝÚYÝÔÝ™[™ÝH[X™\ŠÛÛÜËš[\Ü[˜ÙOËœÚYÝ×ÜÝ™[™Ý
+NÂˆÛÛœÝXØÙ[Ý™[™ÝH[X™\ŠÛÛÜËš[\Ü[˜ÙOË˜XØÙ[ÜÝ™[™Ý
+NÂˆÛÛœÝÝXÝ\˜[›ÛHH›Ü›X[^™U^
+ÛÛÜËœÝXÝ\˜[Ü›ÛH˜›ÙHŠNÂ‚ˆÛÛœÝÛZ[˜[\ÝHÛZ[˜[^ÈÛÛÜ‘\Ý[˜ÙSXŠ^ÛZ[˜[^
+HˆÂ‚ˆYˆ
+YÚYÚÝ™[™ÝHŒ	‰ˆÝHŒÊH™]\›ˆšYÚYÚÝš[HŽÂˆYˆ
+ÚYÝÔÝ™[™ÝHŒ	‰ˆÝHŒÍJH™]\›ˆœÚYÝ×ÜÝXÝ\™HŽÂ‚ˆYˆ
+ˆÛÛ˜\ÝÝ[X[HÌ	‰‚ˆXØÙ[Ý™[™ÝHL	‰‚ˆÝHŒN	‰‚ˆÛZ[˜[\ÝHMBˆ
+HÂˆ™]\›ˆ™Ü˜\X×Ù]Z[ŽÂˆB‹ËÈ<'å)H‘UÎˆY™™\™[X]H\™ÙHYÚœÈ\šÈÝ\™˜XÙ\ÂšYˆ
+ÝHŒŒˆ	‰ˆš\ÝX[ÙZYÚH	‰ˆX“ˆŒ
+HÂˆ™]\›ˆ›YÚÙšY[ŽÂŸB‚šYˆ
+ÝHŒŒˆ	‰ˆš\ÝX[ÙZYÚH	‰ˆX“
+HÂˆ™]\›ˆ™\š×ÙšY[ŽÂŸBˆYˆ
+ÝHŒŒˆ	‰ˆš\ÝX[ÙZYÚH	‰ˆÝXÝ\˜[›ÛHOOH˜›ÙHŠHÂˆ™]\›ˆ˜›ÙWÙ˜XœšXÈŽÂˆB‚ˆYˆ
+ÝHŒMH	‰ˆÚ›ÛXSXYÛš]YHHJHÂˆ™]\›ˆš[HŽÂˆB‚ˆYˆ
+XØÙ[Ý™[™ÝHL	‰ˆÝHŒLŠHÂˆ™]\›ˆ›ZXÜ›×ØXØÙ[ŽÂˆB‚ˆ™]\›ˆ˜›ÙHŽÂŸB‚™[˜Ý[ÛˆZ[š\ÝX[›Û™\ÊÛÛÜœÈH×JHÂˆÛÛœÝÛÜYHË‹‹˜ÛÛÜœ×KœÛÜ
+ˆ
+KŠHOˆ[X™\ŠËš[\Ü[˜ÙOËš\ÝX[ÝÙZYÚ
+HH[X™\ŠOËš[\Ü[˜ÙOËš\ÝX[ÝÙZYÚ
+Bˆ
+NÂ‚ˆ™]\›ˆÂˆÛZ[˜[ˆÛÜYÌH[ˆÙXÛÛ™\žNˆÛÜYÌWH[ˆYÚYÚˆÛÜY™š[™
+
+ÊHOˆËš[\Ü[˜ÙOËšYÚYÚÜÝ™[™ÝˆL
+H[ˆÚYÝÎˆÛÜY™š[™
+
+ÊHOˆËš[\Ü[˜ÙOËœÚYÝ×ÜÝ™[™ÝˆL
+H[ˆXØÙ[ˆÛÜY™š[™
+
+ÊHOˆËš[\Ü[˜ÙOË˜XØÙ[ÜÝ™[™ÝˆL
+H[ˆNÂŸB‚™[˜Ý[ÛˆÙ\\˜]QÜ˜\XÕœÐ›ÙJÛÛÜœÈH×KÛZ[˜[^H[
+HÂˆÛÛœÝ›ÙHH×NÂˆÛÛœÝ]Z[H×NÂ‚ˆ›Üˆ
+ÛÛœÝÈÙˆÛÛÜœÊHÂˆÛÛœÝ›ÛHHÛ\ÜÚYžTÝ\™˜XÙT›ÛJËÛZ[˜[^
+NÂ‚ˆÛÛœÝ][HHÂˆ^ˆËš^ˆ˜[YNˆË›˜[YKˆÝˆËœÝˆÝ\™˜XÙWÜ›ÛNˆ›ÛKˆNÂ‚ˆYˆ
+›ÛHOOH™Ü˜\X×Ù]Z[ˆ›ÛHOOH›ZXÜ›×ØXØÙ[ŠHÂˆ]Z[œ\Ú
+][JNÂˆH[ÙHÂˆ›ÙKœ\Ú
+][JNÂˆBˆB‚ˆ™]\›ˆÂˆ›ÙWØÛÛÜœÎˆ›ÙKˆ]Z[ØÛÛÜœÎˆ]Z[ˆNÂŸB‚™[˜Ý[Ûˆ\š]™QÛZ[˜[™XYÜ™\ŠÛÛÜœÈH×KÛZ[˜[^H[
+HÂˆÛÛœÝ˜[šÙYHÛÛÜœÂˆ›X\
+
+ÊHOˆÂˆÛÛœÝÙZYÚH[X™\ŠÏËš[\Ü[˜ÙOËš\ÝX[ÝÙZYÚ
+NÂˆÛÛœÝÛÛ˜\ÝH[X™\ŠÏËš[\Ü[˜ÙOË˜ÛÛ˜\ÝÜÝ[X[
+NÂˆÛÛœÝÝH[X™\ŠÏËœÝ
+NÂ‚ˆ]ØÛÜ™HHÙZYÚ
+ˆH
+ÈÛÛ˜\Ý
+ˆŒÈ
+ÈÝ
+ˆÂ‚ˆ™]\›ˆÂˆ^ˆËš^ˆ˜[YNˆË›˜[YKˆØÛÜ™KˆNÂˆJBˆœÛÜ
+
+KŠHOˆ‹œØÛÜ™HHKœØÛÜ™JNÂ‚ˆ™]\›ˆÂˆš\œÝˆ˜[šÙYÌH[ˆÙXÛÛ™ˆ˜[šÙYÌWH[ˆ\™ˆ˜[šÙYÌ—H[ˆNÂŸB‚™[˜Ý[ÛˆZ[š\ÝX[[[YÙ[˜ÙJÈÛZ[˜[^›Ü›X[^™YÛÛÜœÈH×KÛÛÜ”›Û\ÈH×HJHÂˆÛÛœÝ›Û™\ÈHZ[š\ÝX[›Û™\Ê›Ü›X[^™YÛÛÜœÊNÂˆÛÛœÝ›ÙUœÑ]Z[HÙ\\˜]QÜ˜\XÕœÐ›ÙJ›Ü›X[^™YÛÛÜœËÛZ[˜[^
+NÂˆÛÛœÝ™XYÜ™\ˆH\š]™QÛZ[˜[™XYÜ™\Š›Ü›X[^™YÛÛÜœËÛZ[˜[^
+NÂ‚ˆÛÛœÝÛZ[˜[›ÙHBˆ›ÙUœÑ]Z[˜›ÙWØÛÛÜœÖÌH™XYÜ™\‹™š\œÝ[Â‚ˆ™]\›ˆÂˆÛZ[˜[Ýš\ÝX[Ü™XYˆ™XYÜ™\‹™š\œÝˆÛZ[˜[Ø›ÙWØÛÛÜŽˆÛZ[˜[›ÙKˆš\ÝX[Þ›Û™\Îˆ›Û™\Ëˆ›ÙWÝœ×Ù]Z[ˆ›ÙUœÑ]Z[ˆÛZ[˜[Ü™XYÛÜ™\Žˆ™XYÜ™\‹ˆÛÛ\ÜÚ][Û—ÜÝ[[X\žNˆÛZ[˜[›ÙBˆÈ	ÙÛZ[˜[›ÙK›˜[Y_H\Èš]š[™ÈHXZ[ˆš\ÝX[™XYˆˆ“›ÈÛX\ˆÛZ[˜[š\ÝX[™XY‹ˆNÂŸB‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆÐT“QS•“Ó‘HÐÐQ‘“ÓOOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â‚™[˜Ý[ÛˆZ[›Û™PØ[™Y]JÛÛÜ‹›Û™KØÛÜ™JHÂˆYˆ
+XÛÛÜËš^
+H™]\›ˆ[Â‚ˆ™]\›ˆÚ]ÛÛÜ’Y[]JÂˆ›Û™Kˆ^ˆÛÛÜ‹š^ˆ˜[YNˆÛÛÜ‹›˜[YHÙ]ÛÛÜ“˜[YJÛÛÜ‹š^
+KˆÝˆ›Ý[™ŠÛÛÜ‹œÝ
+KˆØÛÜ™NˆX]œ›Ý[™
+ØÛÜ™H
+KˆÝXÝ\˜[Ü›ÛNˆÛÛÜ‹œÝXÝ\˜[Ü›ÛH˜›ÙH‹ˆÝ\™˜XÙWÜ›ÛNˆÛ\ÜÚYžTÝ\™˜XÙT›ÛJÛÛÜŠKˆ˜[Z[NˆÛÛÜ‹™˜[Z[HÛ\ÜÚYžPÛÛÜ•ŒŠÛÛÜ‹š^
+K™˜[Z[Kˆ[\Ü[˜ÙNˆÛÛÜ‹š[\Ü[˜ÙH[ˆJNÂŸB‚™[˜Ý[ÛˆZ[ÙYÛY[YÛÛÜ“Øš™XÝ
+ÂˆÛÛÜ‹ˆ›Û™Kˆ›ÛKˆÛÝ\˜ÙU\HH™ÛØ˜[Ü[]H‹ˆÙYÛY[X™[H[ˆÛÛ™šY[˜ÙHHŸJHÂˆÛÛœÝØY™HHØY™R^
+ÛÛÜËš^
+NÂˆYˆ
+\ØY™JH™]\›ˆ[Â‚ˆÛÛœÝXˆHÙ]XŠØY™JNÂˆÛÛœÝÛHÚ›ÛXJØY™JKšÛ
+
+NÂ‚ˆ™]\›ˆÚ]ÛÛÜ’Y[]JÂˆ^ˆØY™Kˆ˜[YNˆÙ]ÛÛÜ“˜[YJØY™JKˆPŽˆÂˆˆ›Ý[™ŠX‹›
+KˆNˆ›Ý[™ŠX‹˜JKˆŽˆ›Ý[™ŠX‹˜ŠKˆKˆ\˜Ù\X[Ý˜Z]ÎˆÙ]\˜Ù\X[˜Z]ÊØY™JKˆÓˆÂˆˆ›Ý[™Š[X™\‹š\Ñš[š]JÛË–ÌJHÈÛÌHˆ
+KˆÎˆ›Ý[™ŠÛË–ÌWH
+Kˆˆ›Ý[™ŠÛË–Ì—H
+KˆKˆ›ÛNˆ›ÛH˜›ÙH‹ˆ›Û™Nˆ›Û™H[šÛ›ÝÛˆ‹ˆÛÛ™šY[˜ÙNˆX]œ›Ý[™
+Û[\L
+ÛÛ™šY[˜ÙH
+JKˆÛÝ\˜ÙWÝ\NˆÛÝ\˜ÙU\KˆÙYÛY[ÛX™[ˆÙYÛY[X™[›Û™H[šÛ›ÝÛˆ‹ˆÝˆ›Ý[™ŠÛÛÜËœÝ
+KˆJNÂŸB‚™[˜Ý[ÛˆÙ]›XÚÓX[˜ÙSX™[
+^
+HÂˆÛÛœÝYÚHÙ]YÚ
+^
+NÂˆYˆ
+YÚŒLŠH™]\›ˆ’™]›XÚÈŽÂˆYˆ
+YÚŒN
+H™]\›ˆ‘Y\›XÚÈŽÂˆ™]\›ˆ‘Ü˜\]H›XÚÈŽÂŸB‚‚™[˜Ý[ÛˆZ[ÛÛ™šY[˜ÙPœ™XZÙÝÛŠÂˆÛÝ\˜ÙPÛÛ™šY[˜ÙHHˆ™YÚ[ÛÛÝ™\˜YÙHHˆÙZYÚY™YÚ[ÛÛÛ™šY[˜ÙHHˆÛÛÜÛÝ[HˆÛZ[˜[ÝHˆÛ\Ý\ÛÝ[Hˆ][XÛÛÜ‘]XÝYH˜[ÙKˆÝ\™\ÜÚ[Û‘Ø]\ÈHßKˆÛÛ\]YØÛÜ™HHˆš[˜[ÛÛ™šY[˜ÙHHŸHHßJHÂˆ™]\›ˆÂˆÛÝ\˜ÙWØÛÛ™šY[˜ÙNˆX]œ›Ý[™
+Û[\L
+[X™\ŠÛÝ\˜ÙPÛÛ™šY[˜ÙH
+JJKˆ™YÚ[Û—ØÛÝ™\˜YÙNˆ›Ý[™Š[X™\Š™YÚ[ÛÛÝ™\˜YÙH
+JKˆÙZYÚYÜ™YÚ[Û—ØÛÛ™šY[˜ÙNˆ›Ý[™Š[X™\ŠÙZYÚY™YÚ[ÛÛÛ™šY[˜ÙH
+JKˆÛÛÜ—ØÛÝ[ˆ[X™\ŠÛÛÜÛÝ[
+KˆÛZ[˜[ÜÝˆ›Ý[™Š[X™\ŠÛZ[˜[Ý
+JKˆÛ\Ý\—ØÛÝ[ˆ[X™\ŠÛ\Ý\ÛÝ[
+Kˆ][XÛÛÜ—Ù]XÝYˆ›ÛÛX[Š][XÛÛÜ‘]XÝY
+KˆÝ\™\ÜÚ[Û—ÙØ]\ÎˆÝ\™\ÜÚ[Û‘Ø]\ÈßKˆÛÛ\]YÜØÛÜ™NˆX]œ›Ý[™
+Û[\L
+[X™\ŠÛÛ\]YØÛÜ™H
+JJKˆš[˜[ØÛÛ™šY[˜ÙNˆX]œ›Ý[™
+Û[\L
+[X™\Šš[˜[ÛÛ™šY[˜ÙH
+JJKˆNÂŸB‚™[˜Ý[Ûˆ\Ñ^XÚ]ÛÛÜ“ÝÛ™\œÚ\
+ÛÛÜˆHßJHÂˆÛÛœÝÝ]HHÝš[™ÊÛÛÜË›ÝÛ™\œÚ\ÜÝ]HÛÛÜË›ÝÛ™\œÚ\ˆŠKÓÝÙ\Ø\ÙJ
+NÂˆ™]\›ˆÛÛÜË›ÝÛ™\œÚ\Ý˜[Y]YOOHYH	‰ˆÈ›ÝÛ™Y‹›Ý]š]‹œÜÚ]]™H‹˜ÛÛ™š\›YY—Kš[˜ÛY\ÊÝ]JNÂŸB‚™[˜Ý[Ûˆ\ÔÜ]X[Ø\›Y[ÝÛ™\œÚ\
+›Û™RÙ^KÛÛÜˆHßJHÂˆÛÛœÝÛÝ\˜ÙHHÝš[™ÊÛÛÜËœÛÝ\˜ÙHÛÛÜË›YX\Ý\™[Y[ÜÛÝ\˜ÙHˆŠNÂˆÛÛœÝ›ÙTÚ\™HH[X™\ŠÛÛÜË˜›ÙWÜÚ\™JNÂˆÛÛœÝÜ]X[[˜[HH[X™\ŠÛÛÜËœÜ]X[Ü[˜[JNÂˆYˆ
+S[X™\‹š\Ñš[š]J›ÙTÚ\™JHS[X™\‹š\Ñš[š]JÜ]X[[˜[JJH™]\›ˆ˜[ÙNÂˆYˆ
+›Û™RÙ^HOOH\\—ÙØ\›Y[ˆ	‰ˆÛÝ\˜ÙHOOH\\—ÙØ\›Y[Ü\š]WÝŒHŠHÂˆÛÛœÝ›Ý[™\žTÚ\™HH[X™\ŠÛÛÜË˜›Ý[™\žWÜÚ\™JNÂˆÛÛœÝ[™\˜\›TÚ\™HH[X™\ŠÛÛÜË[™\˜\›WÜÚ\™JNÂˆ™]\›ˆ[X™\‹š\Ñš[š]J›Ý[™\žTÚ\™JH	‰ˆ[X™\‹š\Ñš[š]J[™\˜\›TÚ\™JH	‰‚ˆ›ÙTÚ\™HHH	‰ˆ›Ý[™\žTÚ\™HHˆ	‰ˆ[™\˜\›TÚ\™HHŒŽ	‰ˆÜ]X[[˜[HHŽÂˆBˆYˆ
+›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ˆ	‰ˆÛÝ\˜ÙHOOH›ÝÙ\—ÙØ\›Y[Ü\š]WÝŒˆŠHÂˆÛÛœÝÙ\\˜]Ü”Ú\™HH[X™\ŠÛÛÜËœÙ\\˜]Ü—ÜÚ\™JNÂˆ™]\›ˆ[X™\‹š\Ñš[š]JÙ\\˜]Ü”Ú\™JH	‰‚ˆ›ÙTÚ\™HHH	‰ˆÙ\\˜]Ü”Ú\™HHŒÌˆ	‰ˆÜ]X[[˜[HHŽÂˆBˆ™]\›ˆ˜[ÙNÂŸB‚™[˜Ý[Ûˆ\ÓX]\šX[Q\Ý[˜ÝØ\›Y[ÛÛÜŠš[X\žR^ÙXÛÛ™\žR^
+HÂˆÛÛœÝš[X\žHHØY™R^
+š[X\žR^ˆŠNÂˆÛÛœÝÙXÛÛ™\žHHØY™R^
+ÙXÛÛ™\žR^ˆŠNÂˆYˆ
+\š[X\žH\ÙXÛÛ™\žJH™]\›ˆ˜[ÙNÂˆÛÛœÝX‘\Ý[˜ÙHHÛÛÜ‘\Ý[˜ÙSXŠš[X\žKÙXÛÛ™\žJNÂˆYˆ
+X‘\Ý[˜ÙHN
+H™]\›ˆ˜[ÙNÂ‚ˆÛÛœÝYTÙ\\˜][ÛˆHYQ\Ý[˜ÙJš[X\žKÙXÛÛ™\žJNÂˆÛÛœÝØ]\˜][Û”Ù\\˜][ÛˆHX]˜XœÊÙ]Ø]
+š[X\žJHHÙ]Ø]
+ÙXÛÛ™\žJJNÂˆÛÛœÝYÚ™\ÜÔÙ\\˜][ÛˆHX]˜XœÊÙ]YÚ
+š[X\žJHHÙ]YÚ
+ÙXÛÛ™\žJJNÂˆÛÛœÝš[X\žS™]]˜[HÙ]Ø]
+š[X\žJHŒMÂˆÛÛœÝÙXÛÛ™\žS™]]˜[HÙ]Ø]
+ÙXÛÛ™\žJHŒMÂ‚ˆËÈØ[YKY\™XÝ[ÛˆÚ›ÛX]XÈÚY\È\™H[[Z[˜][Û‹ÝÛ™H]šY[˜ÙK›Ý›ÛÙ‚ˆËÈÙˆHÙXÛÛ™X]\šX[ˆ™]]˜[]œËXÚ›ÛX]XÈÛÛ˜\ÝÜˆHÝ›Û™È™]]˜[ˆËÈYÚ™\ÜÈÜ]Ø[ˆÝ[\ÝX›\ÚHÙ[Z[™[H\Ý[˜ÝX]\šX[‚ˆ™]\›ˆ
+ˆYTÙ\\˜][ÛˆHNˆØ]\˜][Û”Ù\\˜][ÛˆHŒHˆ
+Ù]YÚ
+ÙXÛÛ™\žJHHÙ]YÚ
+š[X\žJHHŒÌŠHˆ
+š[X\žS™]]˜[OOHÙXÛÛ™\žS™]]˜[	‰ˆX]›X^
+Ù]Ø]
+š[X\žJKÙ]Ø]
+ÙXÛÛ™\žJJHHŒH	‰ˆYÚ™\ÜÔÙ\\˜][ÛˆHŒMŠHˆ
+š[X\žS™]]˜[	‰ˆÙXÛÛ™\žS™]]˜[	‰ˆYÚ™\ÜÔÙ\\˜][ÛˆHŒŽ
+Bˆ
+NÂŸB‚™[˜Ý[ÛˆX]Ú\ÓÝ\‘Ø\›Y[š[X\žJš[X\žR^ÙXÛÛ™\žR^Ý\‘Ø\›Y[š[X\žR^\ÈH×JHÂˆÛÛœÝš[X\žHHØY™R^
+š[X\žR^ˆŠNÂˆÛÛœÝÙXÛÛ™\žHHØY™R^
+ÙXÛÛ™\žR^ˆŠNÂˆYˆ
+\š[X\žH\ÙXÛÛ™\žJH™]\›ˆ˜[ÙNÂˆÛÛœÝš[X\žQ\Ý[˜ÙHHÛÛÜ‘\Ý[˜ÙSXŠš[X\žKÙXÛÛ™\žJNÂˆ™]\›ˆ
+\œ˜^Kš\Ð\œ˜^JÝ\‘Ø\›Y[š[X\žR^\ÊHÈÝ\‘Ø\›Y[š[X\žR^\Èˆ×JKœÛÛYJ
+^
+HOˆÂˆÛÛœÝÝ\”š[X\žHHØY™R^
+^ˆŠNÂˆYˆ
+[Ý\”š[X\žJH™]\›ˆ˜[ÙNÂˆÛÛœÝÝ\‘\Ý[˜ÙHHÛÛÜ‘\Ý[˜ÙSXŠÝ\”š[X\žKÙXÛÛ™\žJNÂˆ™]\›ˆÝ\‘\Ý[˜ÙHHLˆ	‰ˆÝ\‘\Ý[˜ÙH
+Èš[X\žQ\Ý[˜ÙNÂˆJNÂŸB‚™[˜Ý[ÛˆZ[Ø\›Y[X›XØ][Û]]Üš]UŒJ›Û™RÙ^K›Û™Q]HHßK™YÚ[ÛÛÛÜœÈH×KÛÛ^HßJHÂˆYˆ
+Z\ÑØ\›Y[›Û™RÙ^J›Û™RÙ^JJHÂˆ™]\›ˆÈ\YYˆ˜[ÙK[]Nˆ™YÚ[ÛÛÛÜœËÝÛ™YÜÙXÛÛ™\žWØÛÝ[ˆNÂˆB‚ˆÛÛœÝÛZ[˜[^HØY™R^
+›Û™Q]OËš^ˆŠNÂˆÛÛœÝ›ÝÜÈH
+\œ˜^Kš\Ð\œ˜^J™YÚ[ÛÛÛÜœÊHÈ™YÚ[ÛÛÛÜœÈˆ×JK™š[\Š
+ÛÛÜŠHOˆØY™R^
+ÛÛÜËš^ÛÛÜË˜˜\ÙHˆŠJNÂˆÛÛœÝ[š[œÚXÈH›ÝÜË™š[™
+
+ÛÛÜŠHOˆÛÛÜËš[š[œÚX×ÛX]\šX[ÚY[]HOOHYJNÂˆÛÛœÝš[X\žHH[š[œÚXÈ›ÝÜË™š[™
+
+ÛÛÜŠHOˆÛZ[˜[^	‰ˆÛÛÜ‘\Ý[˜ÙSXŠÛÛÜËš^ÛÛÜË˜˜\ÙKÛZ[˜[^
+HŠH›ÝÜÖÌH›Û™Q]NÂˆÛÛœÝš[X\žR^HØY™R^
+š[X\žOËš^š[X\žOË˜˜\ÙHÛZ[˜[^ˆŠNÂˆ]Ý\™\ÜÙYÜ›ÜÜÖ›Û™Tš[X\žPÛÝ[HÂˆ]Ý\™\ÜÙYÝÛ™YYXÙTš[X\žPÛÝ[HÂˆÛÛœÝÝÛ™YÙXÛÛ™\šY\ÈH›ÝÜË™š[\Š
+ÛÛÜŠHOˆÂˆÛÛœÝ^HØY™R^
+ÛÛÜËš^ÛÛÜË˜˜\ÙHˆŠNÂˆYˆ
+Z^\š[X\žR^Z\ÓX]\šX[Q\Ý[˜ÝØ\›Y[ÛÛÜŠš[X\žR^^
+JH™]\›ˆ˜[ÙNÂˆYˆ
+X]Ú\ÓÝ\‘Ø\›Y[š[X\žJš[X\žR^^ÛÛ^Ë›Ý\‘Ø\›Y[š[X\žR^\ÊJHÂˆÝ\™\ÜÙYÜ›ÜÜÖ›Û™Tš[X\žPÛÝ[
+ÏHNÂˆ™]\›ˆ˜[ÙNÂˆBˆYˆ
+X]Ú\ÓÝ\‘Ø\›Y[š[X\žJš[X\žR^^ÛÛ^Ë›Ý\“ÝÛ™YYXÙTš[X\žR^\ÊJHÂˆÝ\™\ÜÙYÝÛ™YYXÙTš[X\žPÛÝ[
+ÏHNÂˆ™]\›ˆ˜[ÙNÂˆBˆ™]\›ˆ\Ñ^XÚ]ÛÛÜ“ÝÛ™\œÚ\
+ÛÛÜŠH\ÔÜ]X[Ø\›Y[ÝÛ™\œÚ\
+›Û™RÙ^KÛÛÜŠNÂˆJNÂ‚ˆÛÛœÝ[]HHš[X\žR^ÈÞÈ‹‹œš[X\žK^ˆš[X\žR^K‹‹›ÝÛ™YÙXÛÛ™\šY\×Hˆ›ÝÜÎÂˆ™]\›ˆÂˆ\YYˆYKˆ[]Kˆš[X\žWÚ^ˆš[X\žR^ˆÝÛ™YÜÙXÛÛ™\žWØÛÝ[ˆÝÛ™YÙXÛÛ™\šY\Ë›[™Ýˆ˜]×ØÛÛÜ—ØÛÝ[ˆ›ÝÜË›[™ÝˆÝ\™\ÜÙYÝ[›ÝÛ™YØÛÛÜ—ØÛÝ[ˆX]›X^
+›ÝÜË›[™ÝH[]K›[™Ý
+KˆÝ\™\ÜÙYØÜ›ÜÜ×Þ›Û™WÜš[X\žWØÛÝ[ˆÝ\™\ÜÙYÜ›ÜÜÖ›Û™Tš[X\žPÛÝ[ˆÝ\™\ÜÙYÛÝÛ™YÜYXÙWÜš[X\žWØÛÝ[ˆÝ\™\ÜÙYÝÛ™YYXÙTš[X\žPÛÝ[ˆ˜]×Ù]šY[˜ÙWÚ\×ÙXYÛ›ÜÝX×ÛÛ›NˆYKˆNÂŸB‚™[˜Ý[Ûˆ[™™\–›Û™PÛÛÜ”™XY
+›Û™RÙ^K›Û™Q]K›Ü›X[^™YÛÛÜœÈH×K™YÚ[ÛÛÛÜœÈH×K\ÙT™YÚ[Û“Û›HH˜[ÙKÛÛ^HßJHÂˆÛÛœÝ˜[˜XÚÓ˜[YHH›Û™Q]OË›˜[YH]PØ\ÙJÝš[™Ê›Û™RÙ^H[šÛ›ÝÛˆŠKœ™\XÙJ×ËÙËˆŠJNÂˆÛÛœÝXYÐÛÛ^HÂˆ›Û™WØÛÛÜ—ÜÛÝ\˜ÙNˆÛÛ^Ëž›Û™PÛÛÜ”ÛÝ\˜ÙH
+™YÚ[ÛÛÛÜœË›[™ÝÈ˜Û\Ý\ˆˆˆ™˜[˜XÚÈŠKˆ™\Ù\™YÙ[›×Ú^ˆØY™R^
+ÛÛ^Ëœ™\Ù\™Y[›Ò^ˆŠH[ˆÝ\™\ÜÚ[Û—ÙØ]\ÎˆÂˆÝÔÚYÛ˜[™YÚ[ÛŽˆ˜[ÙKˆ\ÕÙXZÑÛZ[˜[]šY[˜ÙNˆ˜[ÙKˆ\Ó™]]˜[ÛÛ[Z[˜][ÛŽˆ˜[ÙKˆ›ÛÝÙX\”ÚYÛ˜[ÙXZÎˆ˜[ÙKˆ™]Ù[žTÚÚ[ÛÛ[Z[˜][ÛŽˆ˜[ÙKˆKˆÝ›Û™×ÜÚYÛ˜[ÛÝ™\œšY\ÎˆÂˆ^Y]ÙX\”Ý›Û™ÔÚYÛ˜[ˆ˜[ÙKˆ\•š[TÝ›Û™ÔÚYÛ˜[ˆ˜[ÙKˆKˆ[šÛ›ÝÛ—Ü™X\ÛÛŽˆ[ˆ][XÛÛÜ—Ù]XÝYˆ˜[ÙKˆ][XÛÛÜ—Ü™X\ÛÛŽˆ[ˆYX[š[™Ù[ØÛÛÜ—ØÛÝ[ˆˆ][XÛÛÜ—ÜÛÝ\˜ÙNˆ[ˆ˜]×Ù[›×ÛYX[š[™Ù[ØÛÛÜ—ØÛÝ[ˆˆ˜]×Ù[›×Û][XÛÛÜ—Ü™X\ÛÛŽˆ[ˆš[\™YØÛ\Ý\—ØÛÝ[ˆˆXØÙ\ÜÛÜžWÚ™]Ù[žWÚY[]WÝ˜XÙNˆ[ˆ™\Ù\™Q[›Ö›Û™PÛÛÜŽˆ›ÛÛX[ŠÛÛ^Ëœ™\Ù\™Q[›Ö›Û™PÛÛÜŠKˆ™\Ù\™Y[›Ò^ˆØY™R^
+ÛÛ^Ëœ™\Ù\™Y[›Ò^ˆŠH[ˆÛZ[˜[ˆÈ˜\ÙNˆ[KˆÛZ[˜[Û\Ý\ŽˆÈ˜\ÙNˆ[KˆÛZ[˜[™XYÛ\Ý\ŽˆÈ˜\ÙNˆ[KˆÛZ[˜[ÛÛÜŽˆÈ^ˆ[Kˆš[X\žPÛÛÜŽˆÈ^ˆ[KˆÛZ[˜[ØÛÛÜ—ÜÙ[XÝ[ÛŽˆÂˆ™\Ù\™YÙ[›×Ú^ˆ[ˆÙ[XÝYØÛ\Ý\—Ú^ˆ[ˆX]ÚYÜ™\Ù\™YØÛ\Ý\Žˆ˜[ÙKˆ™X\ÛÛŽˆ[ˆKˆ[›×Üš[X\žWÜ™YÚ[Û—ÜÙ[XÝ[ÛŽˆÛÛ^Ë™[›Ôš[X\žT™YÚ[Û”Ù[XÝ[Ûˆ[ˆNÂˆÛÛœÝÛÛ^]šY[˜ÙHHÛÛ^Ë™]šY[˜ÙHßNÂˆÛÛœÝÛÝ\˜ÙPÛÛ™šY[˜ÙHH[X™\Š›Û™Q]OË˜ÛÛ™šY[˜ÙH
+NÂˆÛÛœÝÛÛ\]YØÛÜ™Q›Üœ™XZÙÝÛˆH[X™\Š›Û™Q]OËœØÛÜ™H
+NÂ‚ˆYˆ
+^›Û™Q]OËš^
+HÂˆXYÐÛÛ^[šÛ›ÝÛ—Ü™X\ÛÛˆHž›Û™WÙ]WÛZ\ÜÚ[™×Ú^ŽÂˆ™]\›ˆÂˆ[ÙNˆœÚ[™ÛH‹ˆÛ\Ý\—ØÛÝ[ˆˆ[\œ™]][ÛŽˆ[šÛ›ÝÛˆ‹ˆ\Ü^WÛX™[ˆ˜[˜XÚÓ˜[YKˆÛÛÜ—Û[ÙNˆœÚ[™ÛWØÛÛÜˆ‹ˆÛZ[˜[ØÛÛÜŽˆ[ˆš[X\žWØÛÛÜŽˆ[ˆÝ\ÜØÛÛÜœÎˆ×KˆÙXÛÛ™\žWØÛÛÜœÎˆ×KˆXØÙ[ØÛÛÜœÎˆ×Kˆ™YÚ[Û—ØÛÛÜœÎˆ×Kˆ]šY[˜ÙWÜÝ[[X\žNˆ“›È™[XX›HÛÛÜˆ]šY[˜ÙH›Üˆ\È›Û™Kˆ‹ˆÛÛ™šY[˜ÙNˆˆÛÛ™šY[˜ÙWØœ™XZÙÝÛŽˆZ[ÛÛ™šY[˜ÙPœ™XZÙÝÛŠÂˆÛÝ\˜ÙPÛÛ™šY[˜ÙKˆ™YÚ[ÛÛÝ™\˜YÙNˆÛÛ^]šY[˜ÙK˜ÛÝ™\˜YÙKˆÙZYÚY™YÚ[ÛÛÛ™šY[˜ÙNˆÛÛ^]šY[˜ÙKÙZYÚYØÛÛ™šY[˜ÙKˆÛÛÜÛÝ[ˆÛÛ^]šY[˜ÙK˜ÛÛÜ—ØÛÝ[™YÚ[ÛÛÛÜœË›[™ÝˆÛÛ\]YØÛÜ™NˆÛÛ\]YØÛÜ™Q›Üœ™XZÙÝÛ‹ˆš[˜[ÛÛ™šY[˜ÙNˆˆÝ\™\ÜÚ[Û‘Ø]\ÎˆXYÐÛÛ^œÝ\™\ÜÚ[Û—ÙØ]\ËˆJKˆÙXYÎˆXYÐÛÛ^ˆNÂˆBˆYˆ
+›Û™RÙ^HOOH™^Y]ÙX\ˆˆ	‰ˆ\™YÚ[ÛÛÛÜœË›[™Ý
+HÂˆXYÐÛÛ^[šÛ›ÝÛ—Ü™X\ÛÛˆH™^Y]ÙX\—Ü™\]Z\™\×Ü™YÚ[Û—ØÛÛÜœÈŽÂˆ™]\›ˆÂˆ[ÙNˆœÚ[™ÛH‹ˆÛ\Ý\—ØÛÝ[ˆˆ[\œ™]][ÛŽˆ[šÛ›ÝÛˆ‹ˆ\Ü^WÛX™[ˆ˜[˜XÚÓ˜[YKˆÛÛÜ—Û[ÙNˆœÚ[™ÛWØÛÛÜˆ‹ˆÛZ[˜[ØÛÛÜŽˆ[ˆš[X\žWØÛÛÜŽˆ[ˆÝ\ÜØÛÛÜœÎˆ×KˆÙXÛÛ™\žWØÛÛÜœÎˆ×KˆXØÙ[ØÛÛÜœÎˆ×Kˆ™YÚ[Û—ØÛÛÜœÎˆ×Kˆ]šY[˜ÙWÜÝ[[X\žNˆ“›È™[XX›HÛÛÜˆ]šY[˜ÙH›Üˆ\È›Û™Kˆ‹ˆÛÛ™šY[˜ÙNˆˆÛÛ™šY[˜ÙWØœ™XZÙÝÛŽˆZ[ÛÛ™šY[˜ÙPœ™XZÙÝÛŠÂˆÛÝ\˜ÙPÛÛ™šY[˜ÙKˆ™YÚ[ÛÛÝ™\˜YÙNˆÛÛ^]šY[˜ÙK˜ÛÝ™\˜YÙKˆÙZYÚY™YÚ[ÛÛÛ™šY[˜ÙNˆÛÛ^]šY[˜ÙKÙZYÚYØÛÛ™šY[˜ÙKˆÛÛÜÛÝ[ˆÛÛ^]šY[˜ÙK˜ÛÛÜ—ØÛÝ[™YÚ[ÛÛÛÜœË›[™ÝˆÛÛ\]YØÛÜ™NˆÛÛ\]YØÛÜ™Q›Üœ™XZÙÝÛ‹ˆš[˜[ÛÛ™šY[˜ÙNˆˆÝ\™\ÜÚ[Û‘Ø]\ÎˆXYÐÛÛ^œÝ\™\ÜÚ[Û—ÙØ]\ËˆJKˆÙXYÎˆXYÐÛÛ^ˆNÂˆB‚ˆÛÛœÝØ\›Y[X›XØ][Û]]Üš]HHZ[Ø\›Y[X›XØ][Û]]Üš]UŒJ›Û™RÙ^K›Û™Q]K™YÚ[ÛÛÛÜœËÛÛ^
+NÂˆYˆ
+Ø\›Y[X›XØ][Û]]Üš]K˜\YY
+HÂˆ™YÚ[ÛÛÛÜœÈHØ\›Y[X›XØ][Û]]Üš]Kœ[]NÂˆXYÐÛÛ^™Ø\›Y[ÜX›XØ][Û—Ø]]Üš]WÝŒHHØ\›Y[X›XØ][Û]]Üš]NÂˆB‚ˆÛÛœÝXØÙ\ÜÛÜžQ[›Ô™YÚ[ÛÛÛÜœÈH\ÐXØÙ\ÜÛÜžQ[›Ô[]V›Û™J›Û™RÙ^JH	‰ˆ\œ˜^Kš\Ð\œ˜^JÛÛ^ËœÙ[XÝY[›Ô™YÚ[ÛÛÛÜœÊBˆÈÛÛ^œÙ[XÝY[›Ô™YÚ[ÛÛÛÜœÂˆˆ×NÂˆÛÛœÝXØÙ\ÜÛÜžQ[›Ñ]XÝY[]HHXØÙ\ÜÛÜžQ[›Ô™YÚ[ÛÛÛÜœË›[™ÝˆÈZ[XØÙ\ÜÛÜžQ[›Ñ]XÝY[]JXØÙ\ÜÛÜžQ[›Ô™YÚ[ÛÛÛÜœÊBˆˆ×NÂˆÛÛœÝ˜\ÙR^HØY™R^
+›Û™Q]Kš^
+H›Û™Q]Kš^ÂˆÛÛœÝØ[™Y]PÛÛÜœÈH™YÚ[ÛÛÛÜœË›[™ÝÈ™YÚ[ÛÛÛÜœÈˆ\ÙT™YÚ[Û“Û›HÈ×Hˆ›Ü›X[^™YÛÛÜœÎÂˆÛÛœÝ›Û™PÛÛÜœÈHØ[™Y]PÛÛÜœË™š[\Š
+ÊHOˆÂˆYˆ
+XÏËš^X˜\ÙR^
+H™]\›ˆ˜[ÙNÂˆYˆ
+Ø\›Y[X›XØ][Û]]Üš]K˜\YY
+H™]\›ˆYNÂˆÛÛœÝ\ÝHÛÛÜ‘\Ý[˜ÙSXŠËš^˜\ÙR^
+NÂˆYˆ
+\ÝM
+H™]\›ˆYNÂˆYˆ
+[X™\ŠÏËœÝ
+HHŒN	‰ˆ\ÝŒ
+H™]\›ˆYNÂˆ™]\›ˆ˜[ÙNÂˆJNÂ‚ˆÛÛœÝ˜[˜XÚÔÙ]H\ÙT™YÚ[Û“Û›H	‰ˆ\™YÚ[ÛÛÛÜœË›[™ÝÈÞ›Û™Q]WHˆ›Û™PÛÛÜœË›[™ÝÈ›Û™PÛÛÜœÈˆÞ›Û™Q]WNÂˆÛÛœÝÛ\Ý\œÈHZ[ÛÛÜÛ\Ý\œÊ˜[˜XÚÔÙ]
+NÂˆXYÐÛÛ^™š[\™YØÛ\Ý\—ØÛÝ[HÛ\Ý\œË›[™ÝÂˆÛÛœÝ™YÚ[ÛÛÝ™\˜YÙHHÛ[\J™YÚ[ÛÛÛÜœËœ™YXÙJ
+Ý[KÊHOˆÝ[H
+È[X™\ŠÏËœÝ
+K
+JNÂˆÛÛœÝÝÔÚYÛ˜[™YÚ[ÛˆBˆ\ÙT™YÚ[Û“Û›H	‰‚ˆ™YÚ[ÛÛÝ™\˜YÙHŒÈ	‰‚ˆÛ\Ý\œË›[™Ýˆ	‰‚ˆYØ\›Y[X›XØ][Û]]Üš]K˜\YYÂˆÛÛœÝÛÜYžSYÚHÛ\Ý\œËœÛXÙJ
+KœÛÜ
+
+KŠHOˆÙ]YÚ
+K˜˜\ÙJHHÙ]YÚ
+‹˜˜\ÙJJNÂˆÛÛœÝ\šÙ\ÝÛ\Ý\ˆHÛÜYžSYÚÌNÂˆÛÛœÝYÚ\ÝÛ\Ý\ˆHÛÜYžSYÚÜÛÜYžSYÚ›[™ÝHWNÂˆÛÛœÝ\šÓYÚÛÛ˜\ÝH\šÙ\ÝÛ\Ý\ˆ	‰ˆYÚ\ÝÛ\Ý\‚ˆÈX]˜XœÊÙ]YÚ
+YÚ\ÝÛ\Ý\‹˜˜\ÙJHHÙ]YÚ
+\šÙ\ÝÛ\Ý\‹˜˜\ÙJJBˆˆÂˆÛÛœÝ^Y]ÙX\”Ý›Û™ÔÚYÛ˜[Bˆ›Û™RÙ^HOOH™^Y]ÙX\ˆˆ	‰‚ˆÛ\Ý\œË›[™ÝHˆ	‰‚ˆ\šÓYÚÛÛ˜\ÝHŒˆ	‰‚ˆ[X™\Š\šÙ\ÝÛ\Ý\ËœÝ
+HHŒN	‰‚ˆ[X™\ŠYÚ\ÝÛ\Ý\ËœÝ
+HHŒNÂˆÛÛœÝ\•š[TÝ›Û™ÔÚYÛ˜[Bˆ›Û™RÙ^HOOH™\—Ýš[Hˆ	‰‚ˆÛ\Ý\œË›[™ÝHˆ	‰‚ˆ\šÓYÚÛÛ˜\ÝHŒÎ	‰‚ˆ[X™\Š\šÙ\ÝÛ\Ý\ËœÝ
+HHŒM	‰‚ˆ[X™\ŠYÚ\ÝÛ\Ý\ËœÝ
+HHŒMÂˆXYÐÛÛ^œÝ›Û™×ÜÚYÛ˜[ÛÝ™\œšY\Ë™^Y]ÙX\”Ý›Û™ÔÚYÛ˜[H^Y]ÙX\”Ý›Û™ÔÚYÛ˜[ÂˆXYÐÛÛ^œÝ›Û™×ÜÚYÛ˜[ÛÝ™\œšY\Ë™\•š[TÝ›Û™ÔÚYÛ˜[H\•š[TÝ›Û™ÔÚYÛ˜[ÂˆÛÛœÝÛ\Ý\œÕÝ[ÙZYÚHÛ\Ý\œËœ™YXÙJ
+Ý[KÊHOˆÝ[H
+È[X™\ŠÏËÙZYÚ
+K
+HNÂˆÛÛœÝØÛÜ™YÛ\Ý\œÈHÛ\Ý\œÂˆ›X\
+
+Û\Ý\‹[™^
+HOˆÂˆÛÛœÝ˜Z]ÈHÙ]\˜Ù\X[˜Z]ÊÛ\Ý\‹˜˜\ÙJNÂˆÛÛœÝYÚHÙ]YÚ
+Û\Ý\‹˜˜\ÙJNÂˆÛÛœÝØ]HÙ]Ø]
+Û\Ý\‹˜˜\ÙJNÂˆÛÛœÝÛÛ˜\Ý›ÛÜÝHX]›X^
+YÚHJH
+ˆŒLˆ
+ÈX]›X^
+Ø]HŒŠH
+ˆŒLŽÂˆÛÛœÝÚ›ÛXP›ÛÜÝHX]›X^
+
+[X™\Š˜Z]ÏË˜Ú›ÛXWÛXYÛš]YH
+HHN
+HÈL
+NÂˆÛÛœÝ[˜ÚÜ›ÛÜÝH[™^OOHÈŒˆÂˆÛÛœÝØ[YP\Õ\\ˆBˆÛÛ^Ë™ÛZ[˜[\šÐ›ÙR^	‰‚ˆÛÛÜ‘\Ý[˜ÙSXŠÛ\Ý\‹˜˜\ÙKÛÛ^™ÛZ[˜[\šÐ›ÙR^
+HH	‰‚ˆÙ]YÚ
+Û\Ý\‹˜˜\ÙJHŒÍˆ	‰‚ˆ[X™\Š˜Z]ÏË˜Ú›ÛXWÛXYÛš]YH
+HŽÂˆÛÛœÝ™]\ÙT[˜[V›Û™\ÈHÈšZ\ˆ‹™^Y]ÙX\ˆ‹™\—Ýš[H—NÂˆÛÛœÝ™]\ÙT[˜[HBˆ™]\ÙT[˜[V›Û™\Ëš[˜ÛY\Ê›Û™RÙ^JH	‰‚ˆØ[YP\Õ\\ˆ	‰‚ˆ
+\™YÚ[ÛÛÛÜœË›[™Ý™YÚ[ÛÛÝ™\˜YÙHŒˆ[X™\ŠÛ\Ý\ËœÝ
+HJBˆÈŒ‚ˆˆÂˆ™]\›ˆÂˆ‹‹˜Û\Ý\‹ˆÜØÛÜ™Nˆ[X™\ŠÛ\Ý\ËœÝ
+H
+ÈÛÛ˜\Ý›ÛÜÝ
+ÈÚ›ÛXP›ÛÜÝ
+È[˜ÚÜ›ÛÜÝH™]\ÙT[˜[KˆNÂˆJBˆœÛÜ
+
+KŠHOˆ‹—ÜØÛÜ™HHK—ÜØÛÜ™JNÂˆÛÛœÝÛZ[˜[Û\Ý\ˆHØÛÜ™YÛ\Ý\œÖÌHÛ\Ý\œÖÌH[ÂˆÛÛœÝ™\Ù\™Y[›Ò^HØY™R^
+ÛÛ^Ëœ™\Ù\™Y[›Ò^ˆŠNÂˆÛÛœÝ™\Ù\™Y[›ÐÛ\Ý\ˆH™\Ù\™Y[›Ò^ˆÈÛ\Ý\œË™š[™
+
+ÊHOˆÛÛÜ‘\Ý[˜ÙSXŠË˜˜\ÙK™\Ù\™Y[›Ò^
+HÊBˆˆ[ÂˆXYÐÛÛ^œ™\Ù\™Y[›Ò^H™\Ù\™Y[›Ò^[ÂˆXYÐÛÛ^™ÛZ[˜[Û\Ý\ˆHÈ˜\ÙNˆÛZ[˜[Û\Ý\Ë˜˜\ÙH[NÂˆÛÛœÝÛZ[˜[HÂˆ˜\ÙNˆ™\Ù\™Y[›Ò^ÛZ[˜[Û\Ý\Ë˜˜\ÙH˜\ÙR^ˆÝˆ›Ý[™Šˆ™\Ù\™Y[›ÐÛ\Ý\‚ˆÈ
+[X™\Š™\Ù\™Y[›ÐÛ\Ý\ËÙZYÚ
+HJHÈÛ\Ý\œÕÝ[ÙZYÚˆˆ
+[X™\ŠÛZ[˜[Û\Ý\ËÙZYÚ
+HJHÈÛ\Ý\œÕÝ[ÙZYÚˆ
+KˆNÂˆXYÐÛÛ^™ÛZ[˜[HÈ˜\ÙNˆÛZ[˜[Ë˜˜\ÙH[NÂˆÛÛœÝÛZ[˜[˜Z]ÈHÙ]\˜Ù\X[˜Z]ÊÛZ[˜[˜˜\ÙJNÂˆÛÛœÝ\ÕÙXZÑÛZ[˜[]šY[˜ÙHH[X™\ŠÛZ[˜[ËœÝ
+HŒNÂˆÛÛœÝ\Ó™]]˜[ÛÛ[Z[˜][ÛˆBˆ[X™\ŠÛZ[˜[˜Z]ÏË˜Ú›ÛXWÛXYÛš]YH
+HN	‰‚ˆ[X™\ŠÛZ[˜[ËœÝ
+HŒÍH	‰‚ˆ™YÚ[ÛÛÝ™\˜YÙHNÂˆÛÛœÝØ[YQ˜[Z[PÛÝ[HÛ\Ý\œË™š[\Š
+ÊHOˆÂˆÛÛœÝÛZ[˜[YHHÙ]YJÛZ[˜[˜˜\ÙJNÂˆÛÛœÝÒYHHÙ]YJË˜˜\ÙJNÂˆÛÛœÝYPÛÜÙHHYQ\Ý[˜ÙJÛZ[˜[˜˜\ÙKË˜˜\ÙJHHÌÂˆÛÛœÝ›Ý™]]˜[HÙ]Ø]
+ÛZ[˜[˜˜\ÙJHŒN	‰ˆÙ]Ø]
+Ë˜˜\ÙJHŒNÂˆÛÛœÝØ[YUØ\›]HX]˜XœÊÛZ[˜[YHHÒYJHHNÂˆ™]\›ˆYPÛÜÙH›Ý™]]˜[Ø[YUØ\›]ÂˆJK›[™ÝÂˆÛÛœÝ›ÛÝÙX\”ÚYÛ˜[ÙXZÈBˆ›Û™RÙ^HOOH™›ÛÝÙX\ˆˆ	‰‚ˆØ[YQ˜[Z[PÛÝ[ˆ	‰‚ˆ™YÚ[ÛÛÝ™\˜YÙHMNÂˆÛÛœÝ™]Ù[žTÚÚ[ÛÛ[Z[˜][ÛˆBˆ›Û™RÙ^HOOH˜XØÙ\ÜÛÜžWÚ™]Ù[žHˆ	‰‚ˆ
+
+
+HOˆÂˆÛÛœÝYHHÙ]YJÛZ[˜[˜˜\ÙJNÂˆÛÛœÝØ]HÙ]Ø]
+ÛZ[˜[˜˜\ÙJNÂˆÛÛœÝYÚHÙ]YÚ
+ÛZ[˜[˜˜\ÙJNÂˆÛÛœÝÚÚ[“ZÙHHYHHLˆ	‰ˆYHHMH	‰ˆØ]HŒLˆ	‰ˆØ]HMH	‰ˆYÚHŒÌˆ	‰ˆYÚHŽŽÂˆÛÛœÝYÚYÚZÙHHYÚHŽ	‰ˆØ]ŒŒŽÂˆ™]\›ˆ
+ÚÚ[“ZÙHYÚYÚZÙJH	‰ˆ[X™\ŠÛZ[˜[ËœÝ
+HNÂˆJJ
+NÂˆXYÐÛÛ^œÝ\™\ÜÚ[Û—ÙØ]\Ë›ÝÔÚYÛ˜[™YÚ[ÛˆHÝÔÚYÛ˜[™YÚ[ÛŽÂˆXYÐÛÛ^œÝ\™\ÜÚ[Û—ÙØ]\Ëš\ÕÙXZÑÛZ[˜[]šY[˜ÙHH\ÕÙXZÑÛZ[˜[]šY[˜ÙNÂˆXYÐÛÛ^œÝ\™\ÜÚ[Û—ÙØ]\Ëš\Ó™]]˜[ÛÛ[Z[˜][ÛˆH\Ó™]]˜[ÛÛ[Z[˜][ÛŽÂˆXYÐÛÛ^œÝ\™\ÜÚ[Û—ÙØ]\Ë™›ÛÝÙX\”ÚYÛ˜[ÙXZÈH›ÛÝÙX\”ÚYÛ˜[ÙXZÎÂˆXYÐÛÛ^œÝ\™\ÜÚ[Û—ÙØ]\Ëš™]Ù[žTÚÚ[ÛÛ[Z[˜][ÛˆH™]Ù[žTÚÚ[ÛÛ[Z[˜][ÛŽÂ‚ˆYˆ
+ˆ
+ÝÔÚYÛ˜[™YÚ[Ûˆ	‰ˆY^Y]ÙX\”Ý›Û™ÔÚYÛ˜[	‰ˆY\•š[TÝ›Û™ÔÚYÛ˜[
+Hˆ
+\ÕÙXZÑÛZ[˜[]šY[˜ÙH	‰ˆY^Y]ÙX\”Ý›Û™ÔÚYÛ˜[	‰ˆY\•š[TÝ›Û™ÔÚYÛ˜[
+Hˆ
+\Ó™]]˜[ÛÛ[Z[˜][Ûˆ	‰ˆY^Y]ÙX\”Ý›Û™ÔÚYÛ˜[	‰ˆY\•š[TÝ›Û™ÔÚYÛ˜[
+Hˆ›ÛÝÙX\”ÚYÛ˜[ÙXZÈˆ™]Ù[žTÚÚ[ÛÛ[Z[˜][Û‚ˆ
+HÂˆXYÐÛÛ^[šÛ›ÝÛ—Ü™X\ÛÛˆBˆÝÔÚYÛ˜[™YÚ[Ûˆ	‰ˆY^Y]ÙX\”Ý›Û™ÔÚYÛ˜[	‰ˆY\•š[TÝ›Û™ÔÚYÛ˜[ˆÈ›ÝÔÚYÛ˜[™YÚ[Ûˆ‚ˆˆ\ÕÙXZÑÛZ[˜[]šY[˜ÙH	‰ˆY^Y]ÙX\”Ý›Û™ÔÚYÛ˜[	‰ˆY\•š[TÝ›Û™ÔÚYÛ˜[ˆÈš\ÕÙXZÑÛZ[˜[]šY[˜ÙH‚ˆˆ\Ó™]]˜[ÛÛ[Z[˜][Ûˆ	‰ˆY^Y]ÙX\”Ý›Û™ÔÚYÛ˜[	‰ˆY\•š[TÝ›Û™ÔÚYÛ˜[ˆÈš\Ó™]]˜[ÛÛ[Z[˜][Ûˆ‚ˆˆ›ÛÝÙX\”ÚYÛ˜[ÙXZÂˆÈ™›ÛÝÙX\”ÚYÛ˜[ÙXZÈ‚ˆˆ™]Ù[žTÚÚ[ÛÛ[Z[˜][Û‚ˆÈš™]Ù[žTÚÚ[ÛÛ[Z[˜][Ûˆ‚ˆˆœÝ\™\ÜÙYØžWÝ[šÛ›ÝÛ—ÙØ]HŽÂˆ™]\›ˆÂˆ[ÙNˆœÚ[™ÛH‹ˆÛ\Ý\—ØÛÝ[ˆÛ\Ý\œË›[™Ýˆ[\œ™]][ÛŽˆ[šÛ›ÝÛˆ‹ˆ\Ü^WÛX™[ˆ˜[˜XÚÓ˜[YKˆÛÛÜ—Û[ÙNˆœÚ[™ÛWØÛÛÜˆ‹ˆÛZ[˜[ØÛÛÜŽˆ[ˆš[X\žWØÛÛÜŽˆ[ˆÝ\ÜØÛÛÜœÎˆ×KˆÙXÛÛ™\žWØÛÛÜœÎˆ×KˆXØÙ[ØÛÛÜœÎˆ×Kˆ™YÚ[Û—ØÛÛÜœÎˆÛ\Ý\œË›X\
+
+ÊHOˆÛÛ\XÝ™YÚ[ÛÛÛÜŠÈ^ˆË˜˜\ÙKÝˆËœÝJJK™š[\Š›ÛÛX[ŠKˆ]šY[˜ÙWÜÝ[[X\žNˆZ[]šY[˜ÙTÝ[[X\žJœÚ[™ÛWØÛÛÜˆ‹Û\Ý\œËXYÐÛÛ^ž›Û™WØÛÛÜ—ÜÛÝ\˜ÙJKˆÛÛ™šY[˜ÙNˆX]œ›Ý[™
+Û[\L
+[X™\Š›Û™Q]OËœØÛÜ™H
+H
+ˆ
+JKˆÛÛ™šY[˜ÙWØœ™XZÙÝÛŽˆZ[ÛÛ™šY[˜ÙPœ™XZÙÝÛŠÂˆÛÝ\˜ÙPÛÛ™šY[˜ÙKˆ™YÚ[ÛÛÝ™\˜YÙNˆÛÛ^]šY[˜ÙK˜ÛÝ™\˜YÙH™YÚ[ÛÛÝ™\˜YÙKˆÙZYÚY™YÚ[ÛÛÛ™šY[˜ÙNˆÛÛ^]šY[˜ÙKÙZYÚYØÛÛ™šY[˜ÙKˆÛÛÜÛÝ[ˆÛÛ^]šY[˜ÙK˜ÛÛÜ—ØÛÝ[™YÚ[ÛÛÛÜœË›[™ÝˆÛZ[˜[ÝˆÛZ[˜[ËœÝˆÛ\Ý\ÛÝ[ˆÛ\Ý\œË›[™Ýˆ][XÛÛÜ‘]XÝYˆXYÐÛÛ^›][XÛÛÜ—Ù]XÝYˆÝ\™\ÜÚ[Û‘Ø]\ÎˆXYÐÛÛ^œÝ\™\ÜÚ[Û—ÙØ]\ËˆÛÛ\]YØÛÜ™NˆÛÛ\]YØÛÜ™Q›Üœ™XZÙÝÛ‹ˆš[˜[ÛÛ™šY[˜ÙNˆX]œ›Ý[™
+Û[\L
+[X™\Š›Û™Q]OËœØÛÜ™H
+H
+ˆ
+JKˆJKˆÙXYÎˆXYÐÛÛ^ˆNÂˆB‚ˆ]\Ü^SX™[HÙ]ÛÛÜ“˜[YJÛZ[˜[˜˜\ÙJNÂˆ][ÙHHœÚ[™ÛHŽÂˆ][\œ™]][ÛˆHœÚ[™ÛWØÛÛÜˆŽÂˆÛÛœÝÝÛÜYÛ\Ý\œÈHÛ\Ý\œËœÛXÙJ
+KœÛÜ
+
+KŠHOˆ[X™\ŠËœÝ
+HH[X™\ŠOËœÝ
+JNÂˆÛÛœÝYX[š[™Ù[™\ÚÛH›Û™RÙ^HOOH™›ÛÝÙX\ˆˆÈŒˆˆŒÂˆÛÛœÝYX[š[™Ù[Û\Ý\œÈHÝÛÜYÛ\Ý\œË™š[\Š
+ÊHOˆ[X™\ŠÏËœÝ
+HHYX[š[™Ù[™\ÚÛ
+NÂˆÛÛœÝÜÝH[X™\ŠÝÛÜYÛ\Ý\œÏË–ÌOËœÝ
+NÂˆÛÛœÝÙXÛÛ™ÝH[X™\ŠÝÛÜYÛ\Ý\œÏË–ÌWOËœÝ
+NÂˆÛÛœÝ›ÛÝÙX\“][XÛÛÜ”ÚYÛ˜[Bˆ›Û™RÙ^HOOH™›ÛÝÙX\ˆˆ	‰‚ˆYX[š[™Ù[Û\Ý\œË›[™ÝHÈ	‰‚ˆYX[š[™Ù[™\ÚÛOOHŒŽÂˆÛÛœÝÙ[™\˜[][XÛÛÜ”ÚYÛ˜[HYX[š[™Ù[Û\Ý\œË›[™ÝHÈ	‰ˆYX[š[™Ù[™\ÚÛOOHŒÂˆÛÛœÝ›Û™PÛÛÜ“[ÙT™XYHÙ]›Û™PÛÛÜ“[ÙJÝÛÜYÛ\Ý\œÊNÂˆÛÛœÝ˜[[˜ÙYÛÔ\ÔÚYÛ˜[HÜÝMHÙXÛÛ™ÝHŒNÂˆÛÛœÝ™\Ù\™QÛZ[˜[XØÙ\ÜÛÜžRY[]HHÚÝ[™\Ù\™QÛZ[˜[XØÙ\ÜÛÜžPÛÛÜŠ›Û™RÙ^KÝÛÜYÛ\Ý\œÊNÂˆÛÛœÝ][XÛÛÜ”™X\ÛÛˆH™\Ù\™QÛZ[˜[XØÙ\ÜÛÜžRY[]HÈ[ˆ›Û™PÛÛÜ“[ÙT™XYœ™X\ÛÛŽÂˆÛÛœÝ][XÛÛÜ‘]XÝYHH[][XÛÛÜ”™X\ÛÛŽÂˆXYÐÛÛ^œ™\Ù\™WÙÛZ[˜[ØXØÙ\ÜÛÜžWÚY[]HH™\Ù\™QÛZ[˜[XØÙ\ÜÛÜžRY[]NÂˆXYÐÛÛ^›][XÛÛÜ—Ù]XÝYH][XÛÛÜ‘]XÝYÂˆXYÐÛÛ^›][XÛÛÜ—Ü™X\ÛÛˆH][XÛÛÜ”™X\ÛÛŽÂˆXYÐÛÛ^›YX[š[™Ù[ØÛÛÜ—ØÛÝ[HYX[š[™Ù[Û\Ý\œË›[™ÝÂˆÛÛœÝ\Ñ[›Ô™\Ù\™Y›Û™HBˆÛÛ^Ëž›Û™PÛÛÜ”ÛÝ\˜ÙHOOH™[›×Üš[X\žHˆˆH\ØY™R^
+ÛÛ^Ëœ™\Ù\™Y[›Ò^ˆŠHˆÛÛ^Ëœ™\Ù\™Q[›Ö›Û™PÛÛÜˆOOHYNÂˆÛÛœÝ˜]Ñ[›ÐÛ\Ý\œÈH\Ñ[›Ô™\Ù\™Y›Û™HÈZ[˜]Ñ[›ÐÛÛÜÛ\Ý\œÊXØÙ\ÜÛÜžQ[›Ô™YÚ[ÛÛÛÜœË›[™ÝÈXØÙ\ÜÛÜžQ[›Ô™YÚ[ÛÛÛÜœÈˆ™YÚ[ÛÛÛÜœÊHˆ×NÂˆÛÛœÝ˜]Ñ[›ÓYX[š[™Ù[™\ÚÛHŒÂˆÛÛœÝ˜]Ñ[›ÓYX[š[™Ù[Û\Ý\œÈH˜]Ñ[›ÐÛ\Ý\œË™š[\Š
+ÊHOˆ[X™\ŠÏËœÝ
+HH˜]Ñ[›ÓYX[š[™Ù[™\ÚÛ
+NÂˆÛÛœÝ˜]Ñ[›ÐÛÛÜ“[ÙT™XYHÙ]›Û™PÛÛÜ“[ÙJ˜]Ñ[›ÐÛ\Ý\œÊNÂˆÛÛœÝ˜]Ñ[›ÕÜÝH˜]Ñ[›ÐÛÛÜ“[ÙT™XYÜÝÂˆÛÛœÝ˜]Ñ[›ÔÙXÛÛ™ÝH˜]Ñ[›ÐÛÛÜ“[ÙT™XYœÙXÛÛ™ÝÂˆÛÛœÝ˜]Ñ[›Ó][XÛÛÜ”™X\ÛÛˆBˆ\Ñ[›Ô™\Ù\™Y›Û™H	‰‚ˆ
+\ÑØ\›Y[›Û™RÙ^J›Û™RÙ^JH›Û™RÙ^HOOH™›ÛÝÙX\ˆŠH	‰‚ˆ
+Z\ÑØ\›Y[›Û™RÙ^J›Û™RÙ^JHØ\›Y[X›XØ][Û]]Üš]K›ÝÛ™YÜÙXÛÛ™\žWØÛÝ[ˆ
+H	‰‚ˆ˜]Ñ[›ÐÛÛÜ“[ÙT™XYœ™X\ÛÛ‚ˆÈ˜]×Ù[›×ÉÜ˜]Ñ[›ÐÛÛÜ“[ÙT™XYœ™X\ÛÛŸXˆˆ[ÂˆÛÛœÝ˜]Ñ[›Ó][XÛÛÜ‘]XÝYHH\˜]Ñ[›Ó][XÛÛÜ”™X\ÛÛŽÂˆXYÐÛÛ^œ˜]×Ù[›×ÛYX[š[™Ù[ØÛÛÜ—ØÛÝ[H˜]Ñ[›ÓYX[š[™Ù[Û\Ý\œË›[™ÝÂˆXYÐÛÛ^œ˜]×Ù[›×Û][XÛÛÜ—Ü™X\ÛÛˆH˜]Ñ[›Ó][XÛÛÜ”™X\ÛÛŽÂˆYˆ
+˜]Ñ[›Ó][XÛÛÜ‘]XÝY
+HÂˆXYÐÛÛ^›][XÛÛÜ—Ù]XÝYHYNÂˆXYÐÛÛ^›][XÛÛÜ—Ü™X\ÛÛˆH˜]Ñ[›Ó][XÛÛÜ”™X\ÛÛŽÂˆXYÐÛÛ^›][XÛÛÜ—ÜÛÝ\˜ÙHHœ˜]×Ù[›×Ü™YÚ[Û—ØÛÛÜœÈŽÂˆBˆÛÛœÝ]šY[˜ÙPÛÝ™\˜YÙHHÛ\Ý\œËœ™YXÙJ
+Ý[KÊHOˆÝ[H
+È[X™\ŠÏËœÝ
+K
+NÂ‚ˆYˆ
+ˆ›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ˆ	‰‚ˆÛ\Ý\œË›[™ÝHˆ	‰‚ˆ]šY[˜ÙPÛÝ™\˜YÙHHMH	‰‚ˆÛ\Ý\œËœÛÛYJ
+ÊHOˆÂˆÛÛœÝHÙ]YJË˜˜\ÙJNÂˆ™]\›ˆHŒ	‰ˆHNÂˆJH	‰‚ˆÛ\Ý\œË™š[\Š
+ÊHOˆÂˆÛÛœÝHÙ]YJË˜˜\ÙJNÂˆ™]\›ˆHNL	‰ˆHMNÂˆJK›[™ÝHˆ	‰‚ˆÛ\Ý\œË™]™\žJ
+ÊHOˆÂˆÛÛœÝ˜Z]ÈHÙ]\˜Ù\X[˜Z]ÊË˜˜\ÙJNÂˆÛÛœÝHÙ]YÚ
+Ë˜˜\ÙJNÂˆ™]\›ˆ˜Z]Ë˜Ú›ÛXWÛXYÛš]YHˆ	‰ˆˆŒŽÂˆJBˆ
+HÂˆ\Ü^SX™[H“YÚØ\Ú[š[HŽÂˆ[ÙHHØ\ÚYÙ˜XœšXÈŽÂˆ[\œ™]][ÛˆH™[š[HŽÂˆH[ÙHYˆ
+
+][XÛÛÜ‘]XÝY˜]Ñ[›Ó][XÛÛÜ‘]XÝY
+H	‰ˆ›Û™RÙ^HOOH™›ÛÝÙX\ˆŠHÂˆ\Ü^SX™[H“][XÛÛÜˆÛ™XZÙ\ˆŽÂˆ[ÙHH›][XÛÛÜˆŽÂˆ[\œ™]][ÛˆH›][WÛX]\šX[ŽÂˆH[ÙHYˆ
+][XÛÛÜ‘]XÝY	‰ˆÈ˜XØÙ\ÜÛÜžWÚ™]Ù[žH‹˜˜YÈ‹™^Y]ÙX\ˆ—Kš[˜ÛY\Ê›Û™RÙ^JJHÂˆ\Ü^SX™[H“][XÛÛÜˆXØÙ\ÜÛÜžHŽÂˆ[ÙHH›][XÛÛÜˆŽÂˆ[\œ™]][ÛˆHœ]\›™YŽÂˆH[ÙHYˆ
+ˆ
+][XÛÛÜ‘]XÝY˜]Ñ[›Ó][XÛÛÜ‘]XÝY
+H	‰‚ˆÈ\\—ÙØ\›Y[‹›ÝÙ\—ÙØ\›Y[‹›Ý]\ÙX\ˆ‹˜›ÙWÙØ\›Y[—Kš[˜ÛY\Ê›Û™RÙ^JBˆ
+HÂˆ\Ü^SX™[H“][XÛÛÜˆØ\›Y[ŽÂˆ[ÙHH›][XÛÛÜˆŽÂˆ[\œ™]][ÛˆH›][WÛX]\šX[ŽÂˆH[ÙHYˆ
+È˜XØÙ\ÜÛÜžWÚ™]Ù[žH‹˜˜YÈ‹™^Y]ÙX\ˆ—Kš[˜ÛY\Ê›Û™RÙ^JH	‰ˆÛ\Ý\œË›[™ÝHŠHÂˆÛÛœÝÜHØÛÜ™YÛ\Ý\œÖÌHÛ\Ý\œÖÌNÂˆÛÛœÝÙXÛÛ™HØÛÜ™YÛ\Ý\œÖÌWHÛ\Ý\œÖÌWNÂˆÛÛœÝÜ˜Z]ÈHÙ]\˜Ù\X[˜Z]ÊÜË˜˜\ÙHÛZ[˜[˜˜\ÙJNÂˆÛÛœÝÙXÛÛ™˜Z]ÈHÙXÛÛ™ÈÙ]\˜Ù\X[˜Z]ÊÙXÛÛ™˜˜\ÙJHˆ[ÂˆÛÛœÝYÚÛÛ˜\ÝHÙXÛÛ™ÈX]˜XœÊÙ]YÚ
+Ü˜˜\ÙJHHÙ]YÚ
+ÙXÛÛ™˜˜\ÙJJHˆÂˆÛÛœÝÚ›ÛXTÜ™XYHÙXÛÛ™ˆÈX]˜XœÊ[X™\ŠÜ˜Z]ÏË˜Ú›ÛXWÛXYÛš]YH
+HH[X™\ŠÙXÛÛ™˜Z]ÏË˜Ú›ÛXWÛXYÛš]YH
+JBˆˆÂˆÛÛœÝ™Y›XÝ]™SZ^Bˆ[X™\ŠÜ˜Z]ÏË˜Ú›ÛXWÛXYÛš]YH
+H	‰‚ˆ
+YÚÛÛ˜\ÝˆŒˆÚ›ÛXTÜ™XYˆMŠH	‰‚ˆ[X™\ŠÙXÛÛ™ËœÝ
+HHŒNÂˆYˆ
+™Y›XÝ]™SZ^
+HÂˆ\Ü^SX™[H“Y][XÈŽÂˆ[ÙHHœ™Y›XÝ]™HŽÂˆ[\œ™]][ÛˆH›Y][XÈŽÂˆBˆH[ÙHYˆ
+›Û™RÙ^HOOH™\—Ýš[Hˆ	‰ˆÛ\Ý\œË›[™ÝHŠHÂˆÛÛœÝ\šÙ\ÝHÛÜYžSYÚÌNÂˆÛÛœÝYÚ\ÝHÛÜYžSYÚÜÛÜYžSYÚ›[™ÝHWNÂˆÛÛœÝYÚY™ˆH\šÓYÚÛÛ˜\ÝÂˆÛÛœÝX[X]\šX[ÚYÛ˜[BˆÛ\Ý\œË›[™ÝHˆ	‰‚ˆYÚY™ˆˆŒÍˆ	‰‚ˆ[X™\Š\šÙ\ÝËœÝ
+HHŒM	‰‚ˆ[X™\ŠYÚ\ÝËœÝ
+HHŒMÂˆYˆ
+X[X]\šX[ÚYÛ˜[
+HÂˆ\Ü^SX™[H›XÚËÕÚ]H\ˆŽÂˆ[ÙHH›][XÛÛÜˆŽÂˆ[\œ™]][ÛˆH›][WÛX]\šX[ŽÂˆBˆH[ÙHYˆ
+›Û™RÙ^HOOH™^Y]ÙX\ˆŠHÂˆÛÛœÝÜHØÛÜ™YÛ\Ý\œÖÌHÛ\Ý\œÖÌNÂˆÛÛœÝÙXÛÛ™HØÛÜ™YÛ\Ý\œÖÌWHÛ\Ý\œÖÌWNÂˆÛÛœÝ\Ô™Y›XÝ]™QYÙHBˆH\ÙXÛÛ™	‰‚ˆX]˜XœÊÙ]YÚ
+Ü˜˜\ÙJHHÙ]YÚ
+ÙXÛÛ™˜˜\ÙJJHHŒŒˆ	‰‚ˆ[X™\ŠÙXÛÛ™ËœÝ
+HHŒLŽÂˆÛÛœÝÜ™\žQ\šÈHÙ]YÚ
+Ü˜˜\ÙJHŒÎÂˆYˆ
+Ü™\žQ\šÈ	‰ˆ\Ô™Y›XÝ]™QYÙJHÂˆ\Ü^SX™[HÙ]Ø]
+Ü˜˜\ÙJHŒLˆÈ›XÚÈY][ˆˆ“Y][XÈŽÂˆ[ÙHHœ™Y›XÝ]™HŽÂˆ[\œ™]][ÛˆH›Y][XÈŽÂˆH[ÙHYˆ
+Z\Ó˜]žPØ[™Y]JÜ˜˜\ÙJH	‰ˆÙ]YÚ
+Ü˜˜\ÙJHŒÍ
+HÂˆ\Ü^SX™[HÙ]›XÚÓX[˜ÙSX™[
+Ü˜˜\ÙJNÂˆBˆB‚ˆYˆ
+›Û™RÙ^HOOHšZ\ˆˆ	‰ˆZ\Ó˜]žPØ[™Y]JÛZ[˜[˜˜\ÙJH	‰ˆÙ]YÚ
+ÛZ[˜[˜˜\ÙJHŒŠHÂˆ\Ü^SX™[HÙ]YÚ
+ÛZ[˜[˜˜\ÙJHŒMÈ’™]›XÚÈˆˆ‘Y\›XÚÈŽÂˆB‚ˆYˆ
+ˆÈ\\—ÙØ\›Y[‹›ÝÙ\—ÙØ\›Y[‹›Ý]\ÙX\ˆ‹˜›ÙWÙØ\›Y[—Kš[˜ÛY\Ê›Û™RÙ^JH	‰‚ˆZ\Ó˜]žPØ[™Y]JÛZ[˜[˜˜\ÙJH	‰‚ˆZ\Ñ\šÓÛ]™Q˜[Z[JÛZ[˜[˜˜\ÙJH	‰‚ˆÙ]YÚ
+ÛZ[˜[˜˜\ÙJHŒŽ	‰‚ˆ[X™\ŠÛZ[˜[˜Z]ÏË˜Ú›ÛXWÛXYÛš]YH
+HNˆ
+HÂˆ\Ü^SX™[HÙ]›XÚÓX[˜ÙSX™[
+ÛZ[˜[˜˜\ÙJNÂˆB‚ˆÛÛœÝ›Û™PÛÛ™šY[˜ÙHHX]œ›Ý[™
+ˆÛ[\L
+[X™\Š›Û™Q]OËœØÛÜ™H
+H
+ˆMH
+È[X™\Š›Û™Q]OË˜ÛÛ™šY[˜ÙH
+H
+ˆJBˆ
+NÂˆÛÛœÝ\ÙT˜]Ñ[›Ó][XÛÛÜ”™XYBˆZ\ÑØ\›Y[›Û™RÙ^J›Û™RÙ^JH	‰‚ˆ\™\Ù\™QÛZ[˜[XØÙ\ÜÛÜžRY[]H	‰‚ˆ[ÙHOOH›][XÛÛÜˆˆ	‰‚ˆ˜]Ñ[›Ó][XÛÛÜ‘]XÝY	‰‚ˆ˜]Ñ[›ÓYX[š[™Ù[Û\Ý\œË›[™ÝÂˆÛÛœÝÛÛÜ”™XYÛ\Ý\œÈH\ÙT˜]Ñ[›Ó][XÛÛÜ”™XYˆÈ˜]Ñ[›ÓYX[š[™Ù[Û\Ý\œÂˆˆ[ÙHOOH›][XÛÛÜˆˆ	‰ˆYX[š[™Ù[Û\Ý\œË›[™ÝˆÈYX[š[™Ù[Û\Ý\œÂˆˆÛ\Ý\œÎÂˆÛÛœÝÚÝ[™Y™\”™\Ù\™Y[›ÐXØÙ\ÜÛÜžPÛ\Ý\ˆBˆÛÛ^Ëœ™\Ù\™Q[›Ö›Û™PÛÛÜˆOOHYH	‰‚ˆH\™\Ù\™Y[›Ò^	‰‚ˆ™\Ù\™QÛZ[˜[XØÙ\ÜÛÜžRY[]H	‰‚ˆ›Û™RÙ^HOOH˜˜YÈŽÂˆÛÛœÝ™\Ù\™Y[›ÐXØÙ\ÜÛÜžPÛ\Ý\ˆHÚÝ[™Y™\”™\Ù\™Y[›ÐXØÙ\ÜÛÜžPÛ\Ý\‚ˆÈÝÛÜYÛ\Ý\œË™š[™
+
+ÊHOˆÛÛÜ‘\Ý[˜ÙSXŠÏË˜˜\ÙHÏËš^™\Ù\™Y[›Ò^
+HÊBˆˆ[ÂˆÛÛœÝ™\Ù\™Y[›ÑÛZ[˜[˜\ÙQ˜[˜XÚÈHÚÝ[™Y™\”™\Ù\™Y[›ÐXØÙ\ÜÛÜžPÛ\Ý\ˆ	‰ˆ\™\Ù\™Y[›ÐXØÙ\ÜÛÜžPÛ\Ý\‚ˆÈÈ˜\ÙNˆÛZ[˜[˜˜\ÙKÝˆÛZ[˜[œÝBˆˆ[ÂˆÛÛœÝÛZ[˜[™XYÛ\Ý\ˆH[ÙHOOH›][XÛÛÜˆˆ	‰ˆ]\ÙT˜]ùÓŸt¶‰žËkºwµç]ÓÝÙ\Ø\ÙJ
+NÂˆYˆ
+[Y\ÜØYÙJH™]\›ˆ˜[ÙNÂˆ™]\›ˆ
+ˆY\ÜØYÙKš[˜ÛY\Ê™™]Ú˜Z[YŠHˆY\ÜØYÙKš[˜ÛY\Ê›™]ÛÜšÈŠHˆY\ÜØYÙKš[˜ÛY\Ê™XÛÛ›œ™\Ù]ŠHˆY\ÜØYÙKš[˜ÛY\Ê™][YYÝ]ŠHˆY\ÜØYÙKš[˜ÛY\ÊœÛØÚÙ][™È\ŠHˆY\ÜØYÙKš[˜ÛY\Ê[\Ü˜\ˆŠHˆY\ÜØYÙKš[˜ÛY\Ê™XZWØYØZ[ˆŠBˆ
+NÂŸB‚™[˜Ý[Ûˆ\Ô™\XØ]U›ÝQ\œ›ÜŠ\œ›Ü“Ü”™X\ÛÛŠHÂˆÛÛœÝY\ÜØYÙHHÝš[™Ê\œ›Ü“Ü”™X\ÛÛË›Y\ÜØYÙH\œ›Ü“Ü”™X\ÛÛˆˆŠKÓÝÙ\Ø\ÙJ
+NÂˆYˆ
+[Y\ÜØYÙJH™]\›ˆ˜[ÙNÂˆ™]\›ˆ
+ˆY\ÜØYÙKš[˜ÛY\Êœ˜]H[Z]ŠHˆY\ÜØYÙKš[˜ÛY\Êœ˜]K[[Z]ŠHˆY\ÜØYÙKš[˜ÛY\Êœ˜][[Z]ŠHˆY\ÜØYÙKš[˜ÛY\ÊÛÈX[žH™\]Y\ÝÈŠHˆY\ÜØYÙKš[˜ÛY\Ê›ÝŠHˆY\ÜØYÙKš[˜ÛY\ÊŽHŠBˆ
+NÂŸB‚™[˜Ý[Ûˆ˜[™ÛTÛ™]žQ[^S\Ê
+HÂˆÛÛœÝZ[ˆH‘TPÐUWÔÐSWÔÓÔ‘U–WÑSVWÓRS—ÓTÎÂˆÛÛœÝX^H‘TPÐUWÔÐSWÔÓÔ‘U–WÑSVWÓPVÓTÎÂˆ™]\›ˆX]™›ÛÜŠX]œ˜[™ÛJ
+H
+ˆ
+X^HZ[ˆ
+ÈJJH
+ÈZ[ŽÂŸB‚™[˜Ý[Ûˆ›Ü›X[^™QÜ›Ý[™[™Ñ[›Ð˜›Þ
+˜]Ð˜›Þ
+HÂˆ]˜[Y\ÈH[ÂˆYˆ
+\œ˜^Kš\Ð\œ˜^J˜]Ð˜›Þ
+JHÂˆ˜[Y\ÈH˜]Ð˜›ÞœÛXÙJ
+K›X\
+[X™\ŠNÂˆH[ÙHYˆ
+˜]Ð˜›Þ	‰ˆ\[Ùˆ˜]Ð˜›ÞOOH›Øš™XÝŠHÂˆÛÛœÝHH˜]Ð˜›ÞžÛZ[ˆÏÈ˜]Ð˜›ÞžZ[ˆÏÈ˜]Ð˜›Þ›YÏÈ˜]Ð˜›ÞžHÏÈ˜]Ð˜›ÞžÂˆÛÛœÝLHH˜]Ð˜›ÞžWÛZ[ˆÏÈ˜]Ð˜›Þž[Z[ˆÏÈ˜]Ð˜›ÞÜÏÈ˜]Ð˜›ÞžLHÏÈ˜]Ð˜›ÞžNÂˆÛÛœÝˆH˜]Ð˜›ÞžÛX^ÏÈ˜]Ð˜›ÞžX^ÏÈ˜]Ð˜›ÞœšYÚÏÈ˜]Ð˜›ÞžŽÂˆÛÛœÝLˆH˜]Ð˜›ÞžWÛX^ÏÈ˜]Ð˜›Þž[X^ÏÈ˜]Ð˜›Þ˜›ÝÛHÏÈ˜]Ð˜›ÞžLŽÂˆÛÛœÝÈH˜]Ð˜›ÞÚYÏÈ˜]Ð˜›ÞÎÂˆÛÛœÝH˜]Ð˜›ÞšZYÚÏÈ˜]Ð˜›ÞšÂˆ˜[Y\ÈHÓ[X™\ŠJK[X™\ŠLJK[X™\ŠˆÏÈ[X™\ŠJH
+È[X™\ŠÊJK[X™\ŠLˆÏÈ[X™\ŠLJH
+È[X™\Š
+JWNÂˆB‚ˆYˆ
+]˜[Y\È˜[Y\ËœÛÛYJ
+˜[YJHOˆS[X™\‹š\Ñš[š]J˜[YJJJH™]\›ˆ[Âˆ]ÞKLK‹L—HH˜[Y\ÎÂˆYˆ
+ˆJHÞK—HHÞ‹WNÂˆYˆ
+LˆLJHÞLKL—HHÞL‹LWNÂ‚ˆ™]\›ˆÂˆÛZ[Žˆ›Ý[™ŠJKˆWÛZ[Žˆ›Ý[™ŠLJKˆÛX^ˆ›Ý[™ŠŠKˆWÛX^ˆ›Ý[™ŠLŠKˆÚYˆ›Ý[™ŠX]›X^
+ˆHJJKˆZYÚˆ›Ý[™ŠX]›X^
+LˆHLJJKˆNÂŸB‚‚™[˜Ý[ÛˆÙ]›Ü›X[^™Y[›Ô™YÚ[Û›Þ
+˜›ÞH[
+HÂˆYˆ
+X˜›Þ
+H™]\›ˆ[ÂˆÛÛœÝZ[ˆH[X™\Š˜›ÞžÛZ[ŠNÂˆÛÛœÝSZ[ˆH[X™\Š˜›ÞžWÛZ[ŠNÂˆÛÛœÝX^H[X™\Š˜›ÞžÛX^
+NÂˆÛÛœÝSX^H[X™\Š˜›ÞžWÛX^
+NÂˆYˆ
+VÞZ[‹SZ[‹X^SX^K™]™\žJ[X™\‹š\Ñš[š]JJH™]\›ˆ[ÂˆYˆ
+Z[ˆSZ[ˆX^ˆHSX^ˆJH™]\›ˆ[ÂˆYˆ
+X^HZ[ˆSX^HSZ[ŠH™]\›ˆ[Âˆ™]\›ˆÂˆˆ›Ý[™ŠZ[ŠKˆNˆ›Ý[™ŠSZ[ŠKˆÎˆ›Ý[™ŠX^HZ[ŠKˆˆ›Ý[™ŠSX^HSZ[ŠKˆNÂŸB‚™[˜Ý[Ûˆ\ÒYÛ›Ü™Y[›ÓX™[
+X™[
+HÂˆÛÛœÝ›Ü›X[^™YH›Ü›X[^™U^
+X™[
+NÂˆ™]\›ˆÈœ\œÛÛˆ‹˜ÛÝ[™È‹›Øš™XÝ‹˜›ÙH—Kš[˜ÛY\Ê›Ü›X[^™Y
+NÂŸB‚™[˜Ý[ÛˆÙ][›Ð˜›Þ\™XJ˜›ÞH[
+HÂˆYˆ
+X˜›Þ
+H™]\›ˆÂˆÛÛœÝÚYH[X™\Š˜›ÞÚYÏÈ
+[X™\Š˜›ÞžÛX^
+HH[X™\Š˜›ÞžÛZ[ŠJHÏÈ
+NÂˆÛÛœÝZYÚH[X™\Š˜›ÞšZYÚÏÈ
+[X™\Š˜›ÞžWÛX^
+HH[X™\Š˜›ÞžWÛZ[ŠJHÏÈ
+NÂˆYˆ
+S[X™\‹š\Ñš[š]JÚY
+HS[X™\‹š\Ñš[š]JZYÚ
+HÚYHZYÚH
+H™]\›ˆÂˆ™]\›ˆ›Ý[™ŠÚY
+ˆZYÚ
+NÂŸB‚‚™[˜Ý[ÛˆÙ]™YÚ[Û›Þ
+™YÚ[ÛˆHßJHÂˆ™]\›ˆ™YÚ[ÛË˜˜›Þ™YÚ[ÛË›X\Ú×ÙÙ[ÛY]žOË˜˜›Þ[ÂŸB‚™[˜Ý[ÛˆÙ]˜›Þ[ÕJHH[ˆH[
+HÂˆÛÛœÝ›ÞHH›Ü›X[^™QÜ›Ý[™[™Ñ[›Ð˜›Þ
+JHNÂˆÛÛœÝ›ÞˆH›Ü›X[^™QÜ›Ý[™[™Ñ[›Ð˜›Þ
+ŠHŽÂˆYˆ
+X›ÞHX›ÞŠH™]\›ˆÂˆÛÛœÝ^HH[X™\Š›ÞKžÛZ[ˆÏÈ›ÞKžÏÈ
+NÂˆÛÛœÝ^LHH[X™\Š›ÞKžWÛZ[ˆÏÈ›ÞKžHÏÈ
+NÂˆÛÛœÝ^ˆH[X™\Š›ÞKžÛX^ÏÈ
+[X™\Š›ÞKž
+H
+È[X™\Š›ÞKÈ
+JJNÂˆÛÛœÝ^LˆH[X™\Š›ÞKžWÛX^ÏÈ
+[X™\Š›ÞKžH
+H
+È[X™\Š›ÞKš
+JJNÂˆÛÛœÝžHH[X™\Š›Þ‹žÛZ[ˆÏÈ›Þ‹žÏÈ
+NÂˆÛÛœÝžLHH[X™\Š›Þ‹žWÛZ[ˆÏÈ›Þ‹žHÏÈ
+NÂˆÛÛœÝžˆH[X™\Š›Þ‹žÛX^ÏÈ
+[X™\Š›Þ‹ž
+H
+È[X™\Š›Þ‹È
+JJNÂˆÛÛœÝžLˆH[X™\Š›Þ‹žWÛX^ÏÈ
+[X™\Š›Þ‹žH
+H
+È[X™\Š›Þ‹š
+JJNÂˆYˆ
+VØ^K^LK^‹^L‹žKžLKž‹žL—K™]™\žJ[X™\‹š\Ñš[š]JJH™]\›ˆÂˆÛÛœÝ^HHX]›X^
+^KžJNÂˆÛÛœÝ^LHHX]›X^
+^LKžLJNÂˆÛÛœÝ^ˆHX]›Z[Š^‹žŠNÂˆÛÛœÝ^LˆHX]›Z[Š^L‹žLŠNÂˆÛÛœÝ[\œÙXÝ[ÛˆHX]›X^
+^ˆH^JH
+ˆX]›X^
+^LˆH^LJNÂˆÛÛœÝ\™XPHHX]›X^
+^ˆH^JH
+ˆX]›X^
+^LˆH^LJNÂˆÛÛœÝ\™XPˆHX]›X^
+žˆHžJH
+ˆX]›X^
+žLˆHžLJNÂˆÛÛœÝ[š[ÛˆH\™XPH
+È\™XPˆH[\œÙXÝ[ÛŽÂˆ™]\›ˆ[š[ÛˆˆÈ[\œÙXÝ[ÛˆÈ[š[ÛˆˆÂŸB‚™[˜Ý[ÛˆY\™ÙT™YÚ[ÛÛÛÜœÊ‹‹˜ÛÛÜ“\ÝÊHÂˆ™]\›ˆZ[ÛÛÜÛ\Ý\œÊÛÛÜ“\ÝË™›]
+
+K™š[\Š›ÛÛX[ŠJBˆ›X\
+
+ÊHOˆÛÛ\XÝ™YÚ[ÛÛÛÜŠÈ^ˆË˜˜\ÙKÝˆËœÝJJBˆ™š[\Š›ÛÛX[ŠNÂŸB‚™[˜Ý[Ûˆ\ÒXYÙX\XØÙ\ÜÛÜžQ[›Ô™YÚ[ÛŠ™YÚ[ÛˆHßJHÂˆYˆ
+™YÚ[ÛËž›Û™HOOH˜XØÙ\ÜÛÜžWÚ™]Ù[žHŠH™]\›ˆ˜[ÙNÂˆÛÛœÝ^HÂˆ™YÚ[ÛË›X™[ˆ™YÚ[ÛË˜Ø]YÛÜžKˆ™YÚ[ÛË˜XØÙ\ÜÛÜžKˆ™YÚ[ÛË™\Ü^WÛX™[ˆ™YÚ[ÛËœÙYÛY[ÛX™[ˆ™YÚ[ÛË›˜[YKˆK›X\
+›Ü›X[^™U^
+K™š[\Š›ÛÛX[ŠKš›Ú[ŠˆŠNÂˆ™]\›ˆ×Š]Ø\™X[šY_XYÙX\ŸXYÊÙX\Ÿ™\™]š\ÛÜŸ[Y]›Û›™]™YÜ˜_XÚÙ]Êš]˜\ÙX˜[Ê˜Ø\ÚÝ[Ø\Ü]YJW‹Ë\Ý
+^
+NÂŸB‚™[˜Ý[ÛˆÙ]Ý›Û™ÑÛZ[˜[[›Ô™YÚ[ÛÛÛÜŠ™YÚ[ÛˆHßJHÂˆÛÛœÝÛZ[˜[^HØY™R^
+™YÚ[ÛË™ÛZ[˜[Ú^
+NÂˆÛÛœÝÜÛÛÜˆH\œ˜^Kš\Ð\œ˜^J™YÚ[ÛËœ™YÚ[Û—ØÛÛÜœÊHÈ™YÚ[Û‹œ™YÚ[Û—ØÛÛÜœÖÌHˆ[ÂˆÛÛœÝÜ^HØY™R^
+ÜÛÛÜËš^
+NÂˆÛÛœÝÜÝH›Ü›X[^™PÛÛÜ”Ý
+ÜÛÛÜËœÝ
+NÂˆYˆ
+YÛZ[˜[^]Ü^ÜÝJH™]\›ˆ[ÂˆÛÛœÝÛÜÙUÑÛZ[˜[HÜ^OOHÛZ[˜[^ÛÛÜ‘\Ý[˜ÙSXŠÜ^ÛZ[˜[^
+HHLÂˆYˆ
+XÛÜÙUÑÛZ[˜[
+H™]\›ˆ[Âˆ™]\›ˆÛÛ\XÝ™YÚ[ÛÛÛÜŠÈ‹‹ÜÛÛÜ‹^ˆÛZ[˜[^ÝˆÜÝJNÂŸB‚™[˜Ý[Ûˆ™Y™\”™\Ù\™Y™YÚ[ÛÛÛÜ‘š\œÝ
+™YÚ[ÛÛÛÜœÈH×K™\Ù\™YÛÛÜˆH[
+HÂˆÛÛœÝÛÛ\XÝ™\Ù\™YHÛÛ\XÝ™YÚ[ÛÛÛÜŠ™\Ù\™YÛÛÜŠNÂˆYˆ
+XÛÛ\XÝ™\Ù\™YËš^
+H™]\›ˆ™YÚ[ÛÛÛÜœÎÂˆ™]\›ˆÂˆÛÛ\XÝ™\Ù\™Yˆ‹‹Š™YÚ[ÛÛÛÜœÈ×JK™š[\Š
+ÛÛÜŠHOˆØY™R^
+ÛÛÜËš^
+HOOHÛÛ\XÝ™\Ù\™Yš^
+KˆNÂŸB‚™[˜Ý[ÛˆY\Q[›Ô™YÚ[ÛœÐžV›Û™P[™Ý™\›\
+™YÚ[ÛœÈH×KÝ™\›\™\ÚÛHÌŠHÂˆÛÛœÝY\™ÙYH×NÂˆ›Üˆ
+ÛÛœÝ™YÚ[ÛˆÙˆ™YÚ[ÛœÈ×JHÂˆÛÛœÝ›Û™HH™YÚ[ÛËž›Û™H[šÛ›ÝÛˆŽÂˆÛÛœÝ˜›ÞHÙ]™YÚ[Û›Þ
+™YÚ[ÛŠNÂˆÛÛœÝX]Ú[™^HY\™ÙY™š[™[™^
+
+Ø[™Y]JHO‚ˆØ[™Y]OËž›Û™HOOH›Û™H	‰ˆ˜›Þ	‰ˆÙ]™YÚ[Û›Þ
+Ø[™Y]JH	‰ˆÙ]˜›Þ[ÕJ˜›ÞÙ]™YÚ[Û›Þ
+Ø[™Y]JJHHÝ™\›\™\ÚÛˆ
+NÂ‚ˆYˆ
+X]Ú[™^
+HÂˆY\™ÙYœ\Ú
+™YÚ[ÛŠNÂˆÛÛ[YNÂˆB‚ˆÛÛœÝÝ\œ™[HY\™ÙYÛX]Ú[™^NÂˆÛÛœÝ™\ÝH[X™\Š™YÚ[ÛË˜ÛÛ™šY[˜ÙH
+Hˆ[X™\ŠÝ\œ™[Ë˜ÛÛ™šY[˜ÙH
+HÈ™YÚ[ÛˆˆÝ\œ™[ÂˆÛÛœÝÝ\ˆH™\ÝOOH™YÚ[ÛˆÈÝ\œ™[ˆ™YÚ[ÛŽÂˆÛÛœÝY\™ÙYÚ\HHÈ‹‹›Ý\‹‹‹˜™\ÝNÂˆÛÛœÝ™YÚ[ÛÛÛÜœÈHY\™ÙT™YÚ[ÛÛÛÜœÊÝ\œ™[Ëœ™YÚ[Û—ØÛÛÜœÈ×K™YÚ[ÛËœ™YÚ[Û—ØÛÛÜœÈ×JNÂˆÛÛœÝÝ›Û™ÑÛZ[˜[Ø[™Y]\ÈHØÝ\œ™[™YÚ[Û—Bˆ›X\
+
+Ø[™Y]JHOˆ
+Âˆ™YÚ[ÛŽˆØ[™Y]KˆÛÛÜŽˆÙ]Ý›Û™ÑÛZ[˜[[›Ô™YÚ[ÛÛÛÜŠØ[™Y]JKˆJJBˆ™š[\Š
+Ø[™Y]JHOˆØ[™Y]K˜ÛÛÜËš^
+BˆœÛÜ
+
+KŠHOˆ›Ü›X[^™PÛÛÜ”Ý
+‹˜ÛÛÜËœÝ
+HH›Ü›X[^™PÛÛÜ”Ý
+K˜ÛÛÜËœÝ
+JNÂˆÛÛœÝ™\Ù\™YÛZ[˜[H\ÒXYÙX\XØÙ\ÜÛÜžQ[›Ô™YÚ[ÛŠÈ‹‹›Y\™ÙYÚ\K›Û™HJBˆÈÝ›Û™ÑÛZ[˜[Ø[™Y]\ÖÌH[ˆˆ[ÂˆÛÛœÝY\™ÙY™YÚ[ÛÛÛÜœÈH™Y™\”™\Ù\™Y™YÚ[ÛÛÛÜ‘š\œÝ
+™YÚ[ÛÛÛÜœË™\Ù\™YÛZ[˜[Ë˜ÛÛÜŠNÂˆÛÛœÝÛZ[˜[H™\Ù\™YÛZ[˜[Ë˜ÛÛÜËš^Y\™ÙY™YÚ[ÛÛÛÜœÖÌOËš^ØY™R^
+™\ÝË™ÛZ[˜[Ú^Ý\Ë™ÛZ[˜[Ú^ˆŠH[Â‚ˆY\™ÙYÛX]Ú[™^HHÂˆ‹‹›Y\™ÙYÚ\KˆÛÛ™šY[˜ÙNˆX]›X^
+[X™\ŠÝ\œ™[Ë˜ÛÛ™šY[˜ÙH
+K[X™\Š™YÚ[ÛË˜ÛÛ™šY[˜ÙH
+JKˆÛÝ™\˜YÙNˆ›Ý[™ŠX]›X^
+[X™\ŠÝ\œ™[Ë˜ÛÝ™\˜YÙH
+K[X™\Š™YÚ[ÛË˜ÛÝ™\˜YÙH
+JJKˆÛZ[˜[Ú^ˆÛZ[˜[ˆ™YÚ[Û—ØÛÛÜœÎˆY\™ÙY™YÚ[ÛÛÛÜœËˆX\Ú×ÙÙ[ÛY]žNˆ™\ÝË›X\Ú×ÙÙ[ÛY]žHÝ\Ë›X\Ú×ÙÙ[ÛY]žH[ˆ\XØ]WÙ]XÝ[Û—ÚYÎˆÂˆ‹‹Š\œ˜^Kš\Ð\œ˜^JÝ\œ™[Ë™\XØ]WÙ]XÝ[Û—ÚYÊHÈÝ\œ™[™\XØ]WÙ]XÝ[Û—ÚYÈˆØÝ\œ™[ËšYK™š[\Š›ÛÛX[ŠJKˆ™YÚ[ÛËšYˆK™š[\Š›ÛÛX[ŠKˆ‹‹Š™\Ù\™YÛZ[˜[Ë˜ÛÛÜËš^ÈÂˆY\WÜ™\Ù\™YÙÛZ[˜[Ú^ˆ™\Ù\™YÛZ[˜[˜ÛÛÜ‹š^ˆY\WÜ™\Ù\™YÙœ›ÛWÚYˆ™\Ù\™YÛZ[˜[œ™YÚ[ÛËšY[ˆY\WÜ™\Ù\˜][Û—Ü™X\ÛÛŽˆšXYÙX\—ØXØÙ\ÜÛÜžWØÛÛ™šY[ÝÜØÛÛÜˆ‹ˆHˆßJKˆNÂˆBˆ™]\›ˆY\™ÙYÂŸB‚™[˜Ý[ÛˆZ[[›ÔÙYÛY[Y™YÚ[ÛœÊ]XÝ[ÛœÈH×JHÂˆYˆ
+P\œ˜^Kš\Ð\œ˜^J]XÝ[ÛœÊHY]XÝ[ÛœË›[™Ý
+H™]\›ˆ×NÂ‚ˆ™]\›ˆ]XÝ[ÛœÂˆ›X\
+
+]XÝ[Û‹Y
+HOˆÂˆYˆ
+\ÒYÛ›Ü™Y[›ÓX™[
+]XÝ[ÛË›X™[
+JH™]\›ˆ[Â‚ˆÛÛœÝX\[™ÈHX\[›ÓX™[
+]XÝ[ÛË›X™[
+NÂˆYˆ
+[X\[™ÏËž›Û™HX\[™Ëž›Û™HOOH[šÛ›ÝÛˆŠH™]\›ˆ[Â‚ˆÛÛœÝÛÛ™šY[˜ÙHHX]œ›Ý[™
+Û[\L
+[X™\Š]XÝ[ÛË˜ÛÛ™šY[˜ÙH
+H
+ˆL
+JNÂˆYˆ
+ÛÛ™šY[˜ÙHX]œ›Ý[™
+Û[\L
+[X™\ŠX\[™ÏË˜ÛÛ™šY[˜ÙWÙ›ÛÜˆ
+H
+ˆL
+JJH™]\›ˆ[Â‚ˆÛÛœÝ˜›ÞH]XÝ[ÛË˜˜›Þ[ÂˆÛÛœÝ˜›Þ\™XHHÙ][›Ð˜›Þ\™XJ˜›Þ
+NÂ‚ˆ™]\›ˆÂˆYˆ[›×ÉÚY
+È_XˆÙYÛY[ÛX™[ˆX\[™Ë›X™[]XÝ[ÛË›X™[[›×ÉÚY
+È_XˆX™[ˆ]XÝ[ÛË›X™[X\[™Ë›X™[›Øš™XÝ‹ˆØ]YÛÜžNˆX\[™Ë˜Ø]YÛÜžHœYXÙH‹ˆ›Û™NˆX\[™Ëž›Û™KˆÛÛ™šY[˜ÙKˆÛÝ\˜ÙWÝ\Nˆ™Ü›Ý[™[™×Ù[›È‹ˆ˜›ÞˆÛÝ™\˜YÙNˆ˜›Þ\™XKˆÛZ[˜[Ú^ˆ[ˆ™YÚ[Û—ØÛÛÜœÎˆ×KˆX\Ú×ÙÙ[ÛY]žNˆ˜›ÞÈÈ˜›ÞÛÝ™\˜YÙNˆ˜›Þ\™XHHˆ[ˆÛÛÜ—ÙXYÎˆ[ˆNÂˆJBˆ™š[\Š›ÛÛX[ŠNÂŸB‚™[˜Ý[ÛˆZ[[›ÑØ\›Y[™YÚ[ÛœÊ]XÝ[ÛœÈH×JHÂˆ™]\›ˆZ[[›ÔÙYÛY[Y™YÚ[ÛœÊ]XÝ[ÛœÊNÂŸB‚‚™[˜Ý[ÛˆÙ]Ø\›Y[›Û™TÛÝ\˜ÙJØ[T™YÚ[ÛœÈH×K[›Ô™YÚ[ÛœÈH×JHÂˆÛÛœÝ\ÔØ[HH\œ˜^Kš\Ð\œ˜^JØ[T™YÚ[ÛœÊH	‰ˆØ[T™YÚ[ÛœË›[™ÝˆÂˆÛÛœÝ\Ñ[›ÈH\œ˜^Kš\Ð\œ˜^J[›Ô™YÚ[ÛœÊH	‰ˆ[›Ô™YÚ[ÛœË›[™ÝˆÂˆYˆ
+\ÔØ[H	‰ˆ\Ñ[›ÊH™]\›ˆšXœšYŽÂˆYˆ
+\ÔØ[JH™]\›ˆœØ[HŽÂˆYˆ
+\Ñ[›ÊH™]\›ˆ™[›ÈŽÂˆ™]\›ˆ››Û™HŽÂŸB‚™[˜Ý[Ûˆ\œÙQÜ›Ý[™[™Ñ[›ÓÝ]]Ñ]XÝ[ÛœÊÝ]]
+HÂˆYˆ
+[Ý]]
+H™]\›ˆ×NÂ‚ˆÛÛœÝ›Þ\ÈH\œ˜^Kš\Ð\œ˜^JÝ]]Ë˜›Þ\ÊHÈÝ]]˜›Þ\Èˆ×NÂˆÛÛœÝX™[ÈH\œ˜^Kš\Ð\œ˜^JÝ]]Ë›X™[ÊBˆÈÝ]]›X™[Âˆˆ\œ˜^Kš\Ð\œ˜^JÝ]]Ëœ˜\Ù\ÊBˆÈÝ]]œ˜\Ù\Âˆˆ\œ˜^Kš\Ð\œ˜^JÝ]]Ë™]XÝYÛX™[ÊBˆÈÝ]]™]XÝYÛX™[Âˆˆ×NÂˆÛÛœÝØÛÜ™\ÈH\œ˜^Kš\Ð\œ˜^JÝ]]ËœØÛÜ™\ÊBˆÈÝ]]œØÛÜ™\Âˆˆ\œ˜^Kš\Ð\œ˜^JÝ]]Ë›ÙÚ]ÊBˆÈÝ]]›ÙÚ]Âˆˆ\œ˜^Kš\Ð\œ˜^JÝ]]Ë˜ÛÛ™šY[˜Ù\ÊBˆÈÝ]]˜ÛÛ™šY[˜Ù\Âˆˆ×NÂ‚ˆÛÛœÝ›ÝÜÈH\œ˜^Kš\Ð\œ˜^JÝ]]
+BˆÈÝ]]ˆˆ\œ˜^Kš\Ð\œ˜^JÝ]]Ë™]XÝ[ÛœÊBˆÈÝ]]™]XÝ[ÛœÂˆˆ\œ˜^Kš\Ð\œ˜^JÝ]]Ëœ™YXÝ[ÛœÊBˆÈÝ]]œ™YXÝ[ÛœÂˆˆ›Þ\Ë›X\
+
+›ÞY
+HOˆ
+Âˆ˜›Þˆ›ÞˆX™[ˆX™[ÖÚYKˆÛÛ™šY[˜ÙNˆØÛÜ™\ÖÚYKˆJJNÂ‚ˆ™]\›ˆ›ÝÜÂˆ›X\
+
+›ÝËY
+HOˆÂˆÛÛœÝX™[HÝš[™Ê›ÝÏË›X™[›ÝÏË˜Û\ÜÈ›ÝÏË›˜[YH›ÝÏËœ˜\ÙH›ÝÏË^X™[ÖÚYH›Øš™XÝŠBˆš[J
+BˆÓÝÙ\Ø\ÙJ
+NÂˆÛÛœÝÛÛ™šY[˜ÙU˜[YHH›ÝÏË˜ÛÛ™šY[˜ÙHÏÈ›ÝÏËœØÛÜ™HÏÈ›ÝÏË›ÙÚ]ÏÈ›ÝÏËœ›Ø˜Xš[]HÏÈØÛÜ™\ÖÚYHÏÈÂˆÛÛœÝÛÛ™šY[˜ÙHHÛ[\J[X™\ŠÛÛ™šY[˜ÙU˜[YJJNÂˆÛÛœÝ˜›ÞH›Ü›X[^™QÜ›Ý[™[™Ñ[›Ð˜›Þ
+›ÝÏË˜˜›Þ›ÝÏË˜›Þ›ÝÏË˜›Ý[™[™×Ø›Þ›ÝÏË˜›Ý[™È›Þ\ÖÚYJNÂ‚ˆ™]\›ˆÂˆX™[ˆX™[›Øš™XÝ‹ˆÛÛ™šY[˜ÙNˆ›Ý[™ŠÛÛ™šY[˜ÙJKˆ˜›ÞˆNÂˆJBˆ™š[\Š
+]XÝ[ÛŠHOˆÂˆYˆ
+Y]XÝ[ÛŠH™]\›ˆ˜[ÙNÂˆYˆ
+Y]XÝ[Û‹˜˜›Þ
+H™]\›ˆYNÂˆ™]\›ˆ[X™\Š]XÝ[Û‹˜˜›ÞÚY
+Hˆ	‰ˆ[X™\Š]XÝ[Û‹˜˜›ÞšZYÚ
+HˆÂˆJNÂŸB‚™[˜Ý[Ûˆ\œÙTØ[SÝ]]Ô™YÚ[ÛœÊÝ]]
+HÂˆYˆ
+[Ý]]
+H™]\›ˆ×NÂ‚ˆYˆ
+\œ˜^Kš\Ð\œ˜^JÝ]]Ëš[™]šYX[ÛX\ÚÜÊJHÂˆ™]\›ˆÝ]]š[™]šYX[ÛX\ÚÜË›X\
+
+X\ÚÕ\›Y
+HOˆ
+ÂˆYˆØ[WÉÚY
+È_XˆÙYÛY[ÛX™[ˆÙYÛY[ÉÚY
+È_Xˆ›Û™Nˆ[šÛ›ÝÛˆ‹ˆÛÛ™šY[˜ÙNˆÌˆÛÝ™\˜YÙNˆŒ‹ˆX\Ú×Ý\›ˆX\ÚÕ\›ˆÛZ[˜[Ú^ˆ[ˆ™YÚ[Û—ØÛÛÜœÎˆ×KˆÛÝ\˜ÙWÝ\NˆœØ[WÜÙYÛY[‹ˆJJNÂˆB‚ˆÛÛœÝ›ÝÜÈH\œ˜^Kš\Ð\œ˜^JÝ]]
+BˆÈÝ]]ˆˆ\œ˜^Kš\Ð\œ˜^JÝ]]ËœÙYÛY[ÊBˆÈÝ]]œÙYÛY[Âˆˆ\œ˜^Kš\Ð\œ˜^JÝ]]Ëœ™YXÝ[ÛœÊBˆÈÝ]]œ™YXÝ[ÛœÂˆˆ×NÂ‚ˆ™]\›ˆ›ÝÜÂˆ›X\
+
+›ÝËY
+HOˆÂˆÛÛœÝÙYÛY[X™[HÝš[™Êˆ›ÝÏË›X™[›ÝÏË˜Û\ÜÈ›ÝÏË›˜[YH›ÝÏËœÙYÛY[ÛX™[ÙYÛY[ÉÚY
+È_Xˆ
+NÂˆÛÛœÝ›Û™HHÙ]›Û™Qœ›ÛSX™[
+ÙYÛY[X™[
+NÂ‚ˆ™]\›ˆÂˆYˆ›ÝÏËšYØ[WÉÚY
+È_XˆÙYÛY[ÛX™[ˆÙYÛY[X™[ˆ›Û™KˆÛÛ™šY[˜ÙNˆX]œ›Ý[™
+Û[\L
+[X™\Š›ÝÏË˜ÛÛ™šY[˜ÙH›ÝÏËœØÛÜ™HJJJKˆÛÝ™\˜YÙNˆÛ[\J[X™\Š›ÝÏË˜ÛÝ™\˜YÙH›ÝÏË˜\™XH›ÝÏËÙZYÚŒŠJKˆX\Ú×Ý\›ˆ›ÝÏË›X\ÚÈ›ÝÏË›X\Ú×Ý\››ÝÏË\›[ˆÛZ[˜[Ú^ˆØY™R^
+›ÝÏË™ÛZ[˜[Ú^›ÝÏËš^›ÝÏË˜ÛÛÜˆˆŠKˆ™YÚ[Û—ØÛÛÜœÎˆ×KˆÛÝ\˜ÙWÝ\NˆœØ[WÜÙYÛY[‹ˆNÂˆJBˆ™š[\Š
+ŠHOˆ‹ž›Û™HOOH[šÛ›ÝÛˆˆ‹›X\Ú×Ý\›‹™ÛZ[˜[Ú^
+NÂŸB‚˜\Þ[˜È[˜Ý[Ûˆ™]Ú[XYÙPY™™\Š\›
+HÂˆÛÛœÝ™\ÜH]ØZ]™]Ú
+\›
+NÂˆYˆ
+\™\Ü›ÚÊH›ÝÈ™]È\œ›ÜŠ˜Z[YÈ™]Ú[XYÙH
+	Ü™\ÜœÝ]\ßJX
+NÂˆÛÛœÝ\œˆH]ØZ]™\Ü˜\œ˜^PY™™\Š
+NÂˆ™]\›ˆY™™\‹™œ›ÛJ\œŠNÂŸB‚™[˜Ý[ÛˆXÛÙR[XYÙT™Ø˜JY™™\‹\›[HˆŠHÂˆÛÛœÝ[HÝš[™Ê\›[ˆŠKÓÝÙ\Ø\ÙJ
+NÂ‚ˆYˆ
+[š[˜ÛY\Ê‹œ™ÈŠJHÂˆžHÂˆÛÛœÝ™ÈH‘ËœÞ[˜Ëœ™XY
+Y™™\ŠNÂˆ™]\›ˆÈÚYˆ™ËÚYZYÚˆ™ËšZYÚ]Nˆ™Ë™]HNÂˆHØ]ÚßBˆB‚ˆžHÂˆÛÛœÝœÈHœYË™XÛÙJY™™\‹È\ÙU\œ˜^NˆYHJNÂˆ™]\›ˆÈÚYˆœËÚYZYÚˆœËšZYÚ]NˆœË™]HNÂˆHØ]ÚßB‚ˆžHÂˆÛÛœÝ™ÈH‘ËœÞ[˜Ëœ™XY
+Y™™\ŠNÂˆ™]\›ˆÈÚYˆ™ËÚYZYÚˆ™ËšZYÚ]Nˆ™Ë™]HNÂˆHØ]ÚßB‚ˆ›ÝÈ™]È\œ›ÜŠ•[œÝ\ÜY[XYÙH›Ü›X]ŠNÂŸB‚™[˜Ý[ÛˆÙ]X\ÚÔÝ™[™Ý
+X\ÚÔ™Ø˜KY
+HÂˆÛÛœÝ[HH[X™\ŠX\ÚÔ™Ø˜VÚY
+È×H
+NÂˆYˆ
+[Hˆ
+H™]\›ˆ[NÂˆ™]\›ˆ
+[X™\ŠX\ÚÔ™Ø˜VÚYH
+H
+È[X™\ŠX\ÚÔ™Ø˜VÚY
+ÈWH
+H
+È[X™\ŠX\ÚÔ™Ø˜VÚY
+È—H
+JHÈÎÂŸB‚™[˜Ý[Ûˆ^˜XÝX\ÚÙY™YÚ[ÛÛÛÜœÊ˜\ÙR[XYÙKX\ÚÒ[XYÙK[Z]HŠHÂˆÛÛœÝ˜\ÙUÈH[X™\Š˜\ÙR[XYÙOËÚY
+NÂˆÛÛœÝ˜\ÙRH[X™\Š˜\ÙR[XYÙOËšZYÚ
+NÂˆÛÛœÝX\ÚÕÈH[X™\ŠX\ÚÒ[XYÙOËÚY
+NÂˆÛÛœÝX\ÚÒH[X™\ŠX\ÚÒ[XYÙOËšZYÚ
+NÂˆYˆ
+X˜\ÙUÈX˜\ÙR[X\ÚÕÈ[X\ÚÒ
+H™]\›ˆ×NÂ‚ˆÛÛœÝXÚÙ]ÈH™]ÈX\
+
+NÂˆ]^[ÛÝ[HÂ‚ˆ›Üˆ
+]^HHÈ^HX\ÚÒÈ^H
+ÏHJHÂˆ›Üˆ
+]^HÈ^X\ÚÕÎÈ^
+ÏHJHÂˆÛÛœÝRYH
+^H
+ˆX\ÚÕÈ
+È^
+H
+ˆÂˆYˆ
+Ù]X\ÚÔÝ™[™Ý
+X\ÚÒ[XYÙK™]KRY
+HJHÛÛ[YNÂ‚ˆÛÛœÝžHX]›X^
+X]›Z[Š˜\ÙUÈHKX]™›ÛÜŠ
+^ÈX\ÚÕÊH
+ˆ˜\ÙUÊJJNÂˆÛÛœÝžHHX]›X^
+X]›Z[Š˜\ÙRHKX]™›ÛÜŠ
+^HÈX\ÚÒ
+H
+ˆ˜\ÙR
+JJNÂˆÛÛœÝ’YH
+žH
+ˆ˜\ÙUÈ
+Èž
+H
+ˆÂˆÛÛœÝ[HH[X™\Š˜\ÙR[XYÙK™]VØ’Y
+È×H
+NÂˆYˆ
+[HŒ
+HÛÛ[YNÂ‚ˆÛÛœÝˆH[X™\Š˜\ÙR[XYÙK™]VØ’YH
+NÂˆÛÛœÝÈH[X™\Š˜\ÙR[XYÙK™]VØ’Y
+ÈWH
+NÂˆÛÛœÝˆH[X™\Š˜\ÙR[XYÙK™]VØ’Y
+È—H
+NÂˆÛÛœÝÙ^HH	ÓX]œ›Ý[™
+ˆÈMŠ_WÉÓX]œ›Ý[™
+ÈÈMŠ_WÉÓX]œ›Ý[™
+ˆÈMŠ_XÂ‚ˆYˆ
+XXÚÙ]Ëš\ÊÙ^JJHXÚÙ]ËœÙ]
+Ù^KÈÛÝ[ˆ”Ý[NˆÔÝ[Nˆ”Ý[NˆJNÂˆÛÛœÝ›ÝÈHXÚÙ]Ë™Ù]
+Ù^JNÂˆ›ÝË˜ÛÝ[
+ÏHNÂˆ›ÝËœ”Ý[H
+ÏHŽÂˆ›ÝË™ÔÝ[H
+ÏHÎÂˆ›ÝË˜”Ý[H
+ÏHŽÂˆ^[ÛÝ[
+ÏHNÂˆBˆB‚ˆYˆ
+\^[ÛÝ[
+H™]\›ˆ×NÂ‚ˆ™]\›ˆ\œ˜^K™œ›ÛJXÚÙ]Ë˜[Y\Ê
+JBˆ›X\
+
+›ÝÊHOˆÂˆÛÛœÝ^HØY™R^
+ˆÚ›ÛXJˆX]œ›Ý[™
+›ÝËœ”Ý[HÈ›ÝË˜ÛÝ[
+KˆX]œ›Ý[™
+›ÝË™ÔÝ[HÈ›ÝË˜ÛÝ[
+KˆX]œ›Ý[™
+›ÝË˜”Ý[HÈ›ÝË˜ÛÝ[
+Bˆ
+Kš^
+
+Bˆ
+NÂˆ™]\›ˆÂˆ^ˆÝˆ›ÝË˜ÛÝ[È^[ÛÝ[ˆNÂˆJBˆ™š[\Š
+ÊHOˆHXËš^
+BˆœÛÜ
+
+KŠHOˆ‹œÝHKœÝ
+BˆœÛXÙJ[Z]
+NÂŸB‚‚™[˜Ý[ÛˆÙ]^[˜›Þœ›ÛQ[›Ð˜›Þ
+˜›ÞH[[XYÙUÚYH[XYÙRZYÚH
+HÂˆYˆ
+X˜›ÞZ[XYÙUÚYZ[XYÙRZYÚ
+H™]\›ˆ[ÂˆÛÛœÝZ[ˆH[X™\Š˜›ÞžÛZ[ŠNÂˆÛÛœÝSZ[ˆH[X™\Š˜›ÞžWÛZ[ŠNÂˆÛÛœÝX^H[X™\Š˜›ÞžÛX^
+NÂˆÛÛœÝSX^H[X™\Š˜›ÞžWÛX^
+NÂˆYˆ
+VÞZ[‹SZ[‹X^SX^K™]™\žJ[X™\‹š\Ñš[š]JJH™]\›ˆ[ÂˆÛÛœÝ›Ü›X[^™YHZ[ˆH	‰ˆSZ[ˆH	‰ˆX^HH	‰ˆSX^HNÂˆÛÛœÝYH›Ü›X[^™YÈZ[ˆ
+ˆ[XYÙUÚYˆZ[ŽÂˆÛÛœÝÜH›Ü›X[^™YÈSZ[ˆ
+ˆ[XYÙRZYÚˆSZ[ŽÂˆÛÛœÝšYÚH›Ü›X[^™YÈX^
+ˆ[XYÙUÚYˆX^ÂˆÛÛœÝ›ÝÛHH›Ü›X[^™YÈSX^
+ˆ[XYÙRZYÚˆSX^ÂˆÛÛœÝHHX]›X^
+X]›Z[Š[XYÙUÚYHKX]™›ÛÜŠX]›Z[ŠYšYÚ
+JJJNÂˆÛÛœÝLHHX]›X^
+X]›Z[Š[XYÙRZYÚHKX]™›ÛÜŠX]›Z[ŠÜ›ÝÛJJJJNÂˆÛÛœÝˆHX]›X^
+X]›Z[Š[XYÙUÚYX]˜ÙZ[
+X]›X^
+YšYÚ
+JJJNÂˆÛÛœÝLˆHX]›X^
+X]›Z[Š[XYÙRZYÚX]˜ÙZ[
+X]›X^
+Ü›ÝÛJJJJNÂˆYˆ
+ˆHHLˆHLJH™]\›ˆ[Âˆ™]\›ˆÈKLK‹L‹ÚYˆˆHKZYÚˆLˆHLHNÂŸB‚™[˜Ý[Ûˆ\Ó™X\•Ú]SÜ›XÚÔ^[
+‹ËŠHÂˆÛÛœÝX^HX]›X^
+‹ËŠNÂˆÛÛœÝZ[ˆHX]›Z[Š‹ËŠNÂˆ™]\›ˆX^Hˆ
+X^HN	‰ˆX^HZ[ˆHLŠNÂŸB‚™[˜Ý[ÛˆÙ][›ÔØ[\T^[˜›Þ
+^[˜›Þ›Û™HHˆ‹Ø]YÛÜžHHˆŠHÂˆ™]\›ˆÙ][›ÔØ[\T^[˜›Þ\Ê^[˜›Þ›Û™KØ]YÛÜžJVÌNÂŸB‚™[˜Ý[ÛˆZ[™[]]™T^[˜›Þ
+^[˜›ÞÝ\[™TÝ\Q[™X™[H˜Ù[\ˆŠHÂˆÛÛœÝHHX]›X^
+^[˜›ÞžKX]›Z[Š^[˜›ÞžˆHKX]™›ÛÜŠ^[˜›ÞžH
+È^[˜›ÞÚY
+ˆÝ\
+JJNÂˆÛÛœÝˆHX]›X^
+H
+ÈKX]›Z[Š^[˜›Þž‹X]˜ÙZ[
+^[˜›ÞžH
+È^[˜›ÞÚY
+ˆ[™
+JJNÂˆÛÛœÝLHHX]›X^
+^[˜›ÞžLKX]›Z[Š^[˜›ÞžLˆHKX]™›ÛÜŠ^[˜›ÞžLH
+È^[˜›ÞšZYÚ
+ˆTÝ\
+JJNÂˆÛÛœÝLˆHX]›X^
+LH
+ÈKX]›Z[Š^[˜›ÞžL‹X]˜ÙZ[
+^[˜›ÞžLH
+È^[˜›ÞšZYÚ
+ˆQ[™
+JJNÂˆ™]\›ˆÈX™[KLK‹L‹ÚYˆˆHKZYÚˆLˆHLHNÂŸB‚™[˜Ý[ÛˆÙ][›ÔØ[\T^[˜›Þ\Ê^[˜›Þ›Û™HHˆ‹Ø]YÛÜžHHˆŠHÂˆÛÛœÝ›Û™RÙ^HH›Ü›X[^™U^
+›Û™JNÂˆÛÛœÝØ]YÛÜžRÙ^HH›Ü›X[^™U^
+Ø]YÛÜžJNÂ‚ˆYˆ
+›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ŠHÂˆ™]\›ˆÂˆZ[™[]]™T^[˜›Þ
+^[˜›ÞŒÍ‹ŒN‹\\‹XÙ[\ˆŠKˆZ[™[]]™T^[˜›Þ
+^[˜›ÞŒLŒÍÌ›YXÙ[\ˆŠKˆZ[™[]]™T^[˜›Þ
+^[˜›ÞL‹ŽLŒÍÌœšYÚXÙ[\ˆŠKˆZ[™[]]™T^[˜›Þ
+^[˜›ÞŒ‹ÍŒŽL‹›ÝÙ\‹XÙ[\ˆŠKˆNÂˆB‚ˆ]Ý\HŒNÂˆ][™HŽŽÂˆ]TÝ\HŒMNÂˆ]Q[™HŽNÂ‚ˆYˆ
+›Û™RÙ^HOOH\\—ÙØ\›Y[ŠHÂˆÝ\HŒÂˆ[™HÍŽÂˆTÝ\HŒLŽÂˆQ[™HÍNÂˆH[ÙHYˆ
+›Û™RÙ^HOOH™›ÛÝÙX\ˆŠHÂˆÝ\HŒMÂˆ[™HŽŽÂˆTÝ\HŒÌÂˆQ[™HŽLŽÂˆH[ÙHYˆ
+›Û™RÙ^HOOH˜˜YÈŠHÂˆÝ\HŒMNÂˆ[™HŽNÂˆTÝ\HŒMNÂˆQ[™HŽNÂˆH[ÙHYˆ
+›Û™RÙ^HOOH˜XØÙ\ÜÛÜžWÚ™]Ù[žHˆØ]YÛÜžRÙ^Kš[˜ÛY\Êš]ŠHØ]YÛÜžRÙ^Kš[˜ÛY\Ê˜XØÙ\ÜÛÜžHŠJHÂˆÝ\HŒŒÂˆ[™HŽÂˆTÝ\HŒŒÂˆQ[™HŽÂˆB‚ˆ™]\›ˆØZ[™[]]™T^[˜›Þ
+^[˜›ÞÝ\[™TÝ\Q[™
+WNÂŸB‚™[˜Ý[ÛˆÙ]™Ø•˜Z]Ê‹ËŠHÂˆÛÛœÝÚËHHÚ›ÛXJ‹ËŠKšÛ
+
+NÂˆ™]\›ˆÂˆYNˆ[X™\‹š\Ñš[š]J
+HÈˆˆØ]\˜][ÛŽˆ[X™\‹š\Ñš[š]JÊHÈÈˆˆYÚ™\ÜÎˆ[X™\‹š\Ñš[š]J
+HÈˆˆNÂŸB‚™[˜Ý[Ûˆ\ÔÚÚ[“ZÙT^[
+‹ËŠHÂˆÛÛœÝÈYKØ]\˜][Û‹YÚ™\ÜÈHHÙ]™Ø•˜Z]Ê‹ËŠNÂˆ™]\›ˆYHH	‰ˆYHH	‰ˆØ]\˜][ÛˆHŒMˆ	‰ˆØ]\˜][ÛˆHŽ	‰ˆYÚ™\ÜÈHŒÌˆ	‰ˆYÚ™\ÜÈHŽˆ	‰ˆˆˆˆ	‰ˆÈˆˆ
+ˆÌŽÂŸB‚™[˜Ý[Ûˆ\ÐÚ›ÛX]XÑÜ™Y[“Ü“Û]™JÛÛÜŠHÂˆÛÛœÝ^HØY™R^
+ÛÛÜËš^ÛÛÜˆˆŠNÂˆYˆ
+Z^
+H™]\›ˆ˜[ÙNÂˆÛÛœÝÛYÚ™\ÜËÚ›ÛXU˜[YKYWHHÚ›ÛXJ^
+K›Ú
+
+NÂˆ™]\›ˆ[X™\‹š\Ñš[š]JYJH	‰ˆ[X™\‹š\Ñš[š]JÚ›ÛXU˜[YJH	‰ˆYHHMH	‰ˆYHHMÌ	‰ˆÚ›ÛXU˜[YHH	‰ˆYÚ™\ÜÈHŒŽÂŸB‚™[˜Ý[Ûˆ\Ó™]]˜[\šÐÛÛÜŠÛÛÜŠHÂˆÛÛœÝ^HØY™R^
+ÛÛÜËš^ÛÛÜˆˆŠNÂˆYˆ
+Z^
+H™]\›ˆ˜[ÙNÂˆÛÛœÝÚYKØ]\˜][Û‹YÚ™\Ü×HHÚ›ÛXJ^
+KšÛ
+
+NÂˆÛÛœÝËÚ›ÛXU˜[YWHHÚ›ÛXJ^
+K›Ú
+
+NÂˆ™]\›ˆYÚ™\ÜÈHŒÌ	‰ˆ
+S[X™\‹š\Ñš[š]JYJHØ]\˜][ÛˆHŒNÚ›ÛXU˜[YH
+NÂŸB‚™[˜Ý[ÛˆÛÜÝÙ\‘Ø\›Y[ÛÛÜœÊÛÛÜ”›ÝÜÈH×KÛÛ^HßJHÂˆÛÛœÝ™\X]YÜ™Y[”Ý\ÜH[X™\ŠÛÛ^Ë™Ü™Y[•Ú[™ÝÔÝ\Ü
+HHŽÂˆÛÛœÝÜ™Y[“][\Y\ˆH™\X]YÜ™Y[”Ý\ÜÈ‹ŒMHˆKMNÂˆ™]\›ˆË‹‹˜ÛÛÜ”›ÝÜ×KœÛÜ
+
+KŠHOˆÂˆÛÛœÝQÜ™Y[ˆH\ÐÚ›ÛX]XÑÜ™Y[“Ü“Û]™JJNÂˆÛÛœÝ‘Ü™Y[ˆH\ÐÚ›ÛX]XÑÜ™Y[“Ü“Û]™JŠNÂˆÛÛœÝS™]]˜[\šÈH\Ó™]]˜[\šÐÛÛÜŠJNÂˆÛÛœÝ“™]]˜[\šÈH\Ó™]]˜[\šÐÛÛÜŠŠNÂˆÛÛœÝTØÛÜ™HHKœÝ
+ˆ
+QÜ™Y[ˆÈÜ™Y[“][\Y\ˆˆJH
+ˆ
+S™]]˜[\šÈÈÌˆˆJNÂˆÛÛœÝ”ØÛÜ™HH‹œÝ
+ˆ
+‘Ü™Y[ˆÈÜ™Y[“][\Y\ˆˆJH
+ˆ
+“™]]˜[\šÈÈÌˆˆJNÂˆ™]\›ˆ”ØÛÜ™HHTØÛÜ™NÂˆJNÂŸB‚™[˜Ý[Ûˆ\ÒXYÙX\‘[›ÐÛÛ^
+ÛÛ^HßJHÂˆÛÛœÝ˜[Y\ÈHÂˆÛÛ^Ëž›Û™KˆÛÛ^Ë˜Ø]YÛÜžKˆÛÛ^Ë›X™[ˆÛÛ^Ë›Øš™XÝÝ\KˆÛÛ^Ë˜XØÙ\ÜÛÜžWÝ\KˆK›X\
+›Ü›X[^™U^
+NÂˆ™]\›ˆ˜[Y\ËœÛÛYJ
+˜[YJHOˆ×Š]Ø\™X[šY_XYÙX\ŠW‹Ë\Ý
+˜[YJJNÂŸB‚™[˜Ý[ÛˆÙ]XYÙX\ÛÛÜšX\ÔØÛÜ™JÛ\Ý\ˆHßJHÂˆÛÛœÝ^HØY™R^
+Û\Ý\Ë˜˜\ÙHÛ\Ý\Ëš^ˆŠNÂˆYˆ
+Z^
+H™]\›ˆÂˆÛÛœÝYHHÙ]YJ^
+NÂˆÛÛœÝØ]HÙ]Ø]
+^
+NÂˆÛÛœÝYÚHÙ]YÚ
+^
+NÂˆÛÛœÝËÚ›ÛXU˜[YWHHÚ›ÛXJ^
+K›Ú
+
+NÂˆÛÛœÝÝH[X™\ŠÛ\Ý\ËœÝ
+NÂˆÛÛœÝÝ›Û™ÓØš™XÝÛÛÜˆHØ]H	‰ˆÚ›ÛXU˜[YHHÍ	‰ˆYÚHŒN	‰ˆYÚHÎÂˆÛÛœÝØ]\˜]Y˜XœšXÒYHBˆ
+YHHÍHYHHJHËÈ™YÈ›ÜÙBˆ
+YHHNH	‰ˆYHHŒ
+HËÈ›YBˆ
+YHHÍH	‰ˆYHHMÍJHËÈY[ÝÈÈÜ™Y[‚ˆ
+YHHÍH	‰ˆYHHÌÍJNÈËÈ\œHÈXYÙ[BˆYˆ
+\Ý›Û™ÓØš™XÝÛÛÜˆ\Ø]\˜]Y˜XœšXÒYHÝŒŠH™]\›ˆÂˆ™]\›ˆÝ
+ˆ
+H
+ÈØ]
+H
+ˆ
+H
+ÈX]›Z[ŠÚ›ÛXU˜[YK
+HÈ
+NÂŸB‚™[˜Ý[Ûˆ\Ó]]YÚÚ[“ZÙRXYÙX\Û\Ý\ŠÛ\Ý\ˆHßJHÂˆÛÛœÝ^HØY™R^
+Û\Ý\Ë˜˜\ÙHÛ\Ý\Ëš^ˆŠNÂˆYˆ
+Z^
+H™]\›ˆ˜[ÙNÂˆÛÛœÝYHHÙ]YJ^
+NÂˆÛÛœÝØ]HÙ]Ø]
+^
+NÂˆÛÛœÝYÚHÙ]YÚ
+^
+NÂˆÛÛœÝËÚ›ÛXU˜[YWHHÚ›ÛXJ^
+K›Ú
+
+NÂˆ™]\›ˆYHHÌÍHYHHMBˆÈØ]HŒÍ	‰ˆÚ›ÛXU˜[YHHÌˆ	‰ˆYÚHŒÍ	‰ˆYÚHŽˆˆ˜[ÙNÂŸB‚™[˜Ý[Ûˆ\RXYÙX\‘[›ÐÛÛÜšX\ÊÛ\Ý\œÈH×KÛÛ^HßJHÂˆÛÛœÝ™PšX\ÕÜ^HØY™R^
+Û\Ý\œÏË–ÌOË˜˜\ÙHÛ\Ý\œÏË–ÌOËš^ˆŠNÂˆÛÛœÝXYÈHÂˆXYÙX\—ØÛÛÜ—ØšX\×Ø\YYˆ˜[ÙKˆ™WØšX\×ÝÜÚ^ˆ™PšX\ÕÜ^[ˆÜÝØšX\×ÝÜÚ^ˆ™PšX\ÕÜ^[ˆ™X\ÛÛŽˆ\ÒXYÙX\‘[›ÐÛÛ^
+ÛÛ^
+HÈ››×ÛYX[š[™Ù[ÜØ]\˜]YÚXYÙX\—ØÛ\Ý\ˆˆˆ››ÝÚXYÙX\—ØÛÛ^‹ˆNÂˆYˆ
+Z\ÒXYÙX\‘[›ÐÛÛ^
+ÛÛ^
+HÛ\Ý\œË›[™ÝŠH™]\›ˆÈÛ\Ý\œËXYÈNÂ‚ˆÛÛœÝÜHÛ\Ý\œÖÌNÂˆÛÛœÝÜÝH[X™\ŠÜËœÝ
+NÂˆÛÛœÝÜ\Ó]]YÚÚ[“ZÙHH\Ó]]YÚÚ[“ZÙRXYÙX\Û\Ý\ŠÜ
+NÂˆÛÛœÝØ[™Y]HHÛ\Ý\œÂˆœÛXÙJJBˆ›X\
+
+Û\Ý\ŠHOˆ
+ÈÛ\Ý\‹ØÛÜ™NˆÙ]XYÙX\ÛÛÜšX\ÔØÛÜ™JÛ\Ý\ŠHJJBˆ™š[\Š
+›ÝÊHOˆ›ÝËœØÛÜ™Hˆ	‰ˆ[X™\Š›ÝË˜Û\Ý\ËœÝ
+HHX]›X^
+Œ‹ÜÝ
+ˆ
+Ü\Ó]]YÚÚ[“ZÙHÈŒŒˆˆŒÍ
+JJBˆœÛÜ
+
+KŠHOˆ‹œØÛÜ™HHKœØÛÜ™JVÌOË˜Û\Ý\ŽÂ‚ˆYˆ
+XØ[™Y]JH™]\›ˆÈÛ\Ý\œËXYÈNÂˆÛÛœÝØ[™Y]R^HØY™R^
+Ø[™Y]OË˜˜\ÙHØ[™Y]OËš^ˆŠNÂˆYˆ
+XØ[™Y]R^Ø[™Y]R^OOH™PšX\ÕÜ^
+H™]\›ˆÈÛ\Ý\œËXYÈNÂ‚ˆÛÛœÝšX\ÙYÛ\Ý\œÈHØØ[™Y]K‹‹˜Û\Ý\œË™š[\Š
+Û\Ý\ŠHOˆÛ\Ý\ˆOOHØ[™Y]JWNÂˆ™]\›ˆÂˆÛ\Ý\œÎˆšX\ÙYÛ\Ý\œËˆXYÎˆÂˆXYÙX\—ØÛÛÜ—ØšX\×Ø\YYˆYKˆ™WØšX\×ÝÜÚ^ˆ™PšX\ÕÜ^[ˆÜÝØšX\×ÝÜÚ^ˆØ[™Y]R^ˆ™X\ÛÛŽˆÜ\Ó]]YÚÚ[“ZÙBˆÈœ›Û[ÝYÜØ]\˜]YÚXYÙX\—ØÛ\Ý\—ÛÝ™\—Û]]YÜÚÚ[—ÛZÙWÝÜ‚ˆˆœ›Û[ÝYÛYX[š[™Ù[ÜØ]\˜]YÚXYÙX\—ØÛ\Ý\ˆ‹ˆKˆNÂŸB‚™[˜Ý[ÛˆÙ][›Ö›Û™PÛÛÜ•ÙZYÚ
+Ø[\K›Û™HHˆŠHÂˆÛÛœÝ›Û™RÙ^HH›Ü›X[^™U^
+›Û™JNÂˆÛÛœÝÈYKØ]\˜][Û‹YÚ™\ÜÈHHØ[\NÂˆ]ÙZYÚHNÂˆÛÛœÝÜ™Y[“Üœ›ÝÛˆH
+YHHH	‰ˆYHHMH	‰ˆØ]\˜][ÛˆHŒN	‰ˆYÚ™\ÜÈHMJH
+YHHN	‰ˆYHHN	‰ˆØ]\˜][ÛˆHŒŒˆ	‰ˆYÚ™\ÜÈHN
+NÂˆÛÛœÝØ\›S™]]˜[HYHH	‰ˆYHHŒˆ	‰ˆØ]\˜][ÛˆHŒL	‰ˆØ]\˜][ÛˆH	‰ˆYÚ™\ÜÈHŒÎ	‰ˆYÚ™\ÜÈHÎÂ‚ˆYˆ
+È˜XØÙ\ÜÛÜžWÚ™]Ù[žH‹›ÝÙ\—ÙØ\›Y[‹š]—Kš[˜ÛY\Ê›Û™RÙ^JH	‰ˆÜ™Y[“Üœ›ÝÛŠHÙZYÚ
+H›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ˆÈKˆˆKŒÍNÂˆYˆ
+›Û™RÙ^HOOH\\—ÙØ\›Y[ˆ	‰ˆØ\›S™]]˜[
+HÙZYÚ
+HKŒÍNÂˆYˆ
+È˜˜YÈ‹™›ÛÝÙX\ˆ—Kš[˜ÛY\Ê›Û™RÙ^JH	‰ˆYHHMH	‰ˆYHHMH	‰ˆØ]\˜][ÛˆHŒŒ	‰ˆYÚ™\ÜÈHŒŠHÙZYÚ
+HKŒNÂˆYˆ
+Ø[\K˜™ÊHÙZYÚ
+HŒÍNÂˆYˆ
+Ø[\KœÚÚ[ŠHÙZYÚ
+HŒŽÂˆ™]\›ˆÙZYÚÂŸB‚™[˜Ý[Ûˆ^˜XÝ[›Ð˜›Þ™YÚ[ÛÛÛÜœÊ˜\ÙR[XYÙK˜›Þ[Z]H‹ÛÛ^HßJHÂˆÛÛœÝ˜\ÙUÈH[X™\Š˜\ÙR[XYÙOËÚY
+NÂˆÛÛœÝ˜\ÙRH[X™\Š˜\ÙR[XYÙOËšZYÚ
+NÂˆÛÛœÝ]HH˜\ÙR[XYÙOË™]NÂˆÛÛœÝ^[˜›ÞHÙ]^[˜›Þœ›ÛQ[›Ð˜›Þ
+˜›Þ˜\ÙUË˜\ÙR
+NÂˆYˆ
+Y]H\^[˜›Þ
+H™]\›ˆÈÛÛÜœÎˆ×KXYÎˆ[NÂ‚ˆÛÛœÝ›Û™HHÛÛ^Ëž›Û™HˆŽÂˆÛÛœÝ›Û™RÙ^HH›Ü›X[^™U^
+›Û™JNÂˆÛÛœÝ™]š[Ý\ÔØ[\P˜›ÞH›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[‚ˆÈZ[™[]]™T^[˜›Þ
+^[˜›ÞŒÍ‹ŒŽŽ‹œ™]š[Ý\ËXÙ[\‹XÜ›ÜŠBˆˆÙ][›ÔØ[\T^[˜›Þ
+^[˜›Þ›Û™KÛÛ^Ë˜Ø]YÛÜžHÛÛ^Ë›X™[ˆŠNÂˆÛÛœÝØ[\P˜›Þ\ÈHÙ][›ÔØ[\T^[˜›Þ\Ê^[˜›Þ›Û™KÛÛ^Ë˜Ø]YÛÜžHÛÛ^Ë›X™[ˆŠNÂˆÛÛœÝØ[\\ÈH×NÂˆÛÛœÝÝÙ\•Ú[™ÝÔÝ]ÈH×NÂˆ]˜XÚÙÜ›Ý[™ZÙHHÂ‚ˆ›Üˆ
+ÛÛœÝØ[\P˜›ÞÙˆØ[\P˜›Þ\ÊHÂˆÛÛœÝÝšYHHX]›X^
+KX]™›ÛÜŠX]œÜ\
+
+Ø[\P˜›ÞÚY
+ˆØ[\P˜›ÞšZYÚ
+HÈÌ
+JJNÂˆÛÛœÝÚ[™ÝÔØ[\\ÈH×NÂˆ›Üˆ
+]HHØ[\P˜›ÞžLNÈHØ[\P˜›ÞžLŽÈH
+ÏHÝšYJHÂˆ›Üˆ
+]HØ[\P˜›ÞžNÈØ[\P˜›ÞžŽÈ
+ÏHÝšYJHÂˆÛÛœÝYH
+H
+ˆ˜\ÙUÈ
+È
+H
+ˆÂˆÛÛœÝ[HH[X™\Š]VÚY
+È×HÏÈMJNÂˆYˆ
+[HŒ
+HÛÛ[YNÂˆÛÛœÝˆH[X™\Š]VÚYH
+NÂˆÛÛœÝÈH[X™\Š]VÚY
+ÈWH
+NÂˆÛÛœÝˆH[X™\Š]VÚY
+È—H
+NÂˆÛÛœÝ˜Z]ÈHÙ]™Ø•˜Z]Ê‹ËŠNÂˆÛÛœÝ™ÈH\Ó™X\•Ú]SÜ›XÚÔ^[
+‹ËŠNÂˆÛÛœÝÚÚ[ˆH\ÔÚÚ[“ZÙT^[
+‹ËŠNÂˆYˆ
+™ÊH˜XÚÙÜ›Ý[™ZÙH
+ÏHNÂˆÛÛœÝØ[\HHÈ‹Ë‹™ËÚÚ[‹‹‹˜Z]ÈNÂˆØ[\\Ëœ\Ú
+Ø[\JNÂˆÚ[™ÝÔØ[\\Ëœ\Ú
+Ø[\JNÂˆBˆBˆYˆ
+›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ŠHÂˆÛÛœÝ\ØX›UÚ[™ÝÈHÚ[™ÝÔØ[\\Ë™š[\Š
+Ø[\JHOˆ\Ø[\K˜™È	‰ˆ\Ø[\KœÚÚ[ŠNÂˆÛÛœÝÜ™Y[ÛÝ[H\ØX›UÚ[™ÝË™š[\Š
+Ø[\JHO‚ˆØ[\KšYHHH	‰ˆØ[\KšYHHMH	‰ˆØ[\KœØ]\˜][ÛˆHŒN	‰ˆØ[\K›YÚ™\ÜÈHMBˆ
+K›[™ÝÂˆÝÙ\•Ú[™ÝÔÝ]Ëœ\Ú
+ÂˆX™[ˆØ[\P˜›Þ›X™[[ˆØ[\WØÛÝ[ˆ\ØX›UÚ[™ÝË›[™ÝˆÜ™Y[—ÜÚ\™Nˆ\ØX›UÚ[™ÝË›[™ÝÈ›Ý[™ŠÜ™Y[ÛÝ[È\ØX›UÚ[™ÝË›[™Ý
+HˆˆJNÂˆBˆBˆÛÛœÝÜ™Y[•Ú[™ÝÔÝ\ÜHÝÙ\•Ú[™ÝÔÝ]Ë™š[\Š
+›ÝÊHOˆ›ÝËœØ[\WØÛÝ[H	‰ˆ›ÝË™Ü™Y[—ÜÚ\™HHŒLŠK›[™ÝÂ‚ˆYˆ
+\Ø[\\Ë›[™Ý
+HÂˆ™]\›ˆÂˆÛÛÜœÎˆ×KˆXYÎˆÂˆÛÛÜ—ÜØ[\WØ˜›ÞˆØ[\P˜›Þ\ÖÌKˆÛÛÜ—ÜØ[\WØ˜›Þ\ÎˆØ[\P˜›Þ\ËˆØ[\WÝÚ[™ÝÜ×Ø™Y›Ü™Nˆ›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ˆÈÜ™]š[Ý\ÔØ[\P˜›ÞHˆ[ˆØ[\WÝÚ[™ÝÜ×ØY\Žˆ›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ˆÈØ[\P˜›Þ\Èˆ[ˆ™]š[Ý\×ØÛÛÜ—ÜØ[\WØ˜›Þˆ›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ˆÈ™]š[Ý\ÔØ[\P˜›Þˆ[ˆØ[\WØÛÝ[ˆˆš[\™YÜØ[\WØÛÝ[ˆˆÛZ[˜[Ú^Ø™Y›Ü™WØÛ\Ý\Žˆ[ˆ^XÝYÙÛZ[˜[ØÛÛÜŽˆ[ˆKˆNÂˆBˆÛÛœÝ›Û™ÔØ[\\ÈHØ[\\Ë™š[\Š
+Ø[\JHOˆ\Ø[\K˜™ÊNÂˆÛÛœÝ›Û”ÚÚ[”Ø[\\ÈHØ[\\Ë™š[\Š
+Ø[\JHOˆ\Ø[\KœÚÚ[ŠNÂˆ]\ØX›TØ[\\ÈH›Û™ÔØ[\\Ë›[™ÝHX]›X^
+ŒØ[\\Ë›[™Ý
+ˆŒ
+HÈ›Û™ÔØ[\\ÈˆØ[\\ÎÂˆÛÛœÝ›Û”ÚÚ[•\ØX›HH\ØX›TØ[\\Ë™š[\Š
+Ø[\JHOˆ\Ø[\KœÚÚ[ŠNÂˆYˆ
+VÈœÚÚ[ˆ‹™˜XÙH‹˜›ÙH—Kš[˜ÛY\Ê›Ü›X[^™U^
+›Û™JJH	‰ˆ›Û”ÚÚ[•\ØX›K›[™ÝHX]›X^
+Œ\ØX›TØ[\\Ë›[™Ý
+ˆŒLŠJHÂˆ\ØX›TØ[\\ÈH›Û”ÚÚ[•\ØX›NÂˆH[ÙHYˆ
+›Û”ÚÚ[”Ø[\\Ë›[™ÝHX]›X^
+ŒØ[\\Ë›[™Ý
+ˆŒLŠJHÂˆ\ØX›TØ[\\ÈH›Û”ÚÚ[”Ø[\\ÎÂˆB‚ˆÛÛœÝXÚÙ]ÈH™]ÈX\
+
+NÂ‚ˆ›Üˆ
+ÛÛœÝØ[\HÙˆ\ØX›TØ[\\ÊHÂˆÛÛœÝÙ^HH	ÓX]œ›Ý[™
+Ø[\KœˆÈMŠ_WÉÓX]œ›Ý[™
+Ø[\K™ÈÈMŠ_WÉÓX]œ›Ý[™
+Ø[\K˜ˆÈMŠ_XÂˆYˆ
+XXÚÙ]Ëš\ÊÙ^JJHXÚÙ]ËœÙ]
+Ù^KÈÛÝ[ˆÙZYÚˆ”Ý[NˆÔÝ[Nˆ”Ý[NˆJNÂˆÛÛœÝ›ÝÈHXÚÙ]Ë™Ù]
+Ù^JNÂˆÛÛœÝÙZYÚHÙ][›Ö›Û™PÛÛÜ•ÙZYÚ
+Ø[\K›Û™JNÂˆ›ÝË˜ÛÝ[
+ÏHNÂˆ›ÝËÙZYÚ
+ÏHÙZYÚÂˆ›ÝËœ”Ý[H
+ÏHØ[\Kœˆ
+ˆÙZYÚÂˆ›ÝË™ÔÝ[H
+ÏHØ[\K™È
+ˆÙZYÚÂˆ›ÝË˜”Ý[H
+ÏHØ[\K˜ˆ
+ˆÙZYÚÂˆB‚ˆÛÛœÝÝ[ÙZYÚH\œ˜^K™œ›ÛJXÚÙ]Ë˜[Y\Ê
+JKœ™YXÙJ
+Ý[K›ÝÊHOˆÝ[H
+È›ÝËÙZYÚ
+H\ØX›TØ[\\Ë›[™ÝÂˆÛÛœÝÛÛÜ”›ÝÜÈH\œ˜^K™œ›ÛJXÚÙ]Ë˜[Y\Ê
+JBˆ›X\
+
+›ÝÊHOˆ
+Âˆ^ˆØY™R^
+Ú›ÛXJX]œ›Ý[™
+›ÝËœ”Ý[HÈX]›X^
+›ÝËÙZYÚŒJJKX]œ›Ý[™
+›ÝË™ÔÝ[HÈX]›X^
+›ÝËÙZYÚŒJJKX]œ›Ý[™
+›ÝË˜”Ý[HÈX]›X^
+›ÝËÙZYÚŒJJJKš^
+
+JKˆÝˆ›ÝËÙZYÚÈÝ[ÙZYÚˆÛÝ[ˆ›ÝË˜ÛÝ[ˆJJBˆ™š[\Š
+›ÝÊHOˆH\›ÝËš^
+BˆœÛÜ
+
+KŠHOˆ‹œÝHKœÝ
+NÂ‚ˆÛÛœÝ˜[šÙYÛÛÜ”›ÝÜÈH›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ˆÈÛÜÝÙ\‘Ø\›Y[ÛÛÜœÊÛÛÜ”›ÝÜËÈÜ™Y[•Ú[™ÝÔÝ\ÜJHˆÛÛÜ”›ÝÜÎÂˆÛÛœÝÛ\Ý\œÈHZ[ÛÛÜÛ\Ý\œÊ˜[šÙYÛÛÜ”›ÝÜÊNÂˆÛÛœÝ˜[šÙYÛ\Ý\œÐ™Y›Ü™RXYÙX\šX\ÈH›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ˆÈÛÜÝÙ\‘Ø\›Y[ÛÛÜœÊÛ\Ý\œË›X\
+
+Û\Ý\ŠHOˆ
+È‹‹˜Û\Ý\‹^ˆÛ\Ý\‹˜˜\ÙHJJKÈÜ™Y[•Ú[™ÝÔÝ\ÜJHˆÛ\Ý\œÎÂˆÛÛœÝÈÛ\Ý\œÎˆ˜[šÙYÛ\Ý\œËXYÎˆXYÙX\ÛÛÜšX\ÑXYÈHH\RXYÙX\‘[›ÐÛÛÜšX\Ê˜[šÙYÛ\Ý\œÐ™Y›Ü™RXYÙX\šX\ËÛÛ^
+NÂˆÛÛœÝÛÛÜœÈH˜[šÙYÛ\Ý\œËœÛXÙJ[Z]
+K›X\
+
+Û\Ý\ŠHOˆ
+Âˆ^ˆØY™R^
+Û\Ý\‹˜˜\ÙJKˆÝˆ›Ý[™ŠÛ\Ý\‹œÝ
+Kˆ˜[YNˆÙ]ÛÛÜ“˜[YJÛ\Ý\‹˜˜\ÙJKˆJJK™š[\Š
+ÛÛÜŠHOˆHXÛÛÜ‹š^
+NÂˆ™]\›ˆÂˆÛÛÜœËˆXYÎˆÂˆÛÛÜ—ÜØ[\WØ˜›ÞˆØ[\P˜›Þ\ÖÌKˆÛÛÜ—ÜØ[\WØ˜›Þ\ÎˆØ[\P˜›Þ\ËˆØ[\WÝÚ[™ÝÜ×Ø™Y›Ü™Nˆ›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ˆÈÜ™]š[Ý\ÔØ[\P˜›ÞHˆ[ˆØ[\WÝÚ[™ÝÜ×ØY\Žˆ›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ˆÈØ[\P˜›Þ\Èˆ[ˆ™]š[Ý\×ØÛÛÜ—ÜØ[\WØ˜›Þˆ›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ˆÈ™]š[Ý\ÔØ[\P˜›Þˆ[ˆÝÙ\—ÝÚ[™Ý×ÜÝ]Îˆ›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ˆÈÝÙ\•Ú[™ÝÔÝ]Èˆ[ˆÜ™Y[—ÝÚ[™Ý×ÜÝ\Üˆ›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ˆÈÜ™Y[•Ú[™ÝÔÝ\ÜˆˆØ[\WØÛÝ[ˆØ[\\Ë›[™Ýˆš[\™YÜØ[\WØÛÝ[ˆ\ØX›TØ[\\Ë›[™ÝˆÛZ[˜[Ú^Ø™Y›Ü™WØÛ\Ý\ŽˆÛÛÜ”›ÝÜÖÌOËš^[ˆ^XÝYÙÛZ[˜[ØÛÛÜŽˆ›Û™RÙ^HOOH›ÝÙ\—ÙØ\›Y[ˆÈ
+ÛÛÜœÖÌOËš^[
+Hˆ[ˆ‹‹šXYÙX\ÛÛÜšX\ÑXYËˆKˆNÂŸB‚™[˜Ý[ÛˆÚÛÜÙQ[›Ð˜›ÞÛZ[˜[^
+™YÚ[ÛˆHßKØ[\Y™YÚ[ÛÛÛÜœÈH×JHÂˆÛÛœÝ^\Ý[™ÑÛZ[˜[^HØY™R^
+™YÚ[ÛË™ÛZ[˜[Ú^ˆŠNÂˆÛÛœÝ^\Ý[™ÕÜÛÛÜˆH\œ˜^Kš\Ð\œ˜^J™YÚ[ÛËœ™YÚ[Û—ØÛÛÜœÊHÈ™YÚ[Û‹œ™YÚ[Û—ØÛÛÜœÖÌHˆ[ÂˆÛÛœÝ^\Ý[™ÕÜÝH[X™\Š^\Ý[™ÕÜÛÛÜËœÝ
+NÂˆÛÛœÝØ[\YÜÛÛÜˆH\œ˜^Kš\Ð\œ˜^JØ[\Y™YÚ[ÛÛÛÜœÊHÈØ[\Y™YÚ[ÛÛÛÜœÖÌHˆ[ÂˆÛÛœÝØ[\YÜ^HØY™R^
+Ø[\YÜÛÛÜËš^ˆŠNÂˆÛÛœÝØ[\YÜÝH[X™\ŠØ[\YÜÛÛÜËœÝ
+NÂ‚ˆ]ÛZ[˜[^HØ[\YÜ^^\Ý[™ÑÛZ[˜[^[Âˆ]™\Ù\™Y^\Ý[™ÈH˜[ÙNÂˆ]™X\ÛÛˆHØ[\YÜ^ÈœØ[\YÝÜÙY˜][ˆˆ™^\Ý[™×ÛÛ›WÛÜ—Û›×ÜØ[\HŽÂ‚ˆYˆ
+^\Ý[™ÑÛZ[˜[^	‰ˆ^\Ý[™ÕÜÝHÍJHÂˆÛZ[˜[^H^\Ý[™ÑÛZ[˜[^Âˆ™\Ù\™Y^\Ý[™ÈHYNÂˆ™X\ÛÛˆH™^\Ý[™×ÝÜÜÝÜÝ›Û™×ÙÙWÌÍÍHŽÂˆH[ÙHYˆ
+Y^\Ý[™ÑÛZ[˜[^
+HÂˆÛZ[˜[^HØ[\YÜ^[Âˆ™X\ÛÛˆH™^\Ý[™×ÙÛZ[˜[ÛZ\ÜÚ[™ÈŽÂˆH[ÙHYˆ
+^\Ý[™ÕÜÝMJHÂˆÛZ[˜[^HØ[\YÜ^^\Ý[™ÑÛZ[˜[^Âˆ™\Ù\™Y^\Ý[™ÈH\Ø[\YÜ^Âˆ™X\ÛÛˆHØ[\YÜ^È™^\Ý[™×ÝÜÜÝÝÙXZ×ÛÌÍMHˆˆ™^\Ý[™×ÝÜÜÝÝÙXZ×Ø]ÜØ[\WÛZ\ÜÚ[™ÈŽÂˆH[ÙHYˆ
+Ø[\YÜ^	‰ˆØ[\YÜÝH^\Ý[™ÕÜÝ
+ÈŒL
+HÂˆÛZ[˜[^HØ[\YÜ^Âˆ™X\ÛÛˆHœØ[\YÝÜÜÝØÛX\›WÜÝ›Û™Ù\—Ý[—Ù^\Ý[™×ØžWÌÌLŽÂˆH[ÙHÂˆÛZ[˜[^H^\Ý[™ÑÛZ[˜[^Âˆ™\Ù\™Y^\Ý[™ÈHYNÂˆ™X\ÛÛˆH™^\Ý[™×ÝÜÜÝÛ›ÝÝÙXZÙ\—Ý[—ÜØ[\YŽÂˆB‚ˆ™]\›ˆÂˆÛZ[˜[^ˆXYÎˆÂˆ^\Ý[™×ÙÛZ[˜[Ú^ˆ^\Ý[™ÑÛZ[˜[^[ˆ^\Ý[™×ÝÜÜÝˆ[X™\‹š\Ñš[š]J^\Ý[™ÕÜÝ
+HÈ›Ý[™Š^\Ý[™ÕÜÝ
+HˆˆØ[\YÝÜÚ^ˆØ[\YÜ^[ˆØ[\YÝÜÜÝˆ[X™\‹š\Ñš[š]JØ[\YÜÝ
+HÈ›Ý[™ŠØ[\YÜÝ
+Hˆˆ™\Ù\™YÙ^\Ý[™Îˆ™\Ù\™Y^\Ý[™Ëˆ™X\ÛÛ‹ˆKˆNÂŸB‚™[˜Ý[Ûˆ^˜XÝÛÛÜœÑœ›ÛQ[›Ð˜›Þ\Ê[XYÙPY™™\‹[›Ô™YÚ[ÛœÈH×JHÂˆYˆ
+Z[XYÙPY™™\ˆP\œ˜^Kš\Ð\œ˜^J[›Ô™YÚ[ÛœÊHY[›Ô™YÚ[ÛœË›[™Ý
+H™]\›ˆ[›Ô™YÚ[ÛœÈ×NÂˆ]˜\ÙR[XYÙNÂˆžHÂˆ˜\ÙR[XYÙHHXÛÙR[XYÙT™Ø˜J[XYÙPY™™\ŠNÂˆHØ]ÚÂˆ™]\›ˆ[›Ô™YÚ[ÛœÎÂˆB‚ˆ™]\›ˆ[›Ô™YÚ[ÛœË›X\
+
+™YÚ[ÛŠHOˆÂˆYˆ
+\™YÚ[ÛË˜˜›Þ
+H™]\›ˆ™YÚ[ÛŽÂˆÛÛœÝ^˜XÝ[ÛˆH^˜XÝ[›Ð˜›Þ™YÚ[ÛÛÛÜœÊ˜\ÙR[XYÙK™YÚ[Û‹˜˜›Þ‹Âˆ›Û™Nˆ™YÚ[ÛËž›Û™KˆØ]YÛÜžNˆ™YÚ[ÛË˜Ø]YÛÜžKˆX™[ˆ™YÚ[ÛË›X™[™YÚ[ÛËœÙYÛY[ÛX™[ˆØš™XÝÝ\Nˆ™YÚ[ÛË›Øš™XÝÝ\KˆXØÙ\ÜÛÜžWÝ\Nˆ™YÚ[ÛË˜XØÙ\ÜÛÜžWÝ\KˆJNÂˆÛÛœÝ™YÚ[ÛÛÛÜœÈH^˜XÝ[Û‹˜ÛÛÜœÈ×NÂˆYˆ
+\™YÚ[ÛÛÛÜœË›[™Ý
+H™]\›ˆ™YÚ[ÛŽÂˆÛÛœÝÈÛZ[˜[^XYÎˆÛZ[˜[^™\Ù\˜][ÛˆHHÚÛÜÙQ[›Ð˜›ÞÛZ[˜[^
+™YÚ[Û‹™YÚ[ÛÛÛÜœÊNÂˆ™]\›ˆÂˆ‹‹œ™YÚ[Û‹ˆÛZ[˜[Ú^ˆÛZ[˜[^[ˆ™YÚ[Û—ØÛÛÜœÎˆ™YÚ[ÛÛÛÜœËˆÛÛÜ—ÙXYÎˆÂˆ‹‹Š™YÚ[ÛË˜ÛÛÜ—ÙXYÈßJKˆ[›×Ø˜›ÞÜØ[\[™ÎˆÂˆ‹‹™^˜XÝ[Û‹™XYËˆÛZ[˜[Ú^Ü™\Ù\˜][ÛŽˆÛZ[˜[^™\Ù\˜][Û‹ˆKˆKˆÛÝ™\˜YÙNˆ›Ý[™ŠX]›X^
+[X™\Š™YÚ[ÛË˜ÛÝ™\˜YÙH
+KÙ][›Ð˜›Þ\™XJ™YÚ[Û‹˜˜›Þ
+JJKˆX\Ú×ÙÙ[ÛY]žNˆ™YÚ[ÛË›X\Ú×ÙÙ[ÛY]žHÈ˜›Þˆ™YÚ[Û‹˜˜›ÞÛÝ™\˜YÙNˆÙ][›Ð˜›Þ\™XJ™YÚ[Û‹˜˜›Þ
+HKˆNÂˆJNÂŸB‚™[˜Ý[Ûˆ^˜XÝX\ÚÑÙ[ÛY]žJX\ÚÒ[XYÙJHÂˆÛÛœÝX\ÚÕÈH[X™\ŠX\ÚÒ[XYÙOËÚY
+NÂˆÛÛœÝX\ÚÒH[X™\ŠX\ÚÒ[XYÙOËšZYÚ
+NÂˆYˆ
+[X\ÚÕÈ[X\ÚÒ
+H™]\›ˆ[Â‚ˆÛÛœÝ\ÓÛˆH
+JHOˆÂˆYˆ
+HHX\ÚÕÈHHX\ÚÒ
+H™]\›ˆ˜[ÙNÂˆÛÛœÝYH
+H
+ˆX\ÚÕÈ
+È
+H
+ˆÂˆ™]\›ˆÙ]X\ÚÔÝ™[™Ý
+X\ÚÒ[XYÙK™]KY
+HHNÂˆNÂ‚ˆ]ÛÛÝ[HÂˆ]Ý[VHÂˆ]Ý[VHHÂˆ]Z[–HX\ÚÕÎÂˆ]Z[–HHX\ÚÒÂˆ]X^HLNÂˆ]X^HHLNÂˆ]›Ý[™\žTHÂˆ][XYÙQYÙTHÂ‚ˆ›Üˆ
+]HHÈHX\ÚÒÈH
+ÏHJHÂˆ›Üˆ
+]HÈX\ÚÕÎÈ
+ÏHJHÂˆYˆ
+Z\ÓÛŠJJHÛÛ[YNÂˆÛÛÝ[
+ÏHNÂˆÝ[V
+ÏHÂˆÝ[VH
+ÏHNÂˆYˆ
+Z[–
+HZ[–HÂˆYˆ
+HZ[–JHZ[–HHNÂˆYˆ
+ˆX^
+HX^HÂˆYˆ
+HˆX^JHX^HHNÂ‚ˆÛÛœÝÝXÚ\Ò[XYÙQYÙHHOOHHOOHOOHX\ÚÕÈHHHOOHX\ÚÒHNÂˆYˆ
+ÝXÚ\Ò[XYÙQYÙJH[XYÙQYÙT
+ÏHNÂ‚ˆYˆ
+Z\ÓÛŠHKJHZ\ÓÛŠ
+ÈKJHZ\ÓÛŠHHJHZ\ÓÛŠH
+ÈJJHÂˆ›Ý[™\žT
+ÏHNÂˆBˆBˆB‚ˆYˆ
+[ÛÛÝ[X^Z[–X^HZ[–JH™]\›ˆ[Â‚ˆÛÛœÝ˜›ÞÈHX^HZ[–
+ÈNÂˆÛÛœÝ˜›ÞHX^HHZ[–H
+ÈNÂˆÛÛœÝ˜›Þ\™XHH˜›ÞÈ
+ˆ˜›ÞÂ‚ˆ™]\›ˆÂˆÛÝ™\˜YÙNˆÛ[\JÛÛÝ[È
+X\ÚÕÈ
+ˆX\ÚÒ
+JKˆÙ[›ÚYÞˆÛ[\JÝ[VÈÛÛÝ[ÈX\ÚÕÊKˆÙ[›ÚYÞNˆÛ[\JÝ[VHÈÛÛÝ[ÈX\ÚÒ
+Kˆ˜›ÞˆÂˆˆÛ[\JZ[–ÈX\ÚÕÊKˆNˆÛ[\JZ[–HÈX\ÚÒ
+KˆÎˆÛ[\J˜›ÞÈÈX\ÚÕÊKˆˆÛ[\J˜›ÞÈX\ÚÒ
+KˆKˆ˜›ÞØ\™XNˆÛ[\J˜›Þ\™XHÈ
+X\ÚÕÈ
+ˆX\ÚÒ
+JKˆ\ÜXÝÜ˜][Îˆ˜›ÞˆÈ˜›ÞÈÈ˜›Þˆˆš[Ü˜][Îˆ˜›Þ\™XHˆÈÛ[\JÛÛÝ[È˜›Þ\™XJHˆˆ›Ý[™\žWÜ˜][ÎˆÛÛÝ[ˆÈÛ[\J›Ý[™\žTÈÛÛÝ[
+Hˆˆ[XYÙWÙYÙWÜ˜][ÎˆÛÛÝ[ˆÈÛ[\J[XYÙQYÙTÈÛÛÝ[
+HˆˆNÂŸB‚™[˜Ý[ÛˆY\™ÙS›Ü›X[^™Y›Þ\Ê›Þ\ÈH×JHÂˆÛÛœÝ˜[YH
+›Þ\È×JK™š[\Š
+ŠHOˆˆ	‰ˆ[X™\‹š\Ñš[š]J‹ž
+H	‰ˆ[X™\‹š\Ñš[š]J‹žJH	‰ˆ[X™\‹š\Ñš[š]J‹ÊH	‰ˆ[X™\‹š\Ñš[š]J‹š
+JNÂˆYˆ
+]˜[Y›[™Ý
+H™]\›ˆ[ÂˆÛÛœÝZ[–HX]›X^
+X]›Z[ŠKX]›Z[Š‹‹˜[Y›X\
+
+ŠHOˆ‹ž
+JJJNÂˆÛÛœÝZ[–HHX]›X^
+X]›Z[ŠKX]›Z[Š‹‹˜[Y›X\
+
+ŠHOˆ‹žJJJJNÂˆÛÛœÝX^HX]›X^
+X]›Z[ŠKX]›X^
+‹‹˜[Y›X\
+
+ŠHOˆ‹ž
+È‹ÊJJJNÂˆÛÛœÝX^HHX]›X^
+X]›Z[ŠKX]›X^
+‹‹˜[Y›X\
+
+ŠHOˆ‹žH
+È‹š
+JJJNÂˆYˆ
+X^HZ[–X^HHZ[–JH™]\›ˆ[Âˆ™]\›ˆÈˆZ[–NˆZ[–KÎˆX^HZ[–ˆX^HHZ[–HNÂŸB‚™[˜Ý[Ûˆ\Ý[X]QÙ[™\šXÓX\ÚÖ›Û™J™YÚ[ÛˆHßKÛÛ^HßJHÂˆÛÛœÝÙ[ÛY]žHH™YÚ[ÛË›X\Ú×ÙÙ[ÛY]žHßNÂˆÛÛœÝ˜›ÞHÙ[ÛY]žOË˜˜›Þ[ÂˆÛÛœÝÛÝ™\˜YÙHH[X™\ŠÙ[ÛY]žOË˜ÛÝ™\˜YÙH™YÚ[ÛË˜ÛÝ™\˜YÙH
+NÂˆÛÛœÝÙ[›ÚYH[X™\ŠÙ[ÛY]žOË˜Ù[›ÚYÞ
+˜›ÞÈ˜›Þž
+È˜›ÞÈÈˆˆJJNÂˆÛÛœÝÙ[›ÚYHH[X™\ŠÙ[ÛY]žOË˜Ù[›ÚYÞH
+˜›ÞÈ˜›ÞžH
+È˜›ÞšÈˆˆJJNÂˆÛÛœÝ›Ý[™\žT˜][ÈH[X™\ŠÙ[ÛY]žOË˜›Ý[™\žWÜ˜][È
+NÂˆÛÛœÝ[XYÙQYÙT˜][ÈH[X™\ŠÙ[ÛY]žOËš[XYÙWÙYÙWÜ˜][È
+NÂˆÛÛœÝš[˜][ÈH[X™\ŠÙ[ÛY]žOË™š[Ü˜][È
+NÂˆÛÛœÝ\ÜXÝ˜][ÈH[X™\ŠÙ[ÛY]žOË˜\ÜXÝÜ˜][È
+NÂˆÛÛœÝÛÛÜœÈH\œ˜^Kš\Ð\œ˜^J™YÚ[ÛËœ™YÚ[Û—ØÛÛÜœÊHÈ™YÚ[Û‹œ™YÚ[Û—ØÛÛÜœÈˆ×NÂˆÛÛœÝ\ÐÛÛ˜\ÝH\ÒYÚÛÛ˜\ÝÛÛÜ”ÚYÛ˜[
+ÛÛÜœÊNÂˆÛÛœÝÛÛÜ”Ù]H™]ÈÙ]
+ˆÛÛÜœÂˆ›X\
+
+ÊHOˆØY™R^
+ÏËš^ˆŠJBˆ™š[\Š›ÛÛX[ŠBˆ
+NÂˆÛÛœÝ\Ó›Ûš]šX[™YÚ[ÛÛÛÜœÈBˆÛÛÜ”Ù]œÚ^™HHˆ	‰‚ˆ
+[X™\ŠÛÛÜœÏË–ÌOËœÝ
+HHŽLˆ[X™\ŠÛÛÜœÏË–ÌWOËœÝ
+HHŒJNÂˆÛÛœÝ›ÙP›ÞHÛÛ^Ë˜›ÙWØ˜›Þ[ÂˆÛÛœÝÝ]\›ÞHÛÛ^Ë›Ý]\—Ø˜›Þ[ÂˆÛÛœÝÜœÛÕÜH›ÙP›ÞÈ›ÙP›ÞžHˆŒŽÂˆÛÛœÝXYÝ]Ù™–HH›ÙP›ÞÈ›ÙP›ÞžH
+È›ÙP›Þš
+ˆŒÌˆˆŒÌŽÂˆÛÛœÝÙ[\[YÛ™YHÙ[›ÚYHŒˆ	‰ˆÙ[›ÚYHŽÂˆÛÛœÝÛÛ\XÝHÛÝ™\˜YÙHHŒ	‰ˆÛÝ™\˜YÙHHŒMÂˆÛÛœÝÜœÛÐ˜[™HÙ[›ÚYHHÜœÛÕÜ	‰ˆÙ[›ÚYHHŽŽÂˆÛÛœÝ^[™Ô\Ý›ÙHBˆHX›ÙP›Þ	‰‚ˆHX˜›Þ	‰‚ˆ
+˜›Þž›ÙP›ÞžHŒHˆ˜›Þž
+È˜›ÞÈˆ›ÙP›Þž
+È›ÙP›ÞÈ
+ÈŒHˆ˜›ÞžH›ÙP›ÞžHHŒHˆ˜›ÞžH
+È˜›Þšˆ›ÙP›ÞžH
+È›ÙP›Þš
+ÈŒŠNÂˆÛÛœÝ™X\“Ý]\›Ý[™\žHBˆH[Ý]\›Þ	‰‚ˆHX˜›Þ	‰‚ˆX]˜XœÊ
+˜›Þž
+È˜›ÞÈÈŠHH
+Ý]\›Þž
+ÈÝ]\›ÞÈÈŠJHHˆ	‰‚ˆX]˜XœÊ
+˜›ÞžH
+È˜›ÞšÈŠHH
+Ý]\›ÞžH
+ÈÝ]\›ÞšÈŠJHHŽÂˆÛÛœÝ\Ð›Ý[™\žR\œ™YÝ[\š]HH›Ý[™\žT˜][ÈHHš[˜][ÈHÌŽÂˆÛÛœÝ^™[YPÛÝ™\˜YÙHHÛÝ™\˜YÙHˆÍNÂˆÛÛœÝÚÛP›ÙQØ\›Y[Ø[™Y]HH^™[YPÛÝ™\˜YÙH	‰ˆÜœÛÐ˜[™	‰ˆ^[™Ô\Ý›ÙNÂ‚ˆ]^Y]ÙX\”ØÛÜ™HHÂˆÛÛœÝ^Y]ÙX\•ÚHH×NÂˆYˆ
+ÛÛ\XÝ
+HÂˆ^Y]ÙX\”ØÛÜ™H
+ÏHŽÂˆ^Y]ÙX\•ÚKœ\Ú
+˜ÛÛ\XÝØÛÝ™\˜YÙHŠNÂˆBˆYˆ
+Ù[\[YÛ™Y
+HÂˆ^Y]ÙX\”ØÛÜ™H
+ÏHKNÂˆ^Y]ÙX\•ÚKœ\Ú
+˜Ù[\—Ø[YÛ™YŠNÂˆBˆYˆ
+Ù[›ÚYHHXYÝ]Ù™–JHÂˆ^Y]ÙX\”ØÛÜ™H
+ÏH‹NÂˆ^Y]ÙX\•ÚKœ\Ú
+\\—Ù˜XÙWÜÜÚ][ÛˆŠNÂˆBˆYˆ
+\ÐÛÛ˜\Ý
+HÂˆ^Y]ÙX\”ØÛÜ™H
+ÏHNÂˆ^Y]ÙX\•ÚKœ\Ú
+›[œ×ÛZÙWØÛÛ˜\ÝŠNÂˆBˆYˆ
+\ÜXÝ˜][ÈHŒÍH	‰ˆ\ÜXÝ˜][ÈHËŒŠH^Y]ÙX\”ØÛÜ™H
+ÏHNÂ‚ˆ]Ý]\ÙX\”ØÛÜ™HHÂˆÛÛœÝÝ]\ÙX\•ÚHH×NÂˆYˆ
+ÛÝ™\˜YÙHHŒMŠHÂˆÝ]\ÙX\”ØÛÜ™H
+ÏHŽÂˆÝ]\ÙX\•ÚKœ\Ú
+›\™ÙWØÛÝ™\˜YÙHŠNÂˆBˆYˆ
+ÜœÛÐ˜[™
+HÂˆÝ]\ÙX\”ØÛÜ™H
+ÏHKNÂˆÝ]\ÙX\•ÚKœ\Ú
+ÜœÛ×Ø˜[™ŠNÂˆBˆYˆ
+^[™Ô\Ý›ÙJHÂˆÝ]\ÙX\”ØÛÜ™H
+ÏH‹NÂˆÝ]\ÙX\•ÚKœ\Ú
+œÝ\œ›Ý[™×Ø›ÙWÜÚ[ÝY]HŠNÂˆBˆYˆ
+\ÐÛÛ˜\Ý
+HÂˆÝ]\ÙX\”ØÛÜ™H
+ÏHNÂˆÝ]\ÙX\•ÚKœ\Ú
+›X]\šX[ØÛÛ˜\ÝŠNÂˆBˆYˆ
+\Ð›Ý[™\žR\œ™YÝ[\š]JHÂˆÝ]\ÙX\”ØÛÜ™H
+ÏHÍNÂˆÝ]\ÙX\•ÚKœ\Ú
+˜›Ý[™\žWÚ\œ™YÝ[\š]HŠNÂˆBˆYˆ
+\Ó›Ûš]šX[™YÚ[ÛÛÛÜœÊHÂˆÝ]\ÙX\”ØÛÜ™H
+ÏHÍNÂˆÝ]\ÙX\•ÚKœ\Ú
+››Ûš]šX[Ü™YÚ[Û—ØÛÛÜœÈŠNÂˆBˆYˆ
+ÚÛP›ÙQØ\›Y[Ø[™Y]JHÂˆÝ]\ÙX\”ØÛÜ™H
+ÏHKNÂˆÝ]\ÙX\•ÚKœ\Ú
+ÚÛWØ›ÙWÙØ\›Y[ØØ[™Y]HŠNÂˆB‚ˆÛÛœÝ^XÚ]Ý]\ÙX\XØÙ\[˜ÙHBˆÛÝ™\˜YÙHHŒMˆ	‰‚ˆÜœÛÐ˜[™	‰‚ˆ^[™Ô\Ý›ÙH	‰‚ˆ
+\ÐÛÛ˜\Ý\Ð›Ý[™\žR\œ™YÝ[\š]H\Ó›Ûš]šX[™YÚ[ÛÛÛÜœÊNÂ‚ˆ]\•š[TØÛÜ™HHÂˆÛÛœÝ\•š[UÚHH×NÂˆYˆ
+ÛÝ™\˜YÙHHŒH	‰ˆÛÝ™\˜YÙHHŒŒŠHÂˆ\•š[TØÛÜ™H
+ÏHKNÂˆ\•š[UÚKœ\Ú
+š[WÜÚ^™YÜ™YÚ[ÛˆŠNÂˆBˆYˆ
+\ÐÛÛ˜\Ý
+HÂˆ\•š[TØÛÜ™H
+ÏHKNÂˆ\•š[UÚKœ\Ú
+›YÚÙ\š×ØÛÛ˜\ÝŠNÂˆBˆYˆ
+›Ý[™\žT˜][ÈHHš[˜][ÈHÌŠHÂˆ\•š[TØÛÜ™H
+ÏHŽÂˆ\•š[UÚKœ\Ú
+š\œ™YÝ[\—Ø›Ý[™\žHŠNÂˆBˆYˆ
+™X\“Ý]\›Ý[™\žH^[™Ô\Ý›ÙJHÂˆ\•š[TØÛÜ™H
+ÏHKNÂˆ\•š[UÚKœ\Ú
+›™X\—ÛÝ]\ÙX\—ÙYÙHŠNÂˆBˆYˆ
+[XYÙQYÙT˜][ÈHŒLŠHÂˆ\•š[TØÛÜ™H
+ÏHNÂˆ\•š[UÚKœ\Ú
+š[XYÙWÙYÙWØY˜XÙ[ŠNÂˆB‚ˆÛÛœÝ˜[šÙYHÂˆÈ›Û™Nˆ™^Y]ÙX\ˆ‹ØÛÜ™Nˆ^Y]ÙX\”ØÛÜ™K™X\ÛÛœÎˆ^Y]ÙX\•ÚHKˆÈ›Û™Nˆ›Ý]\ÙX\ˆ‹ØÛÜ™NˆÝ]\ÙX\”ØÛÜ™K™X\ÛÛœÎˆÝ]\ÙX\•ÚHKˆÈ›Û™Nˆ™\—Ýš[H‹ØÛÜ™Nˆ\•š[TØÛÜ™K™X\ÛÛœÎˆ\•š[UÚHKˆKœÛÜ
+
+KŠHOˆ‹œØÛÜ™HHKœØÛÜ™JNÂˆÛÛœÝÜH˜[šÙYÌNÂˆÛÛœÝ™\ÚÛÈHÂˆ^Y]ÙX\ŽˆKˆÝ]\ÙX\Žˆ^XÚ]Ý]\ÙX\XØÙ\[˜ÙHÚÛP›ÙQØ\›Y[Ø[™Y]HÈËÍHˆKˆ\—Ýš[NˆKˆNÂˆÛÛœÝ™\ÚÛ\ÙYH[X™\Š™\ÚÛÖÝÜž›Û™WHNJNÂˆÛÛœÝXØÙ\YžTØÛÜ™HHÜœØÛÜ™HH™\ÚÛ\ÙY	‰ˆÛÝ™\˜YÙHHŒNÂˆÛÛœÝXØÙ\YžSÝ]\ÙX\”[HHÜž›Û™HOOH›Ý]\ÙX\ˆˆ	‰ˆ^XÚ]Ý]\ÙX\XØÙ\[˜ÙNÂˆÛÛœÝXØÙ\YHXØÙ\YžTØÛÜ™HXØÙ\YžSÝ]\ÙX\”[NÂˆÛÛœÝXÚ\Ú[Û•ÚPXØÙ\YH×NÂˆÛÛœÝXÚ\Ú[Û•ÚT™Z™XÝYH×NÂˆYˆ
+XØÙ\YžSÝ]\ÙX\”[JHXÚ\Ú[Û•ÚPXØÙ\Yœ\Ú
+™^XÚ]ÛÝ]\ÙX\—ØXØÙ\[˜ÙWÜ[HŠNÂˆYˆ
+XØÙ\YžTØÛÜ™JHXÚ\Ú[Û•ÚPXØÙ\Yœ\Ú
+œØÛÜ™WÛYY]×Ý™\ÚÛŠNÂˆYˆ
+XXØÙ\Y
+HÂˆXÚ\Ú[Û•ÚT™Z™XÝYœ\Ú
+š[œÝY™šXÚY[ØÛÛ^X[Ùš]ŠNÂˆYˆ
+Üž›Û™HOOH›Ý]\ÙX\ˆˆ	‰ˆ^XÚ]Ý]\ÙX\XØÙ\[˜ÙHOOH˜[ÙJHÂˆXÚ\Ú[Û•ÚT™Z™XÝYœ\Ú
+›Z\ÜÚ[™×Ù^XÚ]ÛÝ]\ÙX\—Ü[WÚ[œ]ÈŠNÂˆBˆYˆ
+ÜœØÛÜ™H™\ÚÛ\ÙY
+HÂˆXÚ\Ú[Û•ÚT™Z™XÝYœ\Ú
+ØÛÜ™WØ™[Ý×Ý™\ÚÛ‰Ü›Ý[™ŠÜœØÛÜ™J_O	Ü›Ý[™Š™\ÚÛ\ÙY
+_X
+NÂˆBˆBˆ™]\›ˆÂˆ\Ý[X]YÜ›ÛNˆÜž›Û™Kˆ›ÜÜÙYÞ›Û™NˆXØÙ\YÈÜž›Û™Hˆ[ˆXØÙ\YˆXØÙ\[˜ÙWÜ™X\ÛÛœÎˆXØÙ\YÈÜœ™X\ÛÛœÈˆ×Kˆ™Z™XÝ[Û—Ü™X\ÛÛœÎˆXØÙ\YÈ×HˆË‹‹™XÚ\Ú[Û•ÚT™Z™XÝY‹‹Üœ™X\ÛÛœËœÛXÙJŠWKˆØÛÜ™\ÎˆØš™XÝ™œ›ÛQ[šY\Ê˜[šÙY›X\
+
+ŠHOˆÜ‹ž›Û™K›Ý[™Š‹œØÛÜ™JWJJKˆÜÜØÛÜ™Nˆ›Ý[™ŠÜœØÛÜ™JKˆ™\ÚÛÝ\ÙYˆ›Ý[™Š™\ÚÛ\ÙY
+Kˆ^[™Ô\Ý›ÙKˆ™X\“Ý]\›Ý[™\žKˆ›ÙWØ˜›Þˆ›ÙP›Þ[ˆ˜›Þˆ˜›Þ[ˆXÚ\Ú[Û—Ù›Ü›][NˆÂˆXØÙ\YØžWÜØÛÜ™NˆXØÙ\YžTØÛÜ™KˆXØÙ\YØžWÙ^XÚ]ÛÝ]\ÙX\—Ü[NˆXØÙ\YžSÝ]\ÙX\”[Kˆ^XÚ]ÛÝ]\ÙX\—ØXØÙ\[˜ÙWÜ[Nˆ^XÚ]Ý]\ÙX\XØÙ\[˜ÙKˆÚÛWØ›ÙWÙØ\›Y[ØØ[™Y]NˆÚÛP›ÙQØ\›Y[Ø[™Y]Kˆ^™[YWØÛÝ™\˜YÙNˆ^™[YPÛÝ™\˜YÙKˆXØÙ\YÝÚNˆXÚ\Ú[Û•ÚPXØÙ\Yˆ™Z™XÝYÝÚNˆXÚ\Ú[Û•ÚT™Z™XÝYˆKˆNÂŸB‚˜\Þ[˜È[˜Ý[Ûˆ[œšXÚØ[T™YÚ[ÛœÕÚ]X\ÚÙYÛÛÜœÊ[XYÙU\›™YÚ[ÛœÈH×JHÂˆYˆ
+Z[XYÙU\›P\œ˜^Kš\Ð\œ˜^J™YÚ[ÛœÊH\™YÚ[ÛœË›[™Ý
+H™]\›ˆ™YÚ[ÛœÈ×NÂ‚ˆ]˜\ÙR[XYÙNÂˆžHÂˆÛÛœÝ˜\ÙPY™™\ˆH]ØZ]™]Ú[XYÙPY™™\Š[XYÙU\›
+NÂˆ˜\ÙR[XYÙHHXÛÙR[XYÙT™Ø˜J˜\ÙPY™™\‹[XYÙU\›
+NÂˆHØ]ÚÂˆ™]\›ˆ™YÚ[ÛœÎÂˆB‚ˆ™]\›ˆ›ÛZ\ÙK˜[
+ˆ™YÚ[ÛœË›X\
+\Þ[˜È
+™YÚ[ÛŠHOˆÂˆYˆ
+\™YÚ[ÛË›X\Ú×Ý\›
+H™]\›ˆ™YÚ[ÛŽÂ‚ˆžHÂˆÛÛœÝX\ÚÐY™™\ˆH]ØZ]™]Ú[XYÙPY™™\Š™YÚ[Û‹›X\Ú×Ý\›
+NÂˆÛÛœÝX\ÚÒ[XYÙHHXÛÙR[XYÙT™Ø˜JX\ÚÐY™™\‹™YÚ[Û‹›X\Ú×Ý\›
+NÂˆÛÛœÝ™YÚ[ÛÛÛÜœÈH^˜XÝX\ÚÙY™YÚ[ÛÛÛÜœÊ˜\ÙR[XYÙKX\ÚÒ[XYÙKŠNÂˆÛÛœÝX\ÚÑÙ[ÛY]žHH^˜XÝX\ÚÑÙ[ÛY]žJX\ÚÒ[XYÙJNÂˆÛÛœÝÛZ[˜[^HØY™R^
+™YÚ[ÛÛÛÜœÖÌOËš^™YÚ[ÛË™ÛZ[˜[Ú^ˆŠNÂ‚ˆ™]\›ˆÂˆ‹‹œ™YÚ[Û‹ˆÛÝ™\˜YÙNˆ›Ý[™ŠX]›X^
+[X™\Š™YÚ[ÛË˜ÛÝ™\˜YÙH
+K[X™\ŠX\ÚÑÙ[ÛY]žOË˜ÛÝ™\˜YÙH
+JJKˆÛZ[˜[Ú^ˆÛZ[˜[^™YÚ[ÛË™ÛZ[˜[Ú^[ˆ™YÚ[Û—ØÛÛÜœÎˆ™YÚ[ÛÛÛÜœËˆX\Ú×ÙÙ[ÛY]žNˆX\ÚÑÙ[ÛY]žKˆNÂˆHØ]ÚÂˆ™]\›ˆ™YÚ[ÛŽÂˆBˆJBˆ
+NÂŸB‚˜\Þ[˜È[˜Ý[Ûˆ[‘Ü›Ý[™[™Ñ[›Ñ]XÝ[ÛŠ[XYÙU\›]Y\žHHQUSÑÔ“ÕS‘S‘×ÑS“×ÔUQT–JHÂˆÛÛœÝÚÙ[ˆH›ØÙ\ÜË™[‹”‘TPÐUWÐTWÕÒÑSŽÂˆYˆ
+]ÚÙ[ŠHÂˆÛÛœÛÛKØ\›Š–ÑÑS“ÈP•Q×HZ\ÜÚ[™È‘TPÐUWÐTWÕÒÑSŽˆÚÚ\[™ÈÜ›Ý[™[™ÈS“È]XÝ[ÛˆŠNÂˆ™]\›ˆÂˆ[˜X›Yˆ˜[ÙKˆÚÎˆ˜[ÙKˆ™X\ÛÛŽˆ›Z\ÜÚ[™×Ô‘TPÐUWÐTWÕÒÑSˆ‹ˆ]XÝ[ÛœÎˆ×KˆNÂˆB‚ˆžHÂˆÛÛœÝÜ›Ý[™[™Ñ[›Õ™\œÚ[ÛˆH›ØÙ\ÜË™[‹”‘TPÐUWÑÔ“ÕS‘S‘×ÑS“×Õ‘T”ÒSÓˆQUSÔ‘TPÐUWÑÔ“ÕS‘S‘×ÑS“×Õ‘T”ÒSÓŽÂˆÛÛœÝÜ™X]U\›HšÎ‹ËØ\Kœ™\XØ]K˜ÛÛKÝŒKÜ™YXÝ[ÛœÈŽÂˆÛÛœÛÛKš[™›Ê–ÑÑS“ÈP•Q×HÝ\[™ÈÜ›Ý[™[™ÈS“È]XÝ[Ûˆ™\]Y\Ý‹Âˆ[XYÙU\›ˆ]Y\žKˆ™\œÚ[ÛŽˆÜ›Ý[™[™Ñ[›Õ™\œÚ[Û‹ˆÜ™X]U\›ˆJNÂ‚ˆ]Ü™X]T™\ÜÂˆžHÂˆÜ™X]T™\ÜH]ØZ]™\XØ]T™\]Y\Ý
+Ü™X]U\›ÂˆY]Ùˆ”ÔÕ‹ˆXY\œÎˆÂˆ]]Üš^˜][ÛŽˆ™X\™\ˆ	ÝÚÙ[ŸXˆÛÛ[U\HŽˆ˜\XØ][Û‹ÚœÛÛˆ‹ˆKˆ›ÙNˆ”ÓÓ‹œÝš[™ÚYžJÂˆ™\œÚ[ÛŽˆÜ›Ý[™[™Ñ[›Õ™\œÚ[Û‹ˆ[œ]ˆÂˆ[XYÙNˆ[XYÙU\›ˆ]Y\žKˆKˆJKˆJNÂˆHØ]Ú
+\œ›ÜŠHÂˆÛÛœÛÛK™\œ›ÜŠ–ÑÑS“ÈP•Q×HÜ›Ý[™[™ÈS“ÈÜ™X]H™\]Y\Ý˜Z[Y‹Âˆ˜Z[\™WÜÝYÙNˆ˜Ü™X]H‹ˆY\ÜØYÙNˆ\œ›ÜË›Y\ÜØYÙHÝš[™Ê\œ›ÜŠKˆJNÂˆ›ÝÈ\œ›ÜŽÂˆB‚ˆÛÛœÛÛKš[™›Ê–ÑÑS“ÈP•Q×HÜ›Ý[™[™ÈS“ÈÜ™X]H™\ÜÛœÙH™XÙZ]™Y‹Âˆ™YXÝ[Û’YˆÜ™X]T™\ÜËšY[ˆÝ]\ÎˆÜ™X]T™\ÜËœÝ]\È[šÛ›ÝÛˆ‹ˆJNÂ‚ˆÛÛœÝÝ]\Õ\›HÜ™X]T™\ÜË\›ÏË™Ù]ÂˆYˆ
+\Ý]\Õ\›
+HÂˆÛÛœÛÛK™\œ›ÜŠ–ÑÑS“ÈP•Q×HÜ›Ý[™[™ÈS“ÈÜ™X]H™\ÜÛœÙHZ\ÜÚ[™ÈÛT“‹Âˆ™YXÝ[Û’YˆÜ™X]T™\ÜËšY[ˆJNÂˆ™]\›ˆÈ[˜X›YˆYKÚÎˆ˜[ÙK™X\ÛÛŽˆ›Z\ÜÚ[™×ÜÛÝ\›‹]XÝ[ÛœÎˆ×HNÂˆB‚ˆÛÛœÝÝ\Y]H]K››ÝÊ
+NÂˆ]™YXÝ[ÛˆHÜ™X]T™\ÜÂ‚ˆÚ[H
+]K››ÝÊ
+HHÝ\Y]‘TPÐUWÔÐSWÕSQSÕUÓTÊHÂˆYˆ
+ÈœÝXØÙYYY‹™˜Z[Y‹˜Ø[˜Ù[Y—Kš[˜ÛY\Ê™YXÝ[ÛËœÝ]\ÊJHœ™XZÎÂˆ]ØZ]™]È›ÛZ\ÙJ
+™\ÛÛ™JHOˆÙ][Y[Ý]
+™\ÛÛ™K‘TPÐUWÔÐSWÔÓÓTÊJNÂˆ]™]žP][\HÂˆ]Û\œ›ÜˆH[ÂˆÚ[H
+™]žP][\‘TPÐUWÔÐSWÔÓÔ‘U–WÓPV
+HÂˆžHÂˆ™YXÝ[ÛˆH]ØZ]™\XØ]T™\]Y\Ý
+Ý]\Õ\›ÂˆY]Ùˆ‘ÑU‹ˆXY\œÎˆÈ]]Üš^˜][ÛŽˆ™X\™\ˆ	ÝÚÙ[ŸXKˆJNÂˆÛ\œ›ÜˆH[Âˆœ™XZÎÂˆHØ]Ú
+\œ›ÜŠHÂˆÛ\œ›ÜˆH\œ›ÜŽÂˆÛÛœÝ˜[œÚY[H\Õ˜[œÚY[Û[™Ñ\œ›ÜŠ\œ›ÜŠNÂˆ™]žP][\
+ÏHNÂˆÛÛœÛÛKØ\›Š–ÑÑS“ÈP•Q×HÜ›Ý[™[™ÈS“ÈÛ™\]Y\Ý™]žH]˜[X][Ûˆ‹Âˆ˜Z[\™WÜÝYÙNˆœÛ‹ˆÛÜ™]žWØ][\ˆ™]žP][\ˆÛÜ™]žWÜ™X\ÛÛŽˆ\œ›ÜË›Y\ÜØYÙHÝš[™Ê\œ›ÜŠKˆ™]žXX›Nˆ˜[œÚY[ˆ™]šY\×Ü™[XZ[š[™ÎˆX]›X^
+‘TPÐUWÔÐSWÔÓÔ‘U–WÓPVH™]žP][\
+KˆJNÂˆYˆ
+]˜[œÚY[™]žP][\H‘TPÐUWÔÐSWÔÓÔ‘U–WÓPV
+Hœ™XZÎÂˆ]ØZ]™]È›ÛZ\ÙJ
+™\ÛÛ™JHOˆÙ][Y[Ý]
+™\ÛÛ™K˜[™ÛTÛ™]žQ[^S\Ê
+JJNÂˆBˆBˆYˆ
+Û\œ›ÜŠH›ÝÈÛ\œ›ÜŽÂˆÛÛœÛÛKš[™›Ê–ÑÑS“ÈP•Q×HÜ›Ý[™[™ÈS“È™YXÝ[ÛˆÛ‹ÂˆYˆ™YXÝ[ÛËšYÜ™X]T™\ÜËšY[ˆÝ]\Îˆ™YXÝ[ÛËœÝ]\È[šÛ›ÝÛˆ‹ˆJNÂˆB‚ˆYˆ
+™YXÝ[ÛËœÝ]\ÈOOHœÝXØÙYYYŠHÂˆÛÛœÛÛK™\œ›ÜŠ–ÑÑS“ÈP•Q×HÜ›Ý[™[™ÈS“È]XÝ[ÛˆY›ÝÝXØÙYY‹Âˆ™YXÝ[Û’Yˆ™YXÝ[ÛËšYÜ™X]T™\ÜËšY[ˆÝ]\Îˆ™YXÝ[ÛËœÝ]\È[šÛ›ÝÛˆ‹ˆ\œ›ÜŽˆ™YXÝ[ÛË™\œ›Üˆ[ˆ[\ÙY\Îˆ]K››ÝÊ
+HHÝ\Y]ˆJNÂˆ™]\›ˆÈ[˜X›YˆYKÚÎˆ˜[ÙK™X\ÛÛŽˆ™YXÝ[ÛË™\œ›Üˆ™YXÝ[ÛËœÝ]\È[šÛ›ÝÛ—Ù˜Z[\™H‹]XÝ[ÛœÎˆ×HNÂˆB‚ˆÛÛœÛÛKš[™›Ê–ÑÑS“ÈP•Q×HUÈÜ›Ý[™[™ÈS“ÈÕUU‹ÂˆÝ]]™]šY]Îˆ”ÓÓ‹œÝš[™ÚYžJ™YXÝ[ÛË›Ý]]
+OËœÛXÙJL
+KˆJNÂˆÛÛœÝ]XÝ[ÛœÈH\œÙQÜ›Ý[™[™Ñ[›ÓÝ]]Ñ]XÝ[ÛœÊ™YXÝ[ÛË›Ý]]
+NÂˆÛÛœÛÛKš[™›Ê–ÑÑS“ÈP•Q×HÜ›Ý[™[™ÈS“È]XÝ[ÛˆÝXØÙYYY‹Âˆ]XÝ[ÛÛÝ[ˆ]XÝ[ÛœË›[™Ýˆ™YXÝ[Û’Yˆ™YXÝ[ÛËšY[ˆ[\ÙY\Îˆ]K››ÝÊ
+HHÝ\Y]ˆJNÂ‚ˆ™]\›ˆÂˆ[˜X›YˆYKˆÚÎˆ]XÝ[ÛœË›[™Ýˆˆ]XÝ[ÛœËˆNÂˆHØ]Ú
+\œ›ÜŠHÂˆÛÛœÛÛK™\œ›ÜŠ–ÑÑS“ÈP•Q×HÜ›Ý[™[™ÈS“È™\]Y\Ý\œ›Üˆ‹Âˆ˜Z[\™WÜÝYÙNˆ›Ý]\ˆ‹ˆY\ÜØYÙNˆ\œ›ÜË›Y\ÜØYÙHÝš[™Ê\œ›ÜŠKˆJNÂˆ™]\›ˆÂˆ[˜X›YˆYKˆÚÎˆ˜[ÙKˆ]XÝ[ÛœÎˆ×Kˆ™X\ÛÛŽˆ\œ›ÜË›Y\ÜØYÙH™Ü›Ý[™[™×Ù[›×Ü™\]Y\ÝÙ\œ›Üˆ‹ˆNÂˆBŸB‚˜\Þ[˜È[˜Ý[Ûˆ[”Ø[TÙYÛY[][ÛŠ[XYÙU\›
+HÂˆÛÛœÝÚÙ[ˆH›ØÙ\ÜË™[‹”‘TPÐUWÐTWÕÒÑSŽÂˆYˆ
+]ÚÙ[ŠHÂˆÛÛœÛÛKØ\›Š–ÔÐSHP•Q×HZ\ÜÚ[™È‘TPÐUWÐTWÕÒÑSŽˆÚÚ\[™ÈÐSHÙYÛY[][ÛˆŠNÂˆ™]\›ˆÂˆ[˜X›Yˆ˜[ÙKˆÚÎˆ˜[ÙKˆ™X\ÛÛŽˆ›Z\ÜÚ[™×Ô‘TPÐUWÐTWÕÒÑSˆ‹ˆ™YÚ[ÛœÎˆ×KˆNÂˆB‚ˆžHÂˆÛÛœÝØ[U™\œÚ[ÛˆH›ØÙ\ÜË™[‹”‘TPÐUWÔÐSWÕ‘T”ÒSÓˆQUSÔ‘TPÐUWÔÐSWÕ‘T”ÒSÓŽÂˆÛÛœÝÜ™X]U\›HšÎ‹ËØ\Kœ™\XØ]K˜ÛÛKÝŒKÜ™YXÝ[ÛœÈŽÂˆÛÛœÛÛKš[™›Ê–ÔÐSHP•Q×HÝ\[™ÈÐSHÙYÛY[][Ûˆ™\]Y\Ý‹Âˆ[XYÙU\›ˆ™\œÚ[ÛŽˆØ[U™\œÚ[Û‹ˆÜ™X]U\›ˆJNÂˆ]Ü™X]T™\ÜÂˆžHÂˆÜ™X]T™\ÜH]ØZ]™\XØ]T™\]Y\Ý
+Ü™X]U\›ÂˆY]Ùˆ”ÔÕ‹ˆXY\œÎˆÂˆ]]Üš^˜][ÛŽˆ™X\™\ˆ	ÝÚÙ[ŸXˆÛÛ[U\HŽˆ˜\XØ][Û‹ÚœÛÛˆ‹ˆKˆ›ÙNˆ”ÓÓ‹œÝš[™ÚYžJÂˆ™\œÚ[ÛŽˆØ[U™\œÚ[Û‹ˆ[œ]ˆÂˆ[XYÙNˆ[XYÙU\›ˆKˆJKˆJNÂˆHØ]Ú
+\œ›ÜŠHÂˆÛÛœÛÛK™\œ›ÜŠ–ÔÐSHP•Q×HÐSHÜ™X]H™\]Y\Ý˜Z[Y‹Âˆ˜Z[\™WÜÝYÙNˆ˜Ü™X]H‹ˆY\ÜØYÙNˆ\œ›ÜË›Y\ÜØYÙHÝš[™Ê\œ›ÜŠKˆJNÂˆ›ÝÈ\œ›ÜŽÂˆBˆÛÛœÛÛKš[™›Ê–ÔÐSHP•Q×HÐSHÜ™X]H™\ÜÛœÙH™XÙZ]™Y‹Âˆ™YXÝ[Û’YˆÜ™X]T™\ÜËšY[ˆÝ]\ÎˆÜ™X]T™\ÜËœÝ]\È[šÛ›ÝÛˆ‹ˆJNÂ‚ˆÛÛœÝÝ]\Õ\›HÜ™X]T™\ÜË\›ÏË™Ù]ÂˆYˆ
+\Ý]\Õ\›
+HÂˆÛÛœÛÛK™\œ›ÜŠ–ÔÐSHP•Q×HÐSHÜ™X]H™\ÜÛœÙHZ\ÜÚ[™ÈÛT“‹Âˆ™YXÝ[Û’YˆÜ™X]T™\ÜËšY[ˆJNÂˆ™]\›ˆÂˆ[˜X›YˆYKˆÚÎˆ˜[ÙKˆ™X\ÛÛŽˆ›Z\ÜÚ[™×ÜÛÝ\›‹ˆ™YÚ[ÛœÎˆ×KˆNÂˆB‚ˆÛÛœÝÝ\Y]H]K››ÝÊ
+NÂˆ]™YXÝ[ÛˆHÜ™X]T™\ÜÂ‚ˆÚ[H
+]K››ÝÊ
+HHÝ\Y]‘TPÐUWÔÐSWÕSQSÕUÓTÊHÂˆYˆ
+ÈœÝXØÙYYY‹™˜Z[Y‹˜Ø[˜Ù[Y—Kš[˜ÛY\Ê™YXÝ[ÛËœÝ]\ÊJHœ™XZÎÂˆ]ØZ]™]È›ÛZ\ÙJ
+™\ÛÛ™JHOˆÙ][Y[Ý]
+™\ÛÛ™K‘TPÐUWÔÐSWÔÓÓTÊJNÂˆ]™]žP][\HÂˆ]Û\œ›ÜˆH[ÂˆÚ[H
+™]žP][\‘TPÐUWÔÐSWÔÓÔ‘U–WÓPV
+HÂˆžHÂˆ™YXÝ[ÛˆH]ØZ]™\XØ]T™\]Y\Ý
+Ý]\Õ\›ÂˆY]Ùˆ‘ÑU‹ˆXY\œÎˆÈ]]Üš^˜][ÛŽˆ™X\™\ˆ	ÝÚÙ[ŸXKˆJNÂˆÛ\œ›ÜˆH[Âˆœ™XZÎÂˆHØ]Ú
+\œ›ÜŠHÂˆÛ\œ›ÜˆH\œ›ÜŽÂˆÛÛœÝ™]žT™X\ÛÛˆH\œ›ÜË›Y\ÜØYÙHÝš[™Ê\œ›ÜŠNÂˆÛÛœÝ˜[œÚY[H\Õ˜[œÚY[Û[™Ñ\œ›ÜŠ\œ›ÜŠNÂˆ™]žP][\
+ÏHNÂˆÛÛœÛÛKØ\›Š–ÔÐSHP•Q×HÐSHÛ™\]Y\Ý™]žH]˜[X][Ûˆ‹Âˆ˜Z[\™WÜÝYÙNˆœÛ‹ˆÛÜ™]žWØ][\ˆ™]žP][\ˆÛÜ™]žWÜ™X\ÛÛŽˆ™]žT™X\ÛÛ‹ˆ™]žXX›Nˆ˜[œÚY[ˆ™]šY\×Ü™[XZ[š[™ÎˆX]›X^
+‘TPÐUWÔÐSWÔÓÔ‘U–WÓPVH™]žP][\
+KˆJNÂˆYˆ
+]˜[œÚY[™]žP][\H‘TPÐUWÔÐSWÔÓÔ‘U–WÓPV
+Hœ™XZÎÂˆÛÛœÝ™]žQ[^S\ÈH˜[™ÛTÛ™]žQ[^S\Ê
+NÂˆ]ØZ]™]È›ÛZ\ÙJ
+™\ÛÛ™JHOˆÙ][Y[Ý]
+™\ÛÛ™K™]žQ[^S\ÊJNÂˆBˆBˆYˆ
+Û\œ›ÜŠHÂˆÛÛœÝ^]\Ý[Û”™X\ÛÛˆHÛ\œ›ÜË›Y\ÜØYÙHÝš[™ÊÛ\œ›ÜŠNÂˆÛÛœÛÛK™\œ›ÜŠ–ÔÐSHP•Q×HÐSHÛ™]žH^]\ÝY‹Âˆ˜Z[\™WÜÝYÙNˆœÛ‹ˆš[˜[Ü™]žWÙ^]\Ý[Û—Ü™X\ÛÛŽˆ^]\Ý[Û”™X\ÛÛ‹ˆÛÜ™]žWØ][\Îˆ™]žP][\ˆJNÂˆ›ÝÈÛ\œ›ÜŽÂˆBˆÛÛœÛÛKš[™›Ê–ÔÐSHP•Q×HÐSH™YXÝ[ÛˆÛ‹ÂˆYˆ™YXÝ[ÛËšYÜ™X]T™\ÜËšY[ˆÝ]\Îˆ™YXÝ[ÛËœÝ]\È[šÛ›ÝÛˆ‹ˆJNÂˆB‚ˆYˆ
+™YXÝ[ÛËœÝ]\ÈOOH™˜Z[Yˆ™YXÝ[ÛËœÝ]\ÈOOH˜Ø[˜Ù[YŠHÂˆÛÛœÛÛK™\œ›ÜŠ–ÔÐSHP•Q×HÐSHÙYÛY[][ÛˆY›ÝÝXØÙYY‹Âˆ™YXÝ[Û’Yˆ™YXÝ[ÛËšYÜ™X]T™\ÜËšY[ˆÝ]\Îˆ™YXÝ[ÛËœÝ]\È[šÛ›ÝÛˆ‹ˆ\œ›ÜŽˆ™YXÝ[ÛË™\œ›Üˆ[ˆ[\ÙY\Îˆ]K››ÝÊ
+HHÝ\Y]ˆJNÂˆ™]\›ˆÂˆ[˜X›YˆYKˆÚÎˆ˜[ÙKˆ™X\ÛÛŽˆ™YXÝ[ÛË™\œ›Üˆ™YXÝ[ÛËœÝ]\È[šÛ›ÝÛ—Ù˜Z[\™H‹ˆ™YÚ[ÛœÎˆ×KˆNÂˆB‚ˆYˆ
+™YXÝ[ÛËœÝ]\ÈOOHœÝXØÙYYYŠHÂˆ™]\›ˆÂˆ[˜X›YˆYKˆÚÎˆ˜[ÙKˆ™X\ÛÛŽˆœØ[WÝ[Y[Ý]‹ˆ™YÚ[ÛœÎˆ×KˆNÂˆB‚ˆÛÛœÛÛKš[™›Ê–ÔÐSHP•Q×HUÈÐSHÕUU‹ÂˆÝ]]™]šY]Îˆ”ÓÓ‹œÝš[™ÚYžJ™YXÝ[ÛË›Ý]]
+OËœÛXÙJL
+KˆJNÂˆÛÛœÝ\œÙY™YÚ[ÛœÈH\œÙTØ[SÝ]]Ô™YÚ[ÛœÊ™YXÝ[ÛË›Ý]]
+NÂˆÛÛœÝ[œšXÚY™YÚ[ÛœÈH]ØZ][œšXÚØ[T™YÚ[ÛœÕÚ]X\ÚÙYÛÛÜœÊ[XYÙU\›\œÙY™YÚ[ÛœÊNÂˆÛÛœÛÛKš[™›Ê–ÔÐSHP•Q×HÐSHÙYÛY[][ÛˆÝXØÙYYY‹Âˆ™YÚ[ÛÛÝ[ˆ[œšXÚY™YÚ[ÛœË›[™Ýˆ™YXÝ[Û’Yˆ™YXÝ[ÛËšY[ˆ[\ÙY\Îˆ]K››ÝÊ
+HHÝ\Y]ˆJNÂ‚ˆ™]\›ˆÂˆ[˜X›YˆYKˆÚÎˆ[œšXÚY™YÚ[ÛœË›[™Ýˆˆ™X\ÛÛŽˆ[œšXÚY™YÚ[ÛœË›[™ÝÈ[ˆ›X[›Ü›YYÛÝ]]‹ˆ™YÚ[ÛœÎˆ[œšXÚY™YÚ[ÛœËˆNÂˆHØ]Ú
+\œ›ÜŠHÂˆÛÛœÛÛK™\œ›ÜŠ–ÔÐSHP•Q×HÐSH™\]Y\Ý\œ›Üˆ‹Âˆ˜Z[\™WÜÝYÙNˆ›Ý]\ˆ‹ˆY\ÜØYÙNˆ\œ›ÜË›Y\ÜØYÙHÝš[™Ê\œ›ÜŠKˆJNÂˆ™]\›ˆÂˆ[˜X›YˆYKˆÚÎˆ˜[ÙKˆ™X\ÛÛŽˆ\œ›ÜË›Y\ÜØYÙHœØ[WÜ™\]Y\ÝÙ\œ›Üˆ‹ˆ™YÚ[ÛœÎˆ×KˆNÂˆBŸB‚‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆSPQÑHÔÂOOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â˜\Þ[˜È[˜Ý[Ûˆ\ØYÐÛÝY[˜\žJš[JHÂˆÛÛœÝ]U\šHH]N‰Ùš[K›Z[Y]\_NØ˜\ÙM	Ùš[K˜Y™™\‹ÔÝš[™Ê˜˜\ÙMŠ_XÂˆÛÛœÝ™\Ý[H]ØZ]ÛÝY[˜\žK\ØY\‹\ØY
+]U\šKÂˆ›Û\Žˆ˜ÚYH‹ˆ™\ÛÝ\˜ÙWÝ\Nˆš[XYÙH‹ˆJNÂ‚ˆYˆ
+\™\Ý[ËœÙXÝ\™WÝ\›
+HÂˆ›ÝÈ™]È\œ›ÜŠÛÝY[˜\žH\ØY˜Z[Y
+›ÈÙXÝ\™WÝ\›
+HŠNÂˆB‚ˆ™]\›ˆ™\Ý[œÙXÝ\™WÝ\›ÂŸB‚˜\Þ[˜È[˜Ý[ÛˆØ[^[Ý]™[[Ý™P™Ê[XYÙU\›
+HÂˆÛÛœÝ\RÙ^HH›ØÙ\ÜË™[‹”VSÕUÐTWÒÑVNÂˆÛÛœÝ[™Ú[H›ØÙ\ÜË™[‹”VSÕUÑS‘ÒS•Â‚ˆYˆ
+X\RÙ^HY[™Ú[
+HÂˆ›ÝÈ™]È\œ›ÜŠ“Z\ÜÚ[™È^[Ý][ˆ˜\œÈ
+VSÕUÐTWÒÑVHÈVSÕUÑS‘ÒS•
+HŠNÂˆB‚ˆÛÛœÝÛÛ›Û\ˆH™]ÈX›ÜÛÛ›Û\Š
+NÂˆÛÛœÝ[Y[Ý]HÙ][Y[Ý]
+
+
+HOˆÛÛ›Û\‹˜X›Ü
+
+KVSÕUÕSQSÕUÓTÊNÂ‚ˆžHÂˆÛÛœÝ™\ÜH]ØZ]™]Ú
+[™Ú[ÂˆY]Ùˆ”ÔÕ‹ˆXY\œÎˆÂˆÛÛ[U\HŽˆ˜\XØ][Û‹ÚœÛÛˆ‹ˆ–PTKRÑVHŽˆ\RÙ^KˆXØÙ\ˆ˜\XØ][Û‹ÚœÛÛˆ‹ˆKˆ›ÙNˆ”ÓÓ‹œÝš[™ÚYžJÂˆ[XYÙWÝ\›ˆ[XYÙU\›ˆ›Ü›X]ˆœ™È‹ˆJKˆÚYÛ˜[ˆÛÛ›Û\‹œÚYÛ˜[ˆJNÂ‚ˆÛÛœÝ^H]ØZ]™\Ü^
+
+NÂ‚ˆYˆ
+\™\Ü›ÚÊHÂˆ›ÝÈ™]È\œ›ÜŠ^[Ý]˜Z[Yˆ	Ü™\ÜœÝ]\ßH	Ý^“›È™\ÜÛœÙH›ÙHŸX
+NÂˆB‚ˆ]]NÂˆžHÂˆ]HH”ÓÓ‹œ\œÙJ^
+NÂˆHØ]ÚÂˆ›ÝÈ™]È\œ›ÜŠ”^[Ý]™]\›™YH›Û‹R”ÓÓˆ™\ÜÛœÙHŠNÂˆB‚ˆYˆ
+Y]OËœ™\Ý[Ý\›
+HÂˆ›ÝÈ™]È\œ›ÜŠ”^[Ý]™\ÜÛœÙHZ\ÜÚ[™È™\Ý[Ý\›ŠNÂˆB‚ˆ™]\›ˆ]Kœ™\Ý[Ý\›ÂˆHØ]Ú
+\œ›ÜŠHÂˆYˆ
+\œ›ÜË›˜[YHOOHX›Ü\œ›ÜˆŠHÂˆ›ÝÈ™]È\œ›ÜŠ”^[Ý]™\]Y\Ý[YYÝ]ŠNÂˆBˆ›ÝÈ\œ›ÜŽÂˆHš[˜[HÂˆÛX\•[Y[Ý]
+[Y[Ý]
+NÂˆBŸB‚˜\Þ[˜È[˜Ý[Ûˆ[˜[^™QÚÜÝÛÛÜœÊÚÜÝ\›
+HÂˆÛÛœÝ™\ÈH]ØZ]ÛÝY[˜\žK\ØY\‹\ØY
+ÚÜÝ\›Âˆ›Û\Žˆ˜ÚYKÙÚÜÝ‹ˆ™\ÛÝ\˜ÙWÝ\Nˆš[XYÙH‹ˆÛÛÜœÎˆYKˆJNÂ‚ˆÛÛœÝÛÛÜœÈH\œ˜^Kš\Ð\œ˜^J™\Ë˜ÛÛÜœÊHÈ™\Ë˜ÛÛÜœÈˆ×NÂˆYˆ
+XÛÛÜœË›[™Ý
+HÂˆ›ÝÈ™]È\œ›ÜŠÛÛÜˆ[˜[\Ú\È˜Z[Y
+›ÈÛÛÜœÈ™]\›™Y
+HŠNÂˆB‚ˆÛÛœÝÛZ[˜[^HØY™R^
+Ýš[™ÊÛÛÜœÖÌVÌJJHˆÌŽÂˆÛÛœÝÜÛÛÜœÈHÛÛÜœÂˆœÛXÙJL
+Bˆ›X\
+
+Ú^ÝJHOˆÂˆÛÛœÝØY™HHØY™R^
+^
+HˆÌŽÂˆÛÛœÝ›Ùš[HHZ[ÛÛÜ”›Ùš[JØY™KÝ
+NÂˆÛÛœÝ[\Ü[˜ÙHHZ[š\ÝX[[\Ü[˜ÙJØY™KÝ
+NÂ‚ˆ™]\›ˆÂˆ^ˆØY™Kˆ˜[YNˆ›Ùš[OË›˜[YHÙ]ÛÛÜ“˜[YJØY™JKˆÝˆXŽˆ›Ùš[OË›XˆÙ]XŠØY™JKˆ\˜Ù\X[ˆ›Ùš[OËœ\˜Ù\X[Ù]\˜Ù\X[˜Z]ÊØY™JKˆÛÛÜ—ÚY[]Nˆ›Ùš[OË˜ÛÛÜ—ÚY[]HZ[ÛÛÜ’Y[]JÈ˜[YNˆÙ]ÛÛÜ“˜[YJØY™JK^ˆØY™HJKˆ[\Ü[˜ÙKˆNÂˆJBˆ™š[\Š
+
+HOˆH^š^
+NÂ‚ˆÛÛœÝÜ›Ý[™[™Ñ[›ÈH]ØZ][‘Ü›Ý[™[™Ñ[›Ñ]XÝ[ÛŠÚÜÝ\›QUSÑÔ“ÕS‘S‘×ÑS“×ÔUQT–JNÂˆÛÛœÝ[›Ñ]XÝ[ÛœÈH\œ˜^Kš\Ð\œ˜^JÜ›Ý[™[™Ñ[›ÏË™]XÝ[ÛœÊHÈÜ›Ý[™[™Ñ[›Ë™]XÝ[ÛœÈˆ×NÂˆ][›ÑØ\›Y[™YÚ[ÛœÈHZ[[›ÔÙYÛY[Y™YÚ[ÛœÊ[›Ñ]XÝ[ÛœÊNÂˆ]XÛÙY[XYÙHH[Âˆ][›ÐÛÛÜ‘[œšXÚY[™X\ÛÛˆH[›ÑØ\›Y[™YÚ[ÛœË›[™ÝÈ››×Ø˜›ÞØÛÛÜ—Ù[œšXÚY[ˆˆ››×Ù[›×ÙØ\›Y[Ü™YÚ[ÛœÈŽÂˆžHÂˆYˆ
+[›ÑØ\›Y[™YÚ[ÛœËœÛÛYJ
+™YÚ[ÛŠHOˆH\™YÚ[ÛË˜˜›Þ
+JHÂˆÛÛœÝÚÜÝY™™\ˆH]ØZ]™]Ú[XYÙPY™™\ŠÚÜÝ\›
+NÂˆXÛÙY[XYÙHHXÛÙR[XYÙT™Ø˜JÚÜÝY™™\‹ÚÜÝ\›
+NÂˆ[›ÑØ\›Y[™YÚ[ÛœÈH^˜XÝÛÛÜœÑœ›ÛQ[›Ð˜›Þ\ÊÚÜÝY™™\‹[›ÑØ\›Y[™YÚ[ÛœÊNÂˆ[›ÐÛÛÜ‘[œšXÚY[™X\ÛÛˆH˜˜›ÞØÛÛÜ—Ù^˜XÝ[Û—ØÛÛ\]HŽÂˆH[ÙHYˆ
+[›ÑØ\›Y[™YÚ[ÛœË›[™Ý
+HÂˆ[›ÐÛÛÜ‘[œšXÚY[™X\ÛÛˆH››×Ù[›×Ø˜›Þ\ÈŽÂˆBˆHØ]Ú
+\œ›ÜŠHÂˆ[›ÐÛÛÜ‘[œšXÚY[™X\ÛÛˆH\œ›ÜË›Y\ÜØYÙH˜˜›ÞØÛÛÜ—Ù^˜XÝ[Û—Ù˜Z[YŽÂˆBˆYˆ
+YXÛÙY[XYÙJHÂˆžHÂˆXÛÙY[XYÙHHXÛÙR[XYÙT™Ø˜J]ØZ]™]Ú[XYÙPY™™\ŠÚÜÝ\›
+KÚÜÝ\›
+NÂˆHØ]Ú
+\œ›ÜŠHÂˆÛÛœÛÛKØ\›Š–ÔTÑTSÓˆ—HXÛÙYZ[XYÙH]šY[˜ÙH[˜]˜Z[X›H‹È™X\ÛÛŽˆ\œ›ÜË›Y\ÜØYÙH™XÛÙWÙ˜Z[YˆJNÂˆBˆBˆÛÛœÝ[›ÐÛÛÜ‘[œšXÚY[ÛÝ[H[›ÑØ\›Y[™YÚ[ÛœË™š[\Š
+™YÚ[ÛŠHOˆØY™R^
+™YÚ[ÛË™ÛZ[˜[Ú^
+H	‰ˆ\œ˜^Kš\Ð\œ˜^J™YÚ[ÛËœ™YÚ[Û—ØÛÛÜœÊH	‰ˆ™YÚ[Û‹œ™YÚ[Û—ØÛÛÜœË›[™Ýˆ
+K›[™ÝÂˆÛÛœÝ[›ÐÛÛÜ‘[œšXÚY[ÚÈH[›ÐÛÛÜ‘[œšXÚY[ÛÝ[ˆÂˆÛÛœÝ[›ÑXYÈHÂˆ[˜X›YˆHYÜ›Ý[™[™Ñ[›ÏË™[˜X›YˆÚÎˆHYÜ›Ý[™[™Ñ[›ÏË›ÚËˆ™X\ÛÛŽˆÜ›Ý[™[™Ñ[›ÏËœ™X\ÛÛˆ[ˆ]XÝ[Û—ØÛÝ[ˆ[›Ñ]XÝ[ÛœË›[™ÝˆØ\›Y[Ü™YÚ[Û—ØÛÝ[ˆ[›ÑØ\›Y[™YÚ[ÛœË›[™Ýˆ[›×ØÛÛÜ—Ù[œšXÚY[ØÛÝ[ˆ[›ÐÛÛÜ‘[œšXÚY[ÛÝ[ˆ[›×ØÛÛÜ—Ù[œšXÚY[ÛÚÎˆ[›ÐÛÛÜ‘[œšXÚY[ÚËˆ[›×ØÛÛÜ—Ù[œšXÚY[Ü™X\ÛÛŽˆ[›ÐÛÛÜ‘[œšXÚY[™X\ÛÛ‹ˆ]XÝ[ÛœÎˆ[›Ñ]XÝ[ÛœËˆØ\›Y[Ü™YÚ[ÛœÎˆ[›ÑØ\›Y[™YÚ[ÛœËˆ[›×ÍÛY™XÞXÛWÜÝYÙNˆÝ[[X\š^™Q[›ÔÝYÙQ›Ü•˜XÙJ™XYË™[›Ë™Ø\›Y[Ü™YÚ[ÛœÈ‹[›ÑØ\›Y[™YÚ[ÛœÊKˆNÂˆÛÛœÛÛKš[™›Ê–ÑÑS“ÈP•Q×H[\Ü˜\žH]XÝ[Ûˆ˜[Y][Ûˆ‹Âˆ[˜X›YˆHYÜ›Ý[™[™Ñ[›ÏË™[˜X›YˆÚÎˆHYÜ›Ý[™[™Ñ[›ÏË›ÚËˆ]XÝ[ÛÛÝ[ˆ[›Ñ]XÝ[ÛœË›[™ÝˆJNÂ‚ˆÛÛœÝØ[HH]ØZ][”Ø[TÙYÛY[][ÛŠÚÜÝ\›
+NÂˆÛÛœÝØ[T™YÚ[ÛœÈH\œ˜^Kš\Ð\œ˜^JØ[OËœ™YÚ[ÛœÊHÈØ[Kœ™YÚ[ÛœÈˆ×NÂˆÛÛœÝØ[SÚÈHH\Ø[OË›ÚÈ	‰ˆØ[T™YÚ[ÛœË›[™ÝˆÂˆÛÛœÝ[›ÓÚÈHHYÜ›Ý[™[™Ñ[›ÏË›ÚÈ	‰ˆ[›Ñ]XÝ[ÛœË›[™ÝˆÂˆÛÛœÝ[›ÑØ\›Y[ÚÈH[›ÑØ\›Y[™YÚ[ÛœË›[™ÝˆÂˆÛÛœÝ]XÝ[Û”ÙYÛY[][Û“ÚÈHØ[SÚÈ[›ÑØ\›Y[ÚÎÂˆÛÛœÝØ\›Y[›Û™TÛÝ\˜ÙHHÙ]Ø\›Y[›Û™TÛÝ\˜ÙJØ[SÚÈÈØ[T™YÚ[ÛœÈˆ×K[›ÑØ\›Y[™YÚ[ÛœÊNÂˆÛÛœÝÙYÛY[][Û”›ÝšY\ˆHØ[SÚÈÈœØ[Hˆˆ[ÂˆÛÛœÝ]XÝ[Û”›ÝšY\ˆH[›ÓÚÈÈ™Ü›Ý[™[™×Ù[›Èˆˆ[Â‚ˆ™]\›ˆÂˆÛZ[˜[^ˆÛZ[˜[˜[YNˆÙ]ÛÛÜ“˜[YJÛZ[˜[^
+KˆÜÛÛÜœËˆXÛÙY[XYÙKˆÙYÛY[Y™YÚ[ÛœÎˆØ[SÚÈÈØ[T™YÚ[ÛœÈˆ[›ÑØ\›Y[™YÚ[ÛœËˆ[›ÑØ\›Y[™YÚ[ÛœËˆ[›×ÙXYÎˆ[›ÑXYËˆ\[[™NˆÂˆØ[WÙ[˜X›YˆH\Ø[OË™[˜X›YˆØ[WÛÚÎˆØ[SÚËˆØ[WÜ™X\ÛÛŽˆØ[OËœ™X\ÛÛˆ[ˆØ[WÝ™\œÚ[ÛŽˆ›ØÙ\ÜË™[‹”‘TPÐUWÔÐSWÓSÑSQUSÔ‘TPÐUWÔÐSWÓSÑSˆØ[WÝ›ÝYˆ\Ô™\XØ]U›ÝQ\œ›ÜŠØ[OËœ™X\ÛÛŠKˆ[›×Ù[˜X›YˆHYÜ›Ý[™[™Ñ[›ÏË™[˜X›Yˆ[›×ÛÚÎˆ[›ÓÚËˆ[›×Ü™X\ÛÛŽˆÜ›Ý[™[™Ñ[›ÏËœ™X\ÛÛˆ[ˆ[›×Ù]XÝ[Û—ØÛÝ[ˆ[›Ñ]XÝ[ÛœË›[™Ýˆ[›×ÙØ\›Y[Ü™YÚ[Û—ØÛÝ[ˆ[›ÑØ\›Y[™YÚ[ÛœË›[™Ýˆ[›×Ü™YÚ[Û—ØÛÝ[ˆ[›ÑØ\›Y[™YÚ[ÛœË›[™Ýˆ[›×ØÛÛÜ—Ù[œšXÚY[ØÛÝ[ˆ[›ÐÛÛÜ‘[œšXÚY[ÛÝ[ˆ[›×ØÛÛÜ—Ù[œšXÚY[ÛÚÎˆ[›ÐÛÛÜ‘[œšXÚY[ÚËˆ[›×ØÛÛÜ—Ù[œšXÚY[Ü™X\ÛÛŽˆ[›ÐÛÛÜ‘[œšXÚY[™X\ÛÛ‹ˆ[›×Ü]Y\žNˆQUSÑÔ“ÕS‘S‘×ÑS“×ÔUQT–Kˆ]XÝ[Û—ÜÙYÛY[][Û—ÛÚÎˆ]XÝ[Û”ÙYÛY[][Û“ÚËˆ]XÝ[Û—Ü›ÝšY\Žˆ]XÝ[Û”›ÝšY\‹ˆÙYÛY[][Û—Ü›ÝšY\ŽˆÙYÛY[][Û”›ÝšY\‹ˆX\Ú×Ü›ÝšY\ŽˆÙYÛY[][Û”›ÝšY\‹ˆ˜[˜XÚ×Û[ÙNˆ\Ø[SÚËˆØ\›Y[Þ›Û™WÜÛÝ\˜ÙNˆØ\›Y[›Û™TÛÝ\˜ÙKˆKˆNÂŸB‚‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆ“ÕUTÂOOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â˜\œÜÝ
+‹Ø\KÚ[XYÙ\ËÝ˜[œÙ›Ü›H‹\ØY˜[žJ
+K\Þ[˜È
+™\K™\ÊHOˆÂˆžHÂˆÛÛœÝš[\ÈH\œ˜^Kš\Ð\œ˜^J™\K™š[\ÊHÈ™\K™š[\Èˆ×NÂˆÛÛœÝš[HHš[\ÖÌNÂ‚ˆYˆ
+Yš[JHÂˆ™]\›ˆ™\ËœÝ]\Ê
+KšœÛÛŠÂˆÝXØÙ\ÜÎˆ˜[ÙKˆÝ\ˆ›][\—Ü\œÙH‹ˆ\œ›ÜŽˆ“›È[XYÙH\ØYY
+Z\ÜÚ[™È][\\š[JKˆ‹ˆJNÂˆB‚ˆ]X›XÕ\›ÂˆžHÂˆX›XÕ\›H]ØZ]\ØYÐÛÝY[˜\žJš[JNÂˆHØ]Ú
+\œ›ÜŠHÂˆ™]\›ˆÙ[™Ý\\œ›ÜŠ™\ËL\ØYØÛÝY[˜\žH‹\œ›ÜŠNÂˆB‚ˆ]ÚÜÝ\›ÂˆžHÂˆÚÜÝ\›H]ØZ]Ø[^[Ý]™[[Ý™P™ÊX›XÕ\›
+NÂˆHØ]Ú
+\œ›ÜŠHÂˆ™]\›ˆÙ[™Ý\\œ›ÜŠ™\ËL‹œ^[Ý]Ü™[[Ý™WØ™È‹\œ›ÜŠNÂˆB‚ˆ][˜[\Ú\ÎÂˆžHÂˆ[˜[\Ú\ÈH]ØZ][˜[^™QÚÜÝÛÛÜœÊÚÜÝ\›
+NÂˆHØ]Ú
+\œ›ÜŠHÂˆ™]\›ˆÙ[™Ý\\œ›ÜŠ™\ËL˜[˜[^™WØÛÝY[˜\žWØÛÛÜœÈ‹\œ›ÜŠNÂˆBˆÛÛœÝÙYÛY[Y™YÚ[ÛœÈH\œ˜^Kš\Ð\œ˜^J[˜[\Ú\ÏËœÙYÛY[Y™YÚ[ÛœÊHÈ[˜[\Ú\ËœÙYÛY[Y™YÚ[ÛœÈˆ×NÂˆYˆ
+X[˜[\Ú\ÏËœ\[[™OË™]XÝ[Û—ÜÙYÛY[][Û—ÛÚÈ\ÙYÛY[Y™YÚ[ÛœË›[™Ý
+HÂˆÛÛœÝØ[T™X\ÛÛˆH[˜[\Ú\ÏËœ\[[™OËœØ[WÜ™X\ÛÛˆœØ[WÙ˜Z[YŽÂˆÛÛœÛÛKØ\›Š–ÔÐSHP•Q×HÛÛ[Z[™ÈØ\KÚ[XYÙ\ËÝ˜[œÙ›Ü›HÚ]Ý]ÐSHÙYÛY[Y™YÚ[ÛœÈ‹Âˆ™X\ÛÛŽˆØ[T™X\ÛÛ‹ˆØ[WÙ[˜X›YˆHX[˜[\Ú\ÏËœ\[[™OËœØ[WÙ[˜X›YˆØ[WÛÚÎˆHX[˜[\Ú\ÏËœ\[[™OËœØ[WÛÚËˆØ[WÝ›ÝYˆHX[˜[\Ú\ÏËœ\[[™OËœØ[WÝ›ÝYˆ[›×ÛÚÎˆHX[˜[\Ú\ÏËœ\[[™OË™[›×ÛÚËˆ[›×Ù]XÝ[Û—ØÛÝ[ˆ[X™\Š[˜[\Ú\ÏËœ\[[™OË™[›×Ù]XÝ[Û—ØÛÝ[
+Kˆ™YÚ[ÛÛÝ[ˆÙYÛY[Y™YÚ[ÛœË›[™ÝˆJNÂˆB‚ˆ]ŒŽÂˆ]Ý]š][˜[\Ú\ÎÂˆ]Ø\\™T]X[]NÂˆžHÂˆŒˆHÙ[™\˜]T[]\ÕŒŠ[˜[\Ú\Ë™ÛZ[˜[^
+NÂˆØ\\™T]X[]HH]˜[X]PØ\\™T]X[]UŒJÂˆXÛÙY[XYÙNˆ[˜[\Ú\Ë™XÛÙY[XYÙKˆ™YÚ[ÛœÎˆÙYÛY[Y™YÚ[ÛœËˆJNÂˆÝ]š][˜[\Ú\ÈHZ[Ý]š][˜[\Ú\ÊÂˆÛZ[˜[^ˆ[˜[\Ú\Ë™ÛZ[˜[^ˆÜÛÛÜœÎˆ[˜[\Ú\ËÜÛÛÜœËˆÙYÛY[Y™YÚ[ÛœËˆXÛÙY[XYÙNˆ[˜[\Ú\Ë™XÛÙY[XYÙKˆ\˜Ù\[Û—Ý—Û[ÙNˆPT’ÑUÔTÑTSÓ—Õ—ÓSÑKˆ[›ÑØ\›Y[™YÚ[ÛœÎˆ[˜[\Ú\Ë™[›ÑØ\›Y[™YÚ[ÛœËˆ\[[™Nˆ[˜[\Ú\Ëœ\[[™KˆJNÂˆÝ]š][˜[\Ú\ÈHÂˆ‹‹›Ý]š][˜[\Ú\ËˆØ\\™WÜ]X[]WÝŒNˆØ\\™T]X[]KˆNÂˆÝ]š][˜[\Ú\Ë˜ÛÛœÝ[Y\—Ù]šY[˜ÙWÝŒHHZ[ÛÛœÝ[Y\‘]šY[˜ÙUŒJÂˆÝ]š][˜[\Ú\ËˆØ\\™T]X[]KˆJNÂˆHØ]Ú
+\œ›ÜŠHÂˆ™]\›ˆÙ[™Ý\\œ›ÜŠ™\ËLœ[]WÙ[™Ú[™H‹\œ›ÜŠNÂˆB‚ˆÛÛœÝY™™XÝ]™Q^\›˜[[[YÙ[˜ÙS[ÙHHØ\\™T]X[]OË™\ÜÜÚ][ÛˆOOHœ™]ZÙH‚ˆÈ›Ù™ˆ‚ˆˆVT“SÒS•SQÑSÑWÓSÑNÂˆÛÛœÝ^\›˜[Ù[X[XÈH]ØZ][“Ü[RTÙ[X[XÓØœÙ\™\•ŒJÂˆ[ÙNˆY™™XÝ]™Q^\›˜[[[YÙ[˜ÙS[ÙKˆ[XYÙU\›ˆX›XÕ\›ˆš\Ú[ÛÛÜ™Q]šY[˜ÙNˆZ[^\›˜[Ù[X[XÑ]šY[˜ÙJÝ]š][˜[\Ú\ÊKˆš\Ú[ÛÛÜ™QXÚ\Ú[ÛŽˆZ[^\›˜[ÛÛ\ÜÚ]QXÚ\Ú[ÛŠÝ]š][˜[\Ú\ÊKˆ[Ù[ˆÔSRWÔÑSPS•P×ÓSÑSˆØXÚNˆ^\›˜[Ù[X[XÐØXÚKˆØXÚRÙ^Nˆ	ÜX›XÕ\›Nš\Ú[Û˜ÛÜ™WÙ^\›˜[Ú[™Ù™—ÝŒN‰ÓÔSRWÔÑSPS•P×ÓSÑSXˆJNÂˆÛÛœÛÛKš[™›Ê–ÑVT“SS•SQÑSÑWHÙ[X[XÈØœÙ\™\ˆ‹ÂˆÛÛ™šYÝ\™YÛ[ÙNˆVT“SÒS•SQÑSÑWÓSÑKˆY™™XÝ]™WÛ[ÙNˆY™™XÝ]™Q^\›˜[[[YÙ[˜ÙS[ÙKˆ[Ù[ˆÔSRWÔÑSPS•P×ÓSÑSˆÚÎˆ^\›˜[Ù[X[XË›ÚËˆÚÚ\Yˆ^\›˜[Ù[X[XËœÚÚ\YˆØXÚYˆ^\›˜[Ù[X[XË˜ØXÚYˆ™X\ÛÛŽˆ^\›˜[Ù[X[XËœ™X\ÛÛˆ[ˆ\ÜÜÚ][ÛŽˆ^\›˜[Ù[X[XÏËš[™Ù™Ë™\ÜÜÚ][Ûˆ[ˆX›XØ][Û—ØÚ[™ÙYˆ^\›˜[Ù[X[XÏËš[™Ù™ËœX›XØ][Û—ØÚ[™ÙY˜[ÙKˆ][˜ÞWÛ\Îˆ^\›˜[Ù[X[XË›][˜ÞWÛ\Èˆ\Ý[X]YØÛÜÝÝ\Ùˆ^\›˜[Ù[X[XË™\Ý[X]YØÛÜÝÝ\ÙˆJNÂ‚ˆ™]\›ˆ™\ËšœÛÛŠÂˆÝXØÙ\ÜÎˆYKˆ[™Ú[™Nˆ•Œˆ‹ˆÚÜÝ[XYÙU\›ˆÚÜÝ\›ˆÛZ[˜[^ˆŒ‹™ÛZ[˜[^ˆÛZ[˜[˜[YNˆŒ‹™ÛZ[˜[˜[YKˆØ\›Y[ÛÛÜ‘˜[Z[NˆŒ‹˜Û\ÜÚYšXØ][Û‹™˜[Z[KˆÛÛÜ“[™NˆŒ‹˜Û\ÜÚYšXØ][Û‹›[™KˆÛ\ÜÚYšXØ][ÛŽˆŒ‹˜Û\ÜÚYšXØ][Û‹ˆÜÛÛÜœÎˆ[˜[\Ú\ËÜÛÛÜœËˆ[]\ÎˆŒ‹œ[]\ËˆØ\\™T]X[]KˆÝ]š]Ø[˜[\Ú\ÎˆÝ]š][˜[\Ú\ËˆXYÎˆÂˆ[›Îˆ[˜[\Ú\Ë™[›×ÙXYËˆ[›×ÛY™XÞXÛWÝ˜XÙNˆÂˆ\™Ù]ÚYˆ™[›×Í‹ˆÝYÙ\ÎˆÂˆ[˜[\Ú\ÏË™[›×ÙXYÏË™[›×ÍÛY™XÞXÛWÜÝYÙKˆ‹‹Š
+Ý]š][˜[\Ú\ÏË™[›×ÛY™XÞXÛWÝ˜XÙOËœÝYÙ\È×JK™š[\Š
+ÝYÙJHOˆÝYÙOËœÝYÙHOOH™XYË™[›Ë™Ø\›Y[Ü™YÚ[ÛœÈŠJKˆK™š[\Š›ÛÛX[ŠKˆÚ[™ÙWÜÝ[[X\žNˆZ[[›ÓY™XÞXÛPÚ[™ÙTÝ[[X\žJÂˆ[˜[\Ú\ÏË™[›×ÙXYÏË™[›×ÍÛY™XÞXÛWÜÝYÙKˆ‹‹Š
+Ý]š][˜[\Ú\ÏË™[›×ÛY™XÞXÛWÝ˜XÙOËœÝYÙ\È×JK™š[\Š
+ÝYÙJHOˆÝYÙOËœÝYÙHOOH™XYË™[›Ë™Ø\›Y[Ü™YÚ[ÛœÈŠJKˆK™š[\Š›ÛÛX[ŠJKˆKˆ\[[™NˆÂˆ‹‹˜[˜[\Ú\Ëœ\[[™KˆÝÙ\—ÜØ[\[™×Ý™\œÚ[ÛŽˆÕÑT—ÔÐSTS‘×Õ‘T”ÒSÓ‹ˆKˆ^\›˜[Ú[[YÙ[˜ÙNˆÂˆÛÛ™šYÝ\™YÛ[ÙNˆVT“SÒS•SQÑSÑWÓSÑKˆ[ÙNˆY™™XÝ]™Q^\›˜[[[YÙ[˜ÙS[ÙKˆ[Ù[ˆÔSRWÔÑSPS•P×ÓSÑSˆÛÛ™šYÝ\™YˆH\›ØÙ\ÜË™[‹“ÔSRWÐTWÒÑVKˆÚÎˆ^\›˜[Ù[X[XË›ÚËˆÚÚ\Yˆ^\›˜[Ù[X[XËœÚÚ\YˆØXÚYˆ^\›˜[Ù[X[XË˜ØXÚY˜[ÙKˆ™X\ÛÛŽˆ^\›˜[Ù[X[XËœ™X\ÛÛˆ[ˆ\ÜÜÚ][ÛŽˆ^\›˜[Ù[X[XÏËš[™Ù™Ë™\ÜÜÚ][Ûˆ[ˆX›XØ][Û—ØÚ[™ÙYˆ˜[ÙKˆ]]Üš]WÛÝÛ™\Žˆš\Ú[Û˜ÛÜ™H‹ˆKˆØ\\™WÜ]X[]NˆØ\\™T]X[]KˆKˆÝ[[X\žNˆØ\\™T]X[]OË™\ÜÜÚ][ÛˆOOHœ™]ZÙH‚ˆÈ•HÝÙÜ˜\Ø[››ÝÝ\ÜHY™[œÚX›H[š[œÚXËXÛÛÜˆ\Ý[X]Kˆ™]ZÙH]\Ú[™ÈHØ\\™HÝZY[˜ÙKˆ‚ˆˆ”š[X\žHÛÛÜˆ]XÝYˆ\ÙH˜[[˜ÙKÛÛ˜\ÝÛÚ\Ú[Û‹˜]\˜[Üˆ^Ü™H›ÜˆÝXÝ\™Y[ÙK\ÜXÚYšXÈ\™XÝ[ÛœËˆ‹ˆJNÂˆHØ]Ú
+\œŠHÂˆÛÛœÛÛK™\œ›ÜŠ˜[œÙ›Ü›H\œ›ÜŽˆ‹\œË›Y\ÜØYÙH\œŠNÂˆ™]\›ˆ™\ËœÝ]\ÊL
+KšœÛÛŠÂˆÝXØÙ\ÜÎˆ˜[ÙKˆÝ\ˆ˜[œÙ›Ü›WÝ[šÛ›ÝÛˆ‹ˆ\œ›ÜŽˆ\œË›Y\ÜØYÙH•[šÛ›ÝÛˆ\œ›Üˆ‹ˆJNÂˆBŸJNÂ‚˜\œÜÝ
+‹Ø\KÜ™XÛÛ[Y[™][ÛœÈ‹\Þ[˜È
+™\K™\ÊHOˆÂˆžHÂˆÛÛœÝÂˆÚÜÝ[XYÙU\›ˆ[ÙKˆ][U\KˆÛÝ\˜ÙR][Kˆ\™Ù]][Kˆ[™\ÝžKˆX]ÚÝšXÝ™\ÜËˆ™\Ý[ÛÝ[ˆ[™[ÜžKˆØØØ\Ú[Û‹ˆ\ÙT™]šY]Ò[™[ÜžHHYKˆHH™\K˜›ÙHßNÂ‚ˆYˆ
+YÚÜÝ[XYÙU\›
+HÂˆ™]\›ˆ™\ËœÝ]\Ê
+KšœÛÛŠÂˆÝXØÙ\ÜÎˆ˜[ÙKˆ\œ›ÜŽˆ™ÚÜÝ[XYÙU\›\È™\]Z\™Y‹ˆJNÂˆB‚ˆ][˜[\Ú\ÎÂˆžHÂˆ[˜[\Ú\ÈH]ØZ][˜[^™QÚÜÝÛÛÜœÊÚÜÝ[XYÙU\›
+NÂˆHØ]Ú
+\œ›ÜŠHÂˆ™]\›ˆÙ[™Ý\\œ›ÜŠ™\ËL˜[˜[^™WØÛÝY[˜\žWØÛÛÜœÈ‹\œ›ÜŠNÂˆB‚ˆ]ŒŽÂˆ]Ý]š][˜[\Ú\ÎÂˆžHÂˆŒˆHÙ[™\˜]T[]\ÕŒŠ[˜[\Ú\Ë™ÛZ[˜[^
+NÂˆÝ]š][˜[\Ú\ÈHZ[Ý]š][˜[\Ú\ÊÂˆÛZ[˜[^ˆ[˜[\Ú\Ë™ÛZ[˜[^ˆÜÛÛÜœÎˆ[˜[\Ú\ËÜÛÛÜœËˆÙYÛY[Y™YÚ[ÛœÎˆ[˜[\Ú\ËœÙYÛY[Y™YÚ[ÛœËˆ[›ÑØ\›Y[™YÚ[ÛœÎˆ[˜[\Ú\Ë™[›ÑØ\›Y[™YÚ[ÛœËˆ\[[™Nˆ[˜[\Ú\Ëœ\[[™KˆXÛÙY[XYÙNˆ[˜[\Ú\Ë™XÛÙY[XYÙKˆ\˜Ù\[Û—Ý—Û[ÙNˆPT’ÑUÔTÑTSÓ—Õ—ÓSÑKˆJNÂˆHØ]Ú
+\œ›ÜŠHÂˆ™]\›ˆÙ[™Ý\\œ›ÜŠ™\ËLœ[]WÙ[™Ú[™H‹\œ›ÜŠNÂˆB‚ˆÛÛœÝHHÝš[™Ê[ÙHˆŠKÓÝÙ\Ø\ÙJ
+Kš[J
+NÂˆÛÛœÝ[ÙSX\HÂˆ˜[[˜ÙNˆ˜˜[[˜ÙH‹ˆÛÛ˜\Ýˆ˜ÛÛ˜\Ý‹ˆÛÚ\Ú[ÛŽˆ˜ÛÚ\Ú[Ûˆ‹ˆ[\\Ú\Îˆ™[\\Ú\È‹ˆ˜]\˜[ˆ›˜]\˜[‹ˆ^Ü™Nˆ™^Ü™H‹ˆ™]]˜[Îˆ˜˜[[˜ÙH‹ˆX\ˆ›˜]\˜[‹ˆX\Û™\Îˆ›˜]\˜[‹ˆX\ÝÛ™\Îˆ›˜]\˜[‹ˆ›Ûˆ™[\\Ú\È‹ˆNÂ‚ˆÛÛœÝÙ^HH[ÙSX\ÛWH˜˜[[˜ÙHŽÂˆÛÛœÝXÚÈHŒ‹œ[]\ÖÚÙ^WNÂ‚ˆ]™]šY]˜[[[H[Âˆ]˜[šÙY›ÙXÝÈH[Âˆ]ÚÜ[™Ð\ÜÚ\ÝH[Â‚ˆYˆ
+\™Ù]][JHÂˆ™]šY]˜[[[HZ[™]šY]˜[[[
+Ý]š][˜[\Ú\ËÂˆÙ[XÝY[ÙNˆ[ÙKˆÛÝ\˜ÙR][NˆÛÝ\˜ÙR][H][U\HœYXÙH‹ˆ\™Ù]][Kˆ[™\ÝžNˆ[™\ÝžH™˜\Ú[Ûˆ‹ˆX]ÚÝšXÝ™\ÜÎˆX]ÚÝšXÝ™\ÜÈ›YY][H‹ˆ™\Ý[ÛÝ[ˆ™\Ý[ÛÝ[ˆØØØ\Ú[Û‹ˆJNÂ‚ˆÛÛœÝ[œ][™[ÜžHBˆ\œ˜^Kš\Ð\œ˜^J[™[ÜžJH	‰ˆ[™[ÜžK›[™ÝˆÈ[™[ÜžBˆˆ\ÙT™]šY]Ò[™[ÜžBˆÈÙ[™\˜]T™]šY]˜[™]šY]Ô›ÙXÝÊ™]šY]˜[[[
+Bˆˆ×NÂ‚ˆ˜[šÙY›ÙXÝÈH[œ][™[ÜžK›[™ÝÈ˜[šÔ›ÙXÝÊ[œ][™[ÜžK™]šY]˜[[[
+Hˆ×NÂˆÚÜ[™Ð\ÜÚ\ÝHZ[ÚÜ[™Ð\ÜÚ\Ý
+Ý]š][˜[\Ú\Ë™]šY]˜[[[˜[šÙY›ÙXÝÊNÂˆB‚ˆ™]\›ˆ™\ËšœÛÛŠÂˆÝXØÙ\ÜÎˆYKˆ[™Ú[™Nˆ•Œˆ‹ˆ[ÙNˆÙ^Kˆ][U\Nˆ][U\H[ˆÛZ[˜[^ˆŒ‹™ÛZ[˜[^ˆÛZ[˜[˜[YNˆŒ‹™ÛZ[˜[˜[YKˆØ\›Y[ÛÛÜ‘˜[Z[NˆŒ‹˜Û\ÜÚYšXØ][Û‹™˜[Z[KˆÛÛÜ“[™NˆŒ‹˜Û\ÜÚYšXØ][Û‹›[™Kˆ™XÛÛ[Y[™][ÛŽˆÂˆ[]R^\ÎˆXÚËš^\Ëˆ[]S˜[YY^\ÎˆXÚË›˜[YYÚ^\Ëˆ™X\ÛÛŽˆXÚËœ™X\ÛÛ‹ˆKˆ™]šY]˜[Ú[[ˆ™]šY]˜[[[ˆ˜[šÙYÜ›ÙXÝÎˆ˜[šÙY›ÙXÝËˆÚÜ[™×Ø\ÜÚ\ÝˆÚÜ[™Ð\ÜÚ\ÝˆJNÂˆHØ]Ú
+\œŠHÂˆÛÛœÛÛK™\œ›ÜŠœ™XÛÛ[Y[™][ÛœÈ\œ›ÜŽˆ‹\œË›Y\ÜØYÙH\œŠNÂˆ™]\›ˆ™\ËœÝ]\ÊL
+KšœÛÛŠÂˆÝXØÙ\ÜÎˆ˜[ÙKˆÝ\ˆœ™XÛÛ[Y[™][Ûœ×Ý[šÛ›ÝÛˆ‹ˆ\œ›ÜŽˆ\œË›Y\ÜØYÙH•[šÛ›ÝÛˆ\œ›Üˆ‹ˆJNÂˆBŸJNÂ‚˜\œÜÝ
+‹Ø\KÜ™]šY]˜[Ü™]šY]È‹\Þ[˜È
+™\K™\ÊHOˆÂˆžHÂˆÛÛœÝÂˆÚÜÝ[XYÙU\›ˆÝ]š][˜[\Ú\Îˆ›ÝšYYÝ]š][˜[\Ú\ËˆÛÝ\˜ÙR][Kˆ\™Ù]][KˆÙ[XÝY[ÙKˆ[™\ÝžKˆX]ÚÝšXÝ™\ÜËˆ™\Ý[ÛÝ[ˆ[™[ÜžKˆØØØ\Ú[Û‹ˆ\ÙT™]šY]Ò[™[ÜžHHYKˆHH™\K˜›ÙHßNÂ‚ˆYˆ
+\›ÝšYYÝ]š][˜[\Ú\È	‰ˆYÚÜÝ[XYÙU\›
+HÂˆ™]\›ˆ™\ËœÝ]\Ê
+KšœÛÛŠÂˆÝXØÙ\ÜÎˆ˜[ÙKˆ\œ›ÜŽˆ”›ÝšYHZ]\ˆÝ]š][˜[\Ú\ÈÜˆÚÜÝ[XYÙU\›ˆ‹ˆJNÂˆB‚ˆ]Ý]š][˜[\Ú\ÈH›ÝšYYÝ]š][˜[\Ú\È[Âˆ]ÛZ[˜[^H[Âˆ]ÛZ[˜[˜[YHH[Â‚ˆYˆ
+[Ý]š][˜[\Ú\È	‰ˆÚÜÝ[XYÙU\›
+HÂˆ][˜[\Ú\ÎÂˆžHÂˆ[˜[\Ú\ÈH]ØZ][˜[^™QÚÜÝÛÛÜœÊÚÜÝ[XYÙU\›
+NÂˆHØ]Ú
+\œ›ÜŠHÂˆ™]\›ˆÙ[™Ý\\œ›ÜŠ™\ËL˜[˜[^™WØÛÝY[˜\žWØÛÛÜœÈ‹\œ›ÜŠNÂˆB‚ˆÛZ[˜[^H[˜[\Ú\Ë™ÛZ[˜[^ÂˆÛZ[˜[˜[YHH[˜[\Ú\Ë™ÛZ[˜[˜[YNÂ‚ˆžHÂˆÝ]š][˜[\Ú\ÈHZ[Ý]š][˜[\Ú\ÊÂˆÛZ[˜[^ˆ[˜[\Ú\Ë™ÛZ[˜[^ˆÜÛÛÜœÎˆ[˜[\Ú\ËÜÛÛÜœËˆÙYÛY[Y™YÚ[ÛœÎˆ[˜[\Ú\ËœÙYÛY[Y™YÚ[ÛœËˆXÛÙY[XYÙNˆ[˜[\Ú\Ë™XÛÙY[XYÙKˆ\˜Ù\[Û—Ý—Û[ÙNˆPT’ÑUÔTÑTSÓ—Õ—ÓSÑKˆ[›ÑØ\›Y[™YÚ[ÛœÎˆ[˜[\Ú\Ë™[›ÑØ\›Y[™YÚ[ÛœËˆ\[[™Nˆ[˜[\Ú\Ëœ\[[™KˆJNÂˆHØ]Ú
+\œ›ÜŠHÂˆ™]\›ˆÙ[™Ý\\œ›ÜŠ™\ËLœ[]WÙ[™Ú[™H‹\œ›ÜŠNÂˆBˆB‚ˆÛÛœÝ™]šY]˜[[[HZ[™]šY]˜[[[
+Ý]š][˜[\Ú\ËÂˆÙ[XÝY[ÙKˆÛÝ\˜ÙR][NˆÛÝ\˜ÙR][HœYXÙH‹ˆ\™Ù]][Kˆ[™\ÝžNˆ[™\ÝžH™˜\Ú[Ûˆ‹ˆX]ÚÝšXÝ™\ÜÎˆX]ÚÝšXÝ™\ÜÈ›YY][H‹ˆ™\Ý[ÛÝ[ˆ™\Ý[ÛÝ[ˆØØØ\Ú[Û‹ˆJNÂ‚ˆÛÛœÝ[œ][™[ÜžHBˆ\œ˜^Kš\Ð\œ˜^J[™[ÜžJH	‰ˆ[™[ÜžK›[™ÝˆÈ[™[ÜžBˆˆ\ÙT™]šY]Ò[™[ÜžBˆÈÙ[™\˜]T™]šY]˜[™]šY]Ô›ÙXÝÊ™]šY]˜[[[
+Bˆˆ×NÂ‚ˆÛÛœÝ˜[šÙY›ÙXÝÈH˜[šÔ›ÙXÝÊ[œ][™[ÜžK™]šY]˜[[[
+NÂˆÛÛœÝÚÜ[™Ð\ÜÚ\ÝHZ[ÚÜ[™Ð\ÜÚ\Ý
+Ý]š][˜[\Ú\Ë™]šY]˜[[[˜[šÙY›ÙXÝÊNÂ‚ˆ™]\›ˆ™\ËšœÛÛŠÂˆÝXØÙ\ÜÎˆYKˆ[™Ú[™Nˆ•Œˆ‹ˆÛZ[˜[^ˆÛZ[˜[˜[YKˆÝ]š]Ø[˜[\Ú\ÎˆÝ]š][˜[\Ú\Ëˆ™]šY]˜[Ú[[ˆ™]šY]˜[[[ˆ˜[šÙYÜ›ÙXÝÎˆ˜[šÙY›ÙXÝËˆÚÜ[™×Ø\ÜÚ\ÝˆÚÜ[™Ð\ÜÚ\ÝˆÝ[[X\žN‚ˆ”™]šY]˜[™]šY]ÈÙ[™\˜]Yˆš\Ú[ÛÛÜ™H\ÙYÙ[XÝY[ÙK\™Ù]YXÙKÛÛÜˆ›Û\Ë[™YXÙHØÛÜš[™ÈÈ˜[šÈ›ÙXÝËˆ‹ˆJNÂˆHØ]Ú
+\œŠHÂˆÛÛœÛÛK™\œ›ÜŠœ™]šY]˜[Ü™]šY]È\œ›ÜŽˆ‹\œË›Y\ÜØYÙH\œŠNÂˆ™]\›ˆ™\ËœÝ]\ÊL
+KšœÛÛŠÂˆÝXØÙ\ÜÎˆ˜[ÙKˆÝ\ˆœ™]šY]˜[Ü™]šY]×Ý[šÛ›ÝÛˆ‹ˆ\œ›ÜŽˆ\œË›Y\ÜØYÙH•[šÛ›ÝÛˆ\œ›Üˆ‹ˆJNÂˆBŸJNÂ‚‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆUSTˆT”“ÔˆS‘T‚OOOOOOOOOOOOOOOOOOOOOOOOH
+‹Â˜\\ÙJ
+\œ‹Ü™\K™\ËÛ™^
+HOˆÂˆYˆ
+\œË›˜[YHOOH“][\‘\œ›ÜˆŠHÂˆ™]\›ˆ™\ËœÝ]\Ê
+KšœÛÛŠÂˆÝXØÙ\ÜÎˆ˜[ÙKˆÝ\ˆ›][\—Ü\œÙH‹ˆ\œ›ÜŽˆ\œ‹›Y\ÜØYÙH•\ØY˜Z[YˆÙ\™\ˆÛÝ[›Ý\œÙH[Ý\ˆ[XYÙKˆ‹ˆJNÂˆB‚ˆYˆ
+Ýš[™Ê\œË›Y\ÜØYÙHˆŠKÓÝÙ\Ø\ÙJ
+Kš[˜ÛY\Ê›][\\ŠJHÂˆ™]\›ˆ™\ËœÝ]\Ê
+KšœÛÛŠÂˆÝXØÙ\ÜÎˆ˜[ÙKˆÝ\ˆ›][\—Ü\œÙH‹ˆ\œ›ÜŽˆ•\ØY˜Z[YˆX[›Ü›YY][\\™\]Y\Ýˆ‹ˆJNÂˆB‚ˆ™]\›ˆ™\ËœÝ]\ÊL
+KšœÛÛŠÂˆÝXØÙ\ÜÎˆ˜[ÙKˆÝ\ˆœÙ\™\—Ù\œ›Üˆ‹ˆ\œ›ÜŽˆ\œË›Y\ÜØYÙH”Ù\™\ˆ\œ›Üˆ‹ˆJNÂŸJNÂ‚‹ÊˆOOOOOOOOOOOOOOOOOOOOOOOOBˆÕT•OOOOOOOOOOOOOOOOOOOOOOOOH
+‹ÂšYˆ
+›ØÙ\ÜË™[‹““ÑWÑS•ˆOOH\ÝŠHÂˆ\›\Ý[ŠÔ•
+
+HOˆÂˆÛÛœÛÛK›ÙÊ8§!HÒQHÛÜ™H˜XÚÙ[™[›š[™ÈÛˆÜ	ÔÔ•X
+NÂˆJNÂŸB‚‚™^ÜÈZ[Ý]š][˜[\Ú\Ë[™™\–›Û™PÛÛÜ”™XY[™™\‘Ø\›Y[›Û™\ËPT’ÑUÔTÑTSÓ—Õ—ÓSÑK^˜XÝ[›Ð˜›Þ™YÚ[ÛÛÛÜœÈNÂ

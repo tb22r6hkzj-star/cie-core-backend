@@ -9,6 +9,7 @@ test("request grants OpenAI semantic observation but no color authority", () => 
   assert.match(prompt, /Do not calculate or override hex/i);
   assert.equal(request.input[0].content[1].detail, "high");
   assert.equal(request.text.format.strict, true);
+  assert.equal(request.store, false);
 });
 
 test("off mode makes no provider call", async () => {

@@ -48,6 +48,7 @@ export function buildOpenAISemanticRequestV1({ imageUrl, visionCoreEvidence = {}
   if (!imageUrl) throw new Error("VisionCore semantic observer requires imageUrl");
   return {
     model,
+    store: false,
     reasoning: { effort: "low" },
     input: [{
       role: "user",

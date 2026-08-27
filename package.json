@@ -6,7 +6,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "NODE_ENV=test node --test"
+    "test": "NODE_ENV=test node --test",
+    "benchmark:readiness": "node scripts/benchmark-readiness.mjs"
   },
   "dependencies": {
     "chroma-js": "^2.4.2",
