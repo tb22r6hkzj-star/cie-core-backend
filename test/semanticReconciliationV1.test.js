@@ -23,11 +23,14 @@ function reconcile(claims) {
 test("normalizes common garment and accessory names", () => {
   assert.equal(normalizeSemanticPieceV1("trousers"), "lower_garment");
   assert.equal(normalizeSemanticPieceV1("loafers"), "footwear");
-  assert.equal(normalizeSemanticPieceV1("necklace"), "accessory_jewelry");
+  assert.equal(normalizeSemanticPieceV1("necklace"), "necklace");
   assert.equal(normalizeSemanticPieceV1("short sleeve collared button front shirt"), "upper_garment");
   assert.equal(normalizeSemanticPieceV1("straight-leg trousers"), "lower_garment");
   assert.equal(normalizeSemanticPieceV1("loafer-style footwear"), "footwear");
-  assert.equal(normalizeSemanticPieceV1("layered necklaces"), "accessory_jewelry");
+  assert.equal(normalizeSemanticPieceV1("layered necklaces"), "necklace");
+  assert.equal(normalizeSemanticPieceV1("gold watch"), "watch");
+  assert.equal(normalizeSemanticPieceV1("ear studs"), "earrings");
+  assert.equal(normalizeSemanticPieceV1("finger ring"), "ring");
 });
 
 test("semantic-only belt remains unpublished pending spatial confirmation", () => {
@@ -57,6 +60,15 @@ test("belt support requires a validated DINO plus SAM localization record", () =
   assert.equal(result.candidates[0].spatial_evidence.source, "dino_sam_belt_localization_v1");
   assert.equal(result.publication_changed, false);
   assert.equal(result.color_changed, false);
+});
+
+test("a hat region cannot corroborate a watch or necklace claim", () => {
+  const result = reconcile([
+    { action: "support", piece: "watch", confidence: 0.97 },
+    { action: "support", piece: "necklace", confidence: 0.99 },
+  ]);
+  assert.equal(result.candidates[0].status, "semantic_only_requires_spatial_confirmation");
+  assert.equal(result.candidates[1].status, "semantic_only_requires_spatial_confirmation");
 });
 
 test("external contradiction flags false eyewear without mutating published analysis", () => {
