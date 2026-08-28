@@ -44,6 +44,7 @@ import jpeg from "jpeg-js";
 import { PNG } from "pngjs";
 import { analyzePerceptionV5 } from "./intelligence/perceptionV5/index.js";
 import { analyzePerceptionV6 } from "./intelligence/perceptionV6/index.js";
+import { buildAccessoryInstancesV1 } from "./intelligence/accessoryInstancesV1.js";
 import { attachColorEvidenceToZones } from "./intelligence/colorEvidence/index.js";
 import { applyPieceColorOwnershipV1 } from "./intelligence/pieceColorOwnershipV1.js";
 import { applyLowerGarmentPurityV2 } from "./intelligence/lowerGarmentPurityV2.js";
@@ -4904,7 +4905,7 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
   ), samRegions);
   const samZones = new Set(samRegions.map((region) => region?.zone).filter((zone) => zone && zone !== "unknown"));
   const dedupedDinoRegions = samRegions.length
-    ? dinoRegions.filter((region) => !samZones.has(region?.zone))
+    ? dinoRegions.filter((region) => region?.zone === "accessory_jewelry" || !samZones.has(region?.zone))
     : dinoRegions;
   const rawGarmentEvidenceRegions = samRegions.length ? samRegions.concat(dedupedDinoRegions) : dinoRegions;
   const pieceColorOwnership = applyPieceColorOwnershipV1({
@@ -5011,7 +5012,10 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
         object_type: "belt",
         hex: dominantColor.hex,
         dominant_color: dominantColor,
-        support_colors: (confirmedBeltRegion.region_colors || []).slice(1, 3),
+        // A detector box around a narrow belt inevitably includes nearby shirt,
+        // trousers, skin, and buckle pixels. Until an independent object mask
+        // validates a secondary color, publish only the belt's dominant color.
+        support_colors: [],
         confidence: Number(confirmedBeltRegion.confidence || 0),
         score: Number(confirmedBeltRegion.confidence || 0),
         cluster_count: Number(confirmedBeltRegion.region_colors?.length || 1),
@@ -5065,6 +5069,29 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     }
     publishedZones = Object.fromEntries(Object.entries(legacyGarmentZones.zones || {}).flatMap(([zone, legacy]) => {
       if (suppressibleZones.has(zone) && rejectedZones.has(zone) && !acceptedZones.has(zone)) return [];
+      if (zone === "footwear") {
+        const reconciliation = acceptedPublicationByZone.get(zone) || null;
+        const objectColors = reconciliation?.object_local_colors || [];
+        const dominantObjectColor = objectColors[0] || null;
+        if (!dominantObjectColor) return [[zone, legacy]];
+        return [[zone, {
+          ...legacy,
+          name: reconciliation.selected_label || legacy?.name,
+          label: reconciliation.selected_label || legacy?.label,
+          hex: dominantObjectColor.hex,
+          dominant_color: dominantObjectColor,
+          primary_color: dominantObjectColor,
+          object_local_colors: objectColors,
+          support_colors: objectColors.slice(1),
+          detected_colors: objectColors,
+          region_colors: objectColors,
+          evidence_ids: reconciliation.selected_evidence_ids || [],
+          validation_decision: "accepted",
+          publication_decision: "publish",
+          reconciliation_result: "v6_object_local_color_reconciled",
+          perception_source: "v6_assist_object_local_color",
+        }]];
+      }
       if (zone !== "accessory_jewelry") return [[zone, legacy]];
 
       const legacyObjectType = String(legacy?.object_type || legacy?.accessory_type || "").trim().toLowerCase();
@@ -5132,7 +5159,19 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     decodedImage,
   });
   const signatureAuthorityZones = applySignatureColorAuthorityV2(colorEvidenceShadowZones);
-  const authoritativeGarmentZones = buildPublishedGarmentZonesV2(garmentZones, signatureAuthorityZones);
+  const accessoryInstancesV1 = buildAccessoryInstancesV1({ perceptionV6 });
+  const baseAuthoritativeGarmentZones = buildPublishedGarmentZonesV2(garmentZones, signatureAuthorityZones);
+  // Keep the legacy accessory_jewelry zone for existing clients. In assist and
+  // authoritative modes, also expose every independently validated jewelry
+  // instance under its own stable zone key so simultaneous pieces are not lost.
+  const authoritativeGarmentZones = {
+    ...baseAuthoritativeGarmentZones,
+    zones: perceptionV6Mode === "shadow"
+      ? baseAuthoritativeGarmentZones.zones
+      : { ...baseAuthoritativeGarmentZones.zones, ...accessoryInstancesV1.zones },
+    accessory_instances: accessoryInstancesV1.instances,
+    accessory_instance_version: accessoryInstancesV1.version,
+  };
   const colorEvidenceByZone = Object.fromEntries(
     Object.entries(authoritativeGarmentZones?.zones || {}).map(([zone, value]) => [zone, value?.color_evidence_v1 || null])
   );
@@ -5207,6 +5246,7 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     perception_v5: perceptionV5,
     perception_v6: perceptionV6,
     perception_v6_mode: perceptionV6Mode,
+    accessory_instances_v1: accessoryInstancesV1,
     dino_lifecycle_trace: {
       target_id: "dino_4",
       stages: fullDinoLifecycleTrace,
@@ -5215,9 +5255,12 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     segmented_regions: authoritativeGarmentZones.segmented_regions || garmentEvidenceRegions,
     region_color_analysis: authoritativeGarmentZones.region_color_analysis || [],
     detail_colors: visualIntelligence?.body_vs_detail?.detail_colors || [],
-    accessory_analysis: (garmentAnalysis?.detected_items || []).filter((item) =>
-      ["accessory_jewelry", "eyewear", "bag"].includes(item.type)
-    ),
+    accessory_analysis: [
+      ...(garmentAnalysis?.detected_items || []).filter((item) =>
+        ["accessory_jewelry", "eyewear", "bag"].includes(item.type)
+      ),
+      ...accessoryInstancesV1.instances,
+    ],
     confidence_scores: {
       outfit: outfitScore,
       best_mode: best.score,
@@ -5913,7 +5956,7 @@ const DEFAULT_REPLICATE_GROUNDING_DINO_VERSION =
   "efd10a8ddc57ea28773327e881ce95e20cc1d734c589f7dd01d2036921ed78aa";
 const DEFAULT_GROUNDING_DINO_QUERY =
   process.env.GROUNDING_DINO_QUERY ||
-  "person. hat. bag. shoes. boots. sneakers. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. belt. waist belt. belt buckle. watch. necklace. chain. bracelet. earrings. ring. accessory.";
+  "person. hat. bag. shoes. boots. sneakers. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. belt. waist belt. belt buckle. watch. necklace. chain. pendant. bracelet. earring. earrings. ring. brooch. pin. accessory.";
 
 function getSamPredictionsUrl(modelId = DEFAULT_REPLICATE_SAM_MODEL) {
   const configured = String(process.env.REPLICATE_SAM_MODEL_PREDICTIONS_URL || "").trim();
@@ -6144,8 +6187,23 @@ function dedupeDinoRegionsByZoneAndOverlap(regions = [], overlapThreshold = 0.72
   for (const region of regions || []) {
     const zone = region?.zone || "unknown";
     const bbox = getRegionBBox(region);
+    const accessoryIdentity = zone === "accessory_jewelry"
+      ? inferAccessoryDisplayMetadata([
+          region?.object_type,
+          region?.accessory_type,
+          region?.label,
+          region?.segment_label,
+        ]).accessory_type
+      : null;
     const matchIndex = merged.findIndex((candidate) =>
-      candidate?.zone === zone && bbox && getRegionBBox(candidate) && getBboxIoU(bbox, getRegionBBox(candidate)) >= overlapThreshold
+      candidate?.zone === zone &&
+      (zone !== "accessory_jewelry" || inferAccessoryDisplayMetadata([
+        candidate?.object_type,
+        candidate?.accessory_type,
+        candidate?.label,
+        candidate?.segment_label,
+      ]).accessory_type === accessoryIdentity) &&
+      bbox && getRegionBBox(candidate) && getBboxIoU(bbox, getRegionBBox(candidate)) >= overlapThreshold
     );
 
     if (matchIndex < 0) {

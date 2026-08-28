@@ -16,42 +16,42 @@ const ACCESSORY_TYPE_RULES = [
   },
   {
     tokens: ["chain"],
-    display_zone_label: "Jewelry",
+    display_zone_label: "Chain",
     accessory_type: "chain",
   },
   {
     tokens: ["necklace"],
-    display_zone_label: "Jewelry",
+    display_zone_label: "Necklace",
     accessory_type: "necklace",
   },
   {
     tokens: ["pendant"],
-    display_zone_label: "Jewelry",
+    display_zone_label: "Pendant",
     accessory_type: "pendant",
   },
   {
     tokens: ["ring"],
-    display_zone_label: "Jewelry",
+    display_zone_label: "Ring",
     accessory_type: "ring",
   },
   {
     tokens: ["bracelet"],
-    display_zone_label: "Jewelry",
+    display_zone_label: "Bracelet",
     accessory_type: "bracelet",
   },
   {
     tokens: ["earring", "earrings"],
-    display_zone_label: "Jewelry",
-    accessory_type: "earring",
+    display_zone_label: "Earrings",
+    accessory_type: "earrings",
   },
   {
     tokens: ["brooch"],
-    display_zone_label: "Jewelry",
+    display_zone_label: "Brooch",
     accessory_type: "brooch",
   },
   {
     tokens: ["pin"],
-    display_zone_label: "Jewelry",
+    display_zone_label: "Pin",
     accessory_type: "pin",
   },
   {
@@ -61,7 +61,7 @@ const ACCESSORY_TYPE_RULES = [
   },
   {
     tokens: ["belt"],
-    display_zone_label: "Accessory",
+    display_zone_label: "Belt",
     accessory_type: "belt",
   },
   {

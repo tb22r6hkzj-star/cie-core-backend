@@ -17,17 +17,33 @@ const validImage = (image) => {
 
 const rgbHex = ([r, g, b]) => `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
 const distance = (a, b) => Math.sqrt(a.reduce((sum, value, i) => sum + (value - b[i]) ** 2, 0)) / 441.67;
-const pixelKind = ([r, g, b]) => {
+const isJewelryLabel = (value) => /necklace|chain|pendant|earring|ear stud|bracelet|watch|\bring\b|brooch|\bpin\b/.test(String(value || "").toLowerCase());
+const pixelKind = ([r, g, b], label = "") => {
   const max = Math.max(r, g, b), min = Math.min(r, g, b), light = (max + min) / 510;
   if (light > .88 && max - min < 35) return "highlight";
+  // Warm metallic jewelry can otherwise be misclassified as skin. This only
+  // applies inside a detector-localized jewelry crop; it never changes global
+  // garment color classification.
+  if (isJewelryLabel(label) && light >= .24 && light <= .86 && r >= g * 1.03 && g >= b * 1.16 && r - b >= 34) return "object";
   if (r > 55 && r > b * 1.12 && r >= g * .9 && r - b > 18) return "skin";
   if (light < .18) return "dark";
   return "object";
 };
 
+function insetCrop(box, label = "") {
+  if (!box || !isJewelryLabel(label)) return box;
+  const width = Number(box.x2) - Number(box.x);
+  const height = Number(box.y2) - Number(box.y);
+  if (!(width > 0) || !(height > 0)) return box;
+  const insetX = width * .1;
+  const insetY = height * .1;
+  return { x: box.x + insetX, y: box.y + insetY, x2: box.x2 - insetX, y2: box.y2 - insetY };
+}
+
 function inspectPixels(region, decodedImage) {
   const image = validImage(decodedImage);
-  const box = region?.normalized_box;
+  const label = `${region?.label || ""} ${region?.zone || ""}`;
+  const box = insetCrop(region?.normalized_box, label);
   if (!image || !box) return { available: false, valid: !!image, reason: image ? "missing_crop_geometry" : "invalid_or_missing_decoded_image", crop: box };
   const x1 = Math.max(0, Math.floor(box.x * image.width)), y1 = Math.max(0, Math.floor(box.y * image.height));
   const x2 = Math.min(image.width, Math.max(x1 + 1, Math.ceil(box.x2 * image.width)));
@@ -40,7 +56,7 @@ function inspectPixels(region, decodedImage) {
   if (!samples.length) return { available: false, valid: true, reason: "empty_crop", crop: { x: x1, y: y1, width: x2 - x1, height: y2 - y1 } };
   const counts = { skin: 0, highlight: 0, dark: 0, object: 0 }, buckets = new Map();
   for (const p of samples) {
-    const kind = pixelKind(p);
+    const kind = pixelKind(p, label);
     counts[kind] += 1;
     if (kind !== "object" && kind !== "dark") continue;
     const key = p.map(v => Math.round(v / 32) * 32).join(",");
@@ -48,9 +64,16 @@ function inspectPixels(region, decodedImage) {
     p.forEach((v,i) => item.sum[i] += v); item.count++; buckets.set(key,item);
   }
   const mean = (values) => values.length ? values.reduce((a,p) => a.map((v,i) => v + p[i]), [0,0,0]).map(v => v / values.length) : null;
+  const surroundingMean = mean(surrounding);
   const localColors = [...buckets.values()].sort((a,b) => b.count-a.count).slice(0,4).map(v => {
     const rgb = v.sum.map(n => n/v.count);
-    return { hex: rgbHex(rgb), pct: v.count/samples.length, pixel_count: v.count, source_class: pixelKind(rgb) };
+    return {
+      hex: rgbHex(rgb),
+      pct: v.count/samples.length,
+      pixel_count: v.count,
+      source_class: pixelKind(rgb, label),
+      surrounding_distance: surroundingMean ? distance(rgb, surroundingMean) : 0,
+    };
   });
   const ratios = Object.fromEntries(Object.entries(counts).map(([k,v]) => [k, v/samples.length]));
   const contrast = surrounding.length ? distance(mean(samples), mean(surrounding)) : 0;
@@ -60,7 +83,7 @@ function inspectPixels(region, decodedImage) {
     const i=(y*image.width+x)*image.channels, j=(y*image.width+x+stride)*image.channels;
     if (image.channels===4 && (image.data[i+3]<=15 || image.data[j+3]<=15)) continue;
     const a=[image.data[i],image.data[i+1],image.data[i+2]], b=[image.data[j],image.data[j+1],image.data[j+2]];
-    if (pixelKind(a)==="skin" || pixelKind(b)==="skin") continue;
+    if (pixelKind(a, label)==="skin" || pixelKind(b, label)==="skin") continue;
     upperEdgeComparisons += 1;
     if (distance(a,b) >= .055) upperStrongEdges += 1;
   }
@@ -150,6 +173,46 @@ function validateObject(entry, pixels) {
       object_presence_score: presence.score,
       required_positive_evidence: presence.required_evidence,
       skin_dominant_head_crop: !!presence.skin_dominant_head_crop,
+    };
+  }
+  if (isJewelryLabel(label)) {
+    const usableColors = (pixels.object_local_colors || []).filter((color) =>
+      !["skin", "highlight"].includes(color.source_class) &&
+      (Number(color.pixel_count || 0) >= 2 || Number(color.pct || 0) >= .025) &&
+      (Number(color.surrounding_distance || 0) >= .025 || Number(color.pct || 0) >= .08)
+    );
+    const tinyIdentity = /earring|ear stud|\bring\b|brooch|\bpin\b/.test(label);
+    const confidenceFloor = tinyIdentity ? .52 : .44;
+    // A jewelry box often contains substantially more skin or garment than
+    // metal. Keep the detector-backed identity, but do not publish a color
+    // unless the crop is sufficiently isolated from those surrounding pixels.
+    const surroundingMaterialDominant = r.skin >= .30;
+    if (surroundingMaterialDominant) contamination.push("skin_or_garment_dominance");
+    const supported =
+      pixels.sample_count >= 6 &&
+      !surroundingMaterialDominant &&
+      r.highlight < .78 &&
+      usableColors.length > 0 &&
+      (pixels.contrast >= .018 || usableColors.some((color) => Number(color.pct || 0) >= .08));
+    return {
+      supported,
+      // Identity and color have separate authority. A localized DINO identity
+      // may publish even when its color is conservatively withheld.
+      accepted: entry.confidence >= confidenceFloor,
+      reason: !supported
+        ? surroundingMaterialDominant
+          ? "jewelry_color_not_isolated_from_skin_or_garment"
+          : r.highlight >= .78
+          ? "jewelry_glare_dominance"
+          : usableColors.length === 0
+            ? "jewelry_color_not_isolated_from_surroundings"
+            : "insufficient_small_object_pixel_evidence"
+        : entry.confidence < confidenceFloor
+          ? "insufficient_small_object_detector_confidence"
+          : "small_object_local_pixels_validated",
+      contamination,
+      positive_evidence: supported ? ["object_local_color", "surrounding_separation"] : [],
+      structural_evidence: supported ? ["detector_localized_small_object"] : [],
     };
   }
   const supported = r.highlight < .72 && (pixels.contrast >= .025 || r.object + r.dark >= .25);
