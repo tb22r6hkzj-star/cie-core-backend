@@ -123,6 +123,7 @@ export async function runOpenAISemanticObserverV1({
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), semanticTimeoutMs(timeoutMs));
   const startedAt = Date.now();
+  let failureStage = "request";
   try {
     const response = await fetchImpl("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -130,6 +131,7 @@ export async function runOpenAISemanticObserverV1({
       body: JSON.stringify(request),
       signal: controller.signal,
     });
+    failureStage = "provider_response";
     if (!response?.ok) {
       let providerError = null;
       try {
@@ -144,10 +146,13 @@ export async function runOpenAISemanticObserverV1({
       throw error;
     }
     const payload = await response.json();
+    failureStage = "response_parse";
     const raw = JSON.parse(responseText(payload) || "{}");
+    failureStage = "observation_sanitize";
     const observation = sanitizeExternalSemanticObservation({ provider: "openai", model, ...raw });
     const estimatedCostUsd = estimateModelCost(model, payload?.usage);
     const budget = validateExternalUsageBudgetV1({ normalCalls: 1, escalationCalls: 0, estimatedCostUsd });
+    failureStage = "budget_validation";
     if (!budget.allowed) throw new Error(`External intelligence budget rejected: ${budget.violations.join(",")}`);
     const result = {
       ok: true,
@@ -169,6 +174,8 @@ export async function runOpenAISemanticObserverV1({
       provider_status: error?.providerStatus || null,
       provider_error_code: error?.providerErrorCode || null,
       provider_error_type: error?.providerErrorType || null,
+      provider_error_name: String(error?.name || "Error").slice(0, 80),
+      failure_stage: failureStage,
       latency_ms: Date.now() - startedAt,
       fail_open: true,
       handoff: evaluateExternalSemanticHandoffV1({ mode: "off", visionCoreDecision }),

@@ -7928,6 +7928,8 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       provider_status: externalSemantic.provider_status || null,
       provider_error_code: externalSemantic.provider_error_code || null,
       provider_error_type: externalSemantic.provider_error_type || null,
+      provider_error_name: externalSemantic.provider_error_name || null,
+      failure_stage: externalSemantic.failure_stage || null,
     });
 
     return res.json({
@@ -7972,6 +7974,8 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           provider_status: externalSemantic.provider_status || null,
           provider_error_code: externalSemantic.provider_error_code || null,
           provider_error_type: externalSemantic.provider_error_type || null,
+          provider_error_name: externalSemantic.provider_error_name || null,
+          failure_stage: externalSemantic.failure_stage || null,
           disposition: externalSemantic?.handoff?.disposition || null,
           semantic_reconciliation: semanticReconciliation,
           semantic_publication_policy: semanticPublicationConstraints,

@@ -35,6 +35,14 @@ test("precise loafer and shoe-hardware labels retain their identities", () => {
   assert.equal(mapDinoLabel("horsebit shoe hardware").display_zone_label, "Shoe Hardware");
 });
 
+test("joined Grounding DINO labels recover the most specific whole-token mapping", () => {
+  assert.equal(mapDinoLabel("pants trousers").zone, "lower_garment");
+  assert.equal(mapDinoLabel("shoes loafer").category, "loafer");
+  assert.equal(mapDinoLabel("necklace chain necklace").accessory_type, "necklace");
+  assert.equal(mapDinoLabel("earring stud").accessory_type, "earrings");
+  assert.equal(mapDinoLabel("horsebit shoe hardware shoe hardware").accessory_type, "shoe_hardware");
+});
+
 test("combined pants/skirt label remains lower-garment evidence", () => {
   const mapped = mapDinoLabel("pants skirt", 0.54);
   assert.equal(mapped?.zone, "lower_garment");

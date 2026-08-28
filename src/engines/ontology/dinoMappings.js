@@ -268,6 +268,11 @@ export const DINO_LABEL_MAPPINGS = [
 
 const normalizeDinoLabel = (label) => String(label ?? '').trim().toLowerCase();
 
+const containsWholeLabel = (source, candidate) => {
+  const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`).test(source);
+};
+
 export function getDinoMapping(label) {
   const normalizedLabel = normalizeDinoLabel(label);
 
@@ -275,7 +280,10 @@ export function getDinoMapping(label) {
 }
 
 export function mapDinoLabel(label) {
-  const mapping = getDinoMapping(label);
+  const normalizedLabel = normalizeDinoLabel(label);
+  const mapping = getDinoMapping(label) ?? DINO_LABEL_MAPPINGS
+    .filter((candidate) => containsWholeLabel(normalizedLabel, candidate.label))
+    .sort((a, b) => b.label.length - a.label.length)[0];
 
   if (mapping) {
     return mapping;
