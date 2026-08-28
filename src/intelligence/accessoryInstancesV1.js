@@ -133,6 +133,10 @@ function buildInstance(entry, index) {
     highlightRatio: entry.highlightRatio,
     validationSupported: entry.colorAccepted,
   });
+  const metallicColorRequired = new Set([
+    "necklace", "chain", "pendant", "earrings", "ring", "watch", "shoe_hardware",
+  ]).has(entry.type);
+  const colorAccepted = entry.colorAccepted && (!metallicColorRequired || metallicIdentity.publishable);
   return {
     instance_id: `${entry.type}_${index + 1}`,
     zone_key: `accessory_${entry.type}${index ? `_${index + 1}` : ""}`,
@@ -147,13 +151,17 @@ function buildInstance(entry, index) {
     geometry: entry.geometry,
     evidence_ids: [entry.evidenceId].filter(Boolean),
     identity_publication_decision: "publish",
-    color_publication_decision: entry.colorAccepted ? "publish_object_local_color" : "withhold_unisolated_color",
-    validation_decision: entry.colorAccepted ? "accepted" : "identity_only",
-    validation_reason: entry.colorAccepted ? "validated_small_object_local_pixels" : entry.validationReason || "insufficient_object_local_color_evidence",
-    object_local_colors: entry.colorAccepted ? entry.colors : [],
-    hex: entry.colorAccepted ? primary?.hex || null : null,
-    dominant_color: entry.colorAccepted ? primary : null,
-    support_colors: entry.colorAccepted ? entry.colors.slice(1) : [],
+    color_publication_decision: colorAccepted ? "publish_object_local_color" : "withhold_unisolated_color",
+    validation_decision: colorAccepted ? "accepted" : "identity_only",
+    validation_reason: colorAccepted
+      ? "validated_small_object_local_pixels"
+      : metallicColorRequired && entry.colorAccepted
+        ? "metallic_identity_not_isolated"
+        : entry.validationReason || "insufficient_object_local_color_evidence",
+    object_local_colors: colorAccepted ? entry.colors : [],
+    hex: colorAccepted ? primary?.hex || null : null,
+    dominant_color: colorAccepted ? primary : null,
+    support_colors: colorAccepted ? entry.colors.slice(1) : [],
     material_family: metallicIdentity.publishable ? metallicIdentity.family : null,
     material_display_name: metallicIdentity.publishable ? metallicIdentity.display_name : null,
     metallic_color_evidence_v1: metallicIdentity,

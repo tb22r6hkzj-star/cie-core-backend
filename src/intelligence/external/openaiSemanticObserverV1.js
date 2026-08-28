@@ -74,7 +74,9 @@ export function buildOpenAISemanticRequestV1({ imageUrl, visionCoreEvidence = {}
         schema: OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1,
       },
     },
-    max_output_tokens: 1200,
+    // A complete garment plus multi-accessory inventory can exceed 1,200
+    // tokens and truncate otherwise valid strict JSON.
+    max_output_tokens: 2400,
   };
 }
 

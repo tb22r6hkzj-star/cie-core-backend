@@ -31,8 +31,15 @@ export function buildPublishedGarmentZonesV2(garmentZones = {}, enrichedZones = 
     ? enrichedZones
     : {};
 
+  const colorNamedGarmentZones = new Set(["upper_garment", "lower_garment", "body_garment", "outerwear"]);
   const mergedZones = Object.fromEntries(
-    Object.entries({ ...legacyZones, ...resolvedZones }).map(([key, value]) => [key, cloneZone(value)])
+    Object.entries({ ...legacyZones, ...resolvedZones }).map(([key, value]) => {
+      const cloned = cloneZone(value);
+      const authoritativeColorName = cloned?.primary_color?.name || cloned?.dominant_color?.name || null;
+      return [key, colorNamedGarmentZones.has(key) && authoritativeColorName
+        ? { ...cloned, name: authoritativeColorName }
+        : cloned];
+    })
   );
 
   return {

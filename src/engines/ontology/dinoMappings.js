@@ -244,7 +244,10 @@ export const DINO_LABEL_MAPPINGS = [
     display_zone_label: 'Shoe Hardware',
     accessory_type: 'shoe_hardware',
     object_type: 'shoe_hardware',
-    confidence_floor: 0.52,
+    // Small reflective hardware is routinely lower-confidence than the shoe
+    // surrounding it. Publication still requires V6 spatial acceptance; this
+    // floor only keeps the candidate alive for that validation.
+    confidence_floor: 0.3,
   })),
   ...['belt', 'waist belt', 'belt buckle', 'waistband belt'].map((label) => ({
     label,

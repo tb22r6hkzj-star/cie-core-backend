@@ -49,7 +49,8 @@ test("publishes simultaneous jewelry types as independent UI-ready zones", () =>
   assert.equal(result.zones.accessory_necklace.display_zone_label, "Necklace");
   assert.equal(result.zones.accessory_earrings.display_zone_label, "Earrings");
   assert.equal(result.zones.accessory_watch.display_zone_label, "Watch");
-  assert.equal(result.color_published_count, 3);
+  assert.equal(result.color_published_count, 0);
+  assert.equal(result.color_withheld_count, 3);
 });
 
 test("labels validated reflective warm jewelry pixels as measured gold tone", () => {
