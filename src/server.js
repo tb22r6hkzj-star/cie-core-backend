@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 79313)
-Total output lines: 8251
-
 // src/server.js
 // FULL REWRITE — VisionCore backend
 //
@@ -2239,7 +2236,3813 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
         refinedCrop: pixelRefinedPalette,
         candidateRegion: candidateRegionPalette,
         rawDino: rawDinoPalette,
-        detector: rawDetectorPalette,…39313 tokens truncated… catch (error) {
+        detector: rawDetectorPalette,
+        fallback: fallbackPalette,
+      })
+    : null;
+  const displayPalette = displayPaletteSelection?.palette || [];
+  const selectedDisplaySource = displayPaletteSelection?.selected_source || debugContext.zone_color_source || "fallback";
+  const displayEvidenceWeight = displayPaletteEvidenceWeight(selectedDisplaySource);
+  const explainabilitySourceConfidence = Number(contextEvidence?.weighted_confidence || sourceConfidence || zoneConfidence || 0);
+  const calibratedDisplayPalette = displayPalette.map((color) => withDisplayColorConfidence(color, {
+    zoneConfidence,
+    sourceConfidence: explainabilitySourceConfidence,
+    evidenceWeight: displayEvidenceWeight,
+  }));
+  const compactAccessoryDisplayRoles = calibratedDisplayPalette.length
+    ? splitAccessoryDetectedPaletteRoles(calibratedDisplayPalette)
+    : null;
+  const accessoryDisplayRoles = compactAccessoryDisplayRoles
+    ? {
+        primary: withDisplayColorConfidence(compactAccessoryDisplayRoles.primary, {
+          zoneConfidence,
+          sourceConfidence: explainabilitySourceConfidence,
+          evidenceWeight: displayEvidenceWeight,
+        }),
+        secondary: (compactAccessoryDisplayRoles.secondary || []).map((color) => withDisplayColorConfidence(color, {
+          zoneConfidence,
+          sourceConfidence: explainabilitySourceConfidence,
+          evidenceWeight: displayEvidenceWeight,
+        })),
+        accent: (compactAccessoryDisplayRoles.accent || []).map((color) => withDisplayColorConfidence(color, {
+          zoneConfidence,
+          sourceConfidence: explainabilitySourceConfidence,
+          evidenceWeight: displayEvidenceWeight,
+        })),
+      }
+    : null;
+  const contaminationScore = buildContaminationEvidenceScore({
+    dominant,
+    regionCoverage: contextEvidence.coverage || regionCoverage,
+    suppressionGates: debugContext.suppression_gates,
+  });
+  debugContext.contamination_score_total = contaminationScore.total;
+  debugContext.contamination_score = contaminationScore;
+  const rejectedAlternatives = flattenRejectedDisplayAlternatives(displayPaletteSelection?.trace);
+  const explainabilityPublishedColors = calibratedDisplayPalette.length
+    ? calibratedDisplayPalette
+    : summaryColorReadClusters.map((color) => withDisplayColorConfidence(color, {
+        zoneConfidence,
+        sourceConfidence: explainabilitySourceConfidence,
+        evidenceWeight: displayEvidenceWeight,
+      }));
+  const explainabilityPrimary = accessoryDisplayRoles?.primary || withDisplayColorConfidence(primaryColorRead, {
+    zoneConfidence,
+    sourceConfidence: explainabilitySourceConfidence,
+    evidenceWeight: displayEvidenceWeight,
+  });
+  const publicationPrimaryReason = {
+    code: calibratedDisplayPalette.length ? "highest_priority_surviving_palette" : "zone_color_read_selected",
+    source: selectedDisplaySource,
+    selected_hex: explainabilityPrimary?.hex || dominantColor?.hex || null,
+    confidence: explainabilityPrimary?.confidence ?? calibrateConfidence(zoneConfidence),
+    message: calibratedDisplayPalette.length
+      ? "Published the highest-priority surviving color evidence after contamination filtering."
+      : "Published the finalized zone color read supported by available evidence.",
+  };
+  const publicationReasons = {
+    primary: publicationPrimaryReason,
+    supporting: [
+      {
+        code: "confidence_calibrated",
+        zone_weight: 0.55,
+        color_percentage_weight: 0.30,
+        source_confidence_weight: 0.15,
+        evidence_weight: round2(displayEvidenceWeight),
+      },
+      {
+        code: "contamination_evidence_scored",
+        total: contaminationScore.total,
+      },
+    ],
+  };
+  const evidenceLedger = {
+    zone: zoneKey,
+    source: selectedDisplaySource,
+    selected_color: explainabilityPrimary,
+    published_colors: explainabilityPublishedColors,
+    detector_evidence: rawDetectorPalette,
+    dino_evidence: rawDinoPalette,
+    crop_pixel_evidence: filterAccessoryDisplayPalette(pixelRefinedPalette).kept,
+    candidate_region_evidence: candidateRegionPalette,
+    contamination_scores: contaminationScore,
+  };
+  debugContext.dominantColor = { hex: dominantColor?.hex || null };
+  debugContext.primaryColor = { hex: primaryColorRead?.hex || null };
+  if (zoneKey === "accessory_jewelry") {
+    debugContext.accessory_jewelry_identity_trace = {
+      preserveDominantAccessoryIdentity,
+      dominant_color: {
+        name: dominantColor?.name || null,
+        color_identity_name: dominantColor?.color_identity?.name || null,
+        translation: dominantColor?.color_identity?.translation || null,
+      },
+      primary_color: {
+        name: primaryColorRead?.name || null,
+        color_identity_name: primaryColorRead?.color_identity?.name || null,
+        translation: primaryColorRead?.color_identity?.translation || null,
+      },
+      display_label: displayLabel,
+      color_identity: {
+        name: dominantColor?.color_identity?.name || null,
+        translation: dominantColor?.color_identity?.translation || null,
+      },
+    };
+  }
+
+  return {
+    mode,
+    read_mode: mode,
+    cluster_count: clusters.length,
+    color_mode: mode === "multicolor" ? "multi_color" : "single_color",
+    interpretation,
+    display_label: displayLabel,
+    confidence: zoneConfidence,
+    confidence_breakdown: buildConfidenceBreakdown({
+      sourceConfidence,
+      regionCoverage: contextEvidence.coverage || regionCoverage,
+      weightedRegionConfidence: contextEvidence.weighted_confidence,
+      colorCount: contextEvidence.color_count || regionColors.length,
+      dominantPct: dominant?.pct,
+      clusterCount: clusters.length,
+      multicolorDetected: debugContext.multicolor_detected,
+      suppressionGates: debugContext.suppression_gates,
+      computedScore: computedScoreForBreakdown,
+      finalConfidence: zoneConfidence,
+    }),
+    dominant_color: dominantColor,
+    color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
+    garment_identity: isGarmentZoneKey(zoneKey) ? buildGarmentIdentity(dominantColor, supportColors) : undefined,
+    primary_color: explainabilityPrimary,
+    support_colors: supportColors,
+    secondary_colors: accessoryDisplayRoles ? accessoryDisplayRoles.secondary : mergeColorReadSummaryFamilies(supportColors),
+    accent_colors: accessoryDisplayRoles ? accessoryDisplayRoles.accent : mergeColorReadSummaryFamilies(accentColors),
+    detected_colors: explainabilityPublishedColors,
+    region_colors: explainabilityPublishedColors,
+    raw_detector_palette: isAccessoryDisplayPaletteZone(zoneKey) ? rawDetectorPalette : undefined,
+    raw_dino_palette: isAccessoryDisplayPaletteZone(zoneKey) ? rawDinoPalette : undefined,
+    pixel_refined_palette: isAccessoryDisplayPaletteZone(zoneKey) ? filterAccessoryDisplayPalette(pixelRefinedPalette).kept : undefined,
+    display_palette: isAccessoryDisplayPaletteZone(zoneKey) ? calibratedDisplayPalette : undefined,
+    display_palette_trace: isAccessoryDisplayPaletteZone(zoneKey) ? displayPaletteSelection?.trace : undefined,
+    evidence_ledger: evidenceLedger,
+    publication_reasons: publicationReasons,
+    publication_reason: publicationReasons.primary,
+    rejected_alternatives: rejectedAlternatives,
+    evidence_summary: buildEvidenceSummary(mode === "multicolor" ? "multi_color" : "single_color", colorReadClusters, useRawDinoMulticolorRead ? "raw DINO region colors" : debugContext.zone_color_source),
+    ...(
+      useRawDinoMulticolorRead && isGarmentZoneKey(zoneKey)
+        ? {
+            primary_color: compactColorRead(mergeClusterSummaryFamilies(colorReadClusters)[0] || rawDinoPrimaryColor),
+            secondary_colors: rawDinoSecondaryColors.map(compactColorRead).filter(Boolean),
+            accent_colors: rawDinoAccentColors.map(compactColorRead).filter(Boolean),
+            color_identity_summary: buildColorIdentitySummary(rawDinoPrimaryColor?.color_identity),
+            garment_identity: buildGarmentIdentity(rawDinoPrimaryColor, rawDinoSecondaryColors),
+            color_story: buildColorStory(
+              compactColorRead(rawDinoPrimaryColor),
+              rawDinoSecondaryColors.map(compactColorRead).filter(Boolean),
+              rawDinoAccentColors.map(compactColorRead).filter(Boolean)
+            ),
+          }
+        : buildGarmentColorProfile({
+            zoneKey,
+            mode,
+            dominantColor,
+            supportColors,
+            accentColors,
+          })
+    ),
+    ...(isAccessoryDisplayPaletteZone(zoneKey) ? {
+      primary_color: explainabilityPrimary,
+      secondary_colors: accessoryDisplayRoles?.secondary || [],
+      accent_colors: accessoryDisplayRoles?.accent || [],
+      detected_colors: explainabilityPublishedColors,
+      region_colors: explainabilityPublishedColors,
+      display_palette: calibratedDisplayPalette,
+    } : {}),
+    _debug: debugContext,
+  };
+}
+
+
+function buildHeadwearDebugValues(zoneData = {}) {
+  if (zoneData?.display_zone_label !== "Headwear") return null;
+  const debug = zoneData?._debug || {};
+  const dinoPrimaryRegionSelection = debug?.dino_primary_region_selection || null;
+  const values = {
+    preserveDinoZoneColor: Boolean(debug?.preserveDinoZoneColor),
+    preservedDinoHex: debug?.preservedDinoHex || debug?.preserved_dino_hex || null,
+    "dominant.base": debug?.dominant?.base || null,
+    "dominantCluster.base": debug?.dominantCluster?.base || null,
+    "dominantReadCluster.base": debug?.dominantReadCluster?.base || null,
+    "dominantColor.hex": debug?.dominantColor?.hex || zoneData?.dominant_color?.hex || null,
+    "primaryColor.hex": debug?.primaryColor?.hex || zoneData?.primary_color?.hex || null,
+    "dominant_color_selection.reason": debug?.dominant_color_selection?.reason || null,
+  };
+
+  return {
+    ...values,
+    dino_primary_region_selection: dinoPrimaryRegionSelection,
+    dino_primary_region_selection_json: dinoPrimaryRegionSelection
+      ? JSON.stringify(dinoPrimaryRegionSelection, null, 2)
+      : null,
+    ui_rows: Object.entries(values).map(([label, value]) => ({
+      label,
+      value: value === undefined ? null : value,
+    })),
+  };
+}
+
+function getZoneRegionEvidence(zoneRegions = []) {
+  const coverage = (zoneRegions || []).reduce((sum, r) => sum + Number(r?.coverage || r?.confidence || 0), 0);
+  const weightedConfidence = avg((zoneRegions || []).map((r) => Number(r?.confidence || 0)));
+  const colorCount = (zoneRegions || []).reduce((sum, r) => {
+    const local = Array.isArray(r?.region_colors) ? r.region_colors.length : 0;
+    return sum + local;
+  }, 0);
+
+  return {
+    region_count: zoneRegions.length,
+    coverage: round2(coverage),
+    weighted_confidence: round2(weightedConfidence),
+    color_count: colorCount,
+  };
+}
+
+function hasHighContrastColorSignal(colors = []) {
+  const palette = (colors || []).map((c) => safeHex(c?.hex)).filter(Boolean);
+  if (palette.length < 2) return false;
+  for (let i = 0; i < palette.length; i += 1) {
+    for (let j = i + 1; j < palette.length; j += 1) {
+      if (Math.abs(getLight(palette[i]) - getLight(palette[j])) >= 0.33) return true;
+    }
+  }
+  return false;
+}
+
+function hasStrongEyewearRegionSignal(zoneRegions = [], evidence = {}) {
+  if (!Array.isArray(zoneRegions) || !zoneRegions.length) return false;
+  const weightedConfidence = Number(evidence?.weighted_confidence || 0);
+  const coverage = Number(evidence?.coverage || 0);
+  const compactRegion = zoneRegions.some((r) => {
+    const localCoverage = Number(r?.coverage || 0);
+    return localCoverage >= 0.03 && localCoverage <= 0.24;
+  });
+  const hasLensLikeContrast = zoneRegions.some((r) => {
+    const colors = Array.isArray(r?.region_colors) ? r.region_colors : [];
+    if (colors.length < 2) return false;
+    const sorted = colors
+      .map((c) => ({ ...c, hex: safeHex(c?.hex) }))
+      .filter((c) => !!c.hex)
+      .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
+    if (sorted.length < 2) return false;
+    const top = sorted[0];
+    const second = sorted[1];
+    const lightDiff = Math.abs(getLight(top.hex) - getLight(second.hex));
+    const darkLens = getLight(top.hex) < 0.34 || getLight(second.hex) < 0.34;
+    const reflectiveEdge = getLight(top.hex) > 0.64 || getLight(second.hex) > 0.64;
+    return lightDiff >= 0.2 && darkLens && reflectiveEdge;
+  });
+  return compactRegion && hasLensLikeContrast && coverage >= 0.05 && weightedConfidence >= 38;
+}
+
+function hasStrongOuterwearRegionSignal(zoneRegions = [], evidence = {}) {
+  if (!Array.isArray(zoneRegions) || !zoneRegions.length) return false;
+  const coverage = Number(evidence?.coverage || 0);
+  const weightedConfidence = Number(evidence?.weighted_confidence || 0);
+  const colorCount = Number(evidence?.color_count || 0);
+  const largeRegion = zoneRegions.some((r) => Number(r?.coverage || 0) >= 0.22);
+  const materialContrast = zoneRegions.some((r) => {
+    const colors = Array.isArray(r?.region_colors) ? r.region_colors : [];
+    if (colors.length < 2) return false;
+    const sorted = colors
+      .map((c) => ({ ...c, hex: safeHex(c?.hex) }))
+      .filter((c) => !!c.hex)
+      .sort((a, b) => Number(b?.pct || 0) - Number(a?.pct || 0));
+    if (sorted.length < 2) return false;
+    const top = sorted[0];
+    const second = sorted[1];
+    const lightDiff = Math.abs(getLight(top.hex) - getLight(second.hex));
+    const satDiff = Math.abs(getSat(top.hex) - getSat(second.hex));
+    return lightDiff >= 0.16 || satDiff >= 0.22;
+  });
+  return largeRegion && materialContrast && coverage >= 0.2 && weightedConfidence >= 40 && colorCount >= 2;
+}
+
+function hasExplicitZoneRegionEvidence(zoneKey, zoneRegions = [], evidence = {}) {
+  const regionCount = Number(evidence?.region_count || 0);
+  const coverage = Number(evidence?.coverage || 0);
+  const weightedConfidence = Number(evidence?.weighted_confidence || 0);
+  const colorCount = Number(evidence?.color_count || 0);
+  const labels = (zoneRegions || []).map((r) => normalizeText(r?.segment_label || r?.label || r?.zone || ""));
+  const hasDinoEvidence = (zoneRegions || []).some((r) =>
+    r?.source_type === "dino_detection" || r?.source_type === "grounding_dino"
+  );
+
+  if (hasDinoEvidence) {
+    return regionCount >= 1 && weightedConfidence >= 35;
+  }
+
+  if (["bag", "accessory_jewelry", "footwear", "fur_trim"].includes(zoneKey)) {
+    return regionCount >= 1 && coverage >= 0.12 && weightedConfidence >= 40 && colorCount >= 1;
+  }
+
+  if (zoneKey === "logo_text_detail") {
+    const hasTextLikeLabel = labels.some((t) => /logo|text|graphic|print/.test(t));
+    const hasContrastSignal = (zoneRegions || []).some((r) =>
+      hasHighContrastColorSignal(Array.isArray(r?.region_colors) ? r.region_colors : [])
+    );
+    return (
+      regionCount >= 1 &&
+      coverage >= 0.08 &&
+      weightedConfidence >= 42 &&
+      colorCount >= 1 &&
+      (hasTextLikeLabel || hasContrastSignal)
+    );
+  }
+
+  if (zoneKey === "outerwear") {
+    if (hasStrongOuterwearRegionSignal(zoneRegions, evidence)) return true;
+    return regionCount >= 1 && coverage >= 0.16 && weightedConfidence >= 42 && colorCount >= 1;
+  }
+
+  if (zoneKey === "eyewear") {
+    if (hasStrongEyewearRegionSignal(zoneRegions, evidence)) return true;
+    return regionCount >= 1 && coverage >= 0.08 && weightedConfidence >= 40 && colorCount >= 1;
+  }
+
+  return regionCount >= 1;
+}
+
+function shouldPromoteFallbackZone(zoneKey, evidence, zoneScore = 0) {
+  if (["bag", "accessory_jewelry", "footwear", "logo_text_detail", "fur_trim", "outerwear"].includes(zoneKey)) {
+    return false;
+  }
+  if (!["lower_garment"].includes(zoneKey)) return true;
+  const hasStrongRegionEvidence =
+    Number(evidence?.region_count || 0) >= 1 &&
+    Number(evidence?.coverage || 0) >= 0.24 &&
+    Number(evidence?.weighted_confidence || 0) >= 42;
+  const hasStrongColorEvidence = Number(evidence?.color_count || 0) >= 2;
+  const passesConfidence = Number(zoneScore || 0) >= 58;
+  return (hasStrongRegionEvidence && hasStrongColorEvidence) || passesConfidence;
+}
+
+function areLikelyOnePiece(zones = {}, segmentedByZone = {}) {
+  const upper = getZoneRegionEvidence(segmentedByZone.upper_garment || []);
+  const lower = getZoneRegionEvidence(segmentedByZone.lower_garment || []);
+  const bodyEvidence = upper.region_count + lower.region_count;
+  if (bodyEvidence < 1) return { decision: false, confidence: 0, reason: "insufficient_region_evidence" };
+
+  const upperHex = zones?.upper_garment?.hex;
+  const lowerHex = zones?.lower_garment?.hex;
+  const hasColors = !!upperHex && !!lowerHex;
+  const labDistance = hasColors ? colorDistanceLab(upperHex, lowerHex) : 99;
+  const upperScore = Number(zones?.upper_garment?.confidence || zones?.upper_garment?.score || 0);
+  const lowerScore = Number(zones?.lower_garment?.confidence || zones?.lower_garment?.score || 0);
+  const noStrongSplitEvidence = lower.coverage < 0.28 || lowerScore < 55;
+  const visuallyContinuous = hasColors && labDistance < 11;
+  const decision = visuallyContinuous && noStrongSplitEvidence;
+  const confidence = decision ? Math.round(clamp100(62 + (11 - Math.max(0, labDistance)) * 2.2)) : 0;
+  return {
+    decision,
+    confidence,
+    reason: decision ? "continuous_body_region_and_weak_split" : "split_evidence_present",
+    lab_distance: round2(labDistance),
+    upper_score: upperScore,
+    lower_score: lowerScore,
+  };
+}
+
+
+function withConfidenceBreakdownFinalConfidence(zone = {}, finalConfidence = 0) {
+  return {
+    ...zone,
+    confidence_breakdown: {
+      ...(zone?.confidence_breakdown || buildConfidenceBreakdown()),
+      final_confidence: Math.round(clamp100(Number(finalConfidence || 0))),
+    },
+  };
+}
+
+function dedupeDarkNeutralZoneReuse(zones = {}) {
+  const slots = ["upper_garment", "lower_garment", "outerwear"];
+  const candidates = slots
+    .map((slot) => ({ slot, data: zones[slot] }))
+    .filter((x) => !!x?.data?.hex)
+    .map((x) => ({
+      ...x,
+      confidence: Number(x.data?.confidence || x.data?.score || 0),
+      traits: getPerceptualTraits(x.data.hex),
+    }));
+
+  const removals = [];
+  for (let i = 0; i < candidates.length; i += 1) {
+    for (let j = i + 1; j < candidates.length; j += 1) {
+      const a = candidates[i];
+      const b = candidates[j];
+      const dist = colorDistanceLab(a.data.hex, b.data.hex);
+      const nearDuplicate = dist < 9;
+      const darkNeutralPair =
+        a.traits?.chroma_magnitude < 20 &&
+        b.traits?.chroma_magnitude < 20 &&
+        getLight(a.data.hex) < 0.45 &&
+        getLight(b.data.hex) < 0.45;
+
+      if (nearDuplicate || darkNeutralPair) {
+        const weaker = a.confidence <= b.confidence ? a : b;
+        if (weaker.slot === "upper_garment") continue;
+        removals.push({
+          slot: weaker.slot,
+          reason: "near_duplicate_dark_neutral",
+          matched_with: weaker.slot === a.slot ? b.slot : a.slot,
+          distance: round2(dist),
+        });
+      }
+    }
+  }
+
+  const deduped = { ...zones };
+  for (const r of removals) {
+    const current = deduped[r.slot];
+    if (!current?.hex) continue;
+    const dedupedConfidence = Math.min(Number(current?.confidence || 0), 42);
+    deduped[r.slot] = withConfidenceBreakdownFinalConfidence({
+      ...current,
+      hex: null,
+      interpretation: "unknown",
+      display_label: titleCase(String(r.slot).replace(/_/g, " ")),
+      confidence: dedupedConfidence,
+      dominant_color: null,
+      support_colors: [],
+      accent_colors: [],
+      dedupe_reason: r.reason,
+    }, dedupedConfidence);
+  }
+
+  return { zones: deduped, removals };
+}
+
+const GARMENT_ZONE_OUTPUT_WHITELIST = new Set([
+  "upper",
+  "upper_garment",
+  "lower",
+  "lower_garment",
+  "body_garment",
+  "one_piece",
+  "outerwear",
+  "footwear",
+  "bag",
+  "accessory",
+  "accessories",
+  "accessory_jewelry",
+  "eyewear",
+  "logo_text_detail",
+  "fur_trim",
+]);
+
+
+const dinoTraceObjectIds = new WeakMap();
+let dinoTraceObjectIdCounter = 0;
+
+function getDinoTraceObjectId(value) {
+  if (!value || typeof value !== "object") return null;
+  if (!dinoTraceObjectIds.has(value)) {
+    dinoTraceObjectIdCounter += 1;
+    dinoTraceObjectIds.set(value, `obj_${dinoTraceObjectIdCounter}`);
+  }
+  return dinoTraceObjectIds.get(value);
+}
+
+function summarizeDinoRegionForTrace(region) {
+  if (!region) return null;
+  const topColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
+  return {
+    object_ref: getDinoTraceObjectId(region),
+    id: region?.id || region?.region_id || region?.detection_id || null,
+    dominant_hex: safeHex(region?.dominant_hex || "") || region?.dominant_hex || null,
+    region_colors_0_hex: safeHex(topColor?.hex || "") || topColor?.hex || null,
+    region_colors_0_pct: topColor?.pct ?? null,
+  };
+}
+
+function findDinoRegionForTrace(regions = [], id = "dino_4") {
+  return Array.isArray(regions) ? regions.find((region) => region?.id === id) || null : null;
+}
+
+function summarizeDinoStageForTrace(stage, regions = [], id = "dino_4") {
+  const region = findDinoRegionForTrace(regions, id);
+  return {
+    stage,
+    found: !!region,
+    ...summarizeDinoRegionForTrace(region),
+  };
+}
+
+function buildDinoLifecycleChangeSummary(stages = []) {
+  const foundStages = (Array.isArray(stages) ? stages : []).filter((stage) => stage?.found);
+  for (let idx = 1; idx < foundStages.length; idx += 1) {
+    const previous = foundStages[idx - 1];
+    const current = foundStages[idx];
+    if ((previous?.dominant_hex || null) !== (current?.dominant_hex || null)) {
+      return {
+        changed_between: [previous.stage, current.stage],
+        from_dominant_hex: previous?.dominant_hex || null,
+        to_dominant_hex: current?.dominant_hex || null,
+        same_object_ref: !!previous?.object_ref && previous.object_ref === current.object_ref,
+      };
+    }
+  }
+  return {
+    changed_between: null,
+    from_dominant_hex: foundStages[0]?.dominant_hex || null,
+    to_dominant_hex: foundStages[foundStages.length - 1]?.dominant_hex || null,
+    same_object_ref: foundStages.length > 1
+      ? foundStages.every((stage) => stage?.object_ref && stage.object_ref === foundStages[0].object_ref)
+      : null,
+  };
+}
+
+function filterGarmentZoneOutput(zones = {}) {
+  const filteredZones = {};
+  const removedNonGarmentZones = [];
+
+  for (const [zoneKey, zoneData] of Object.entries(zones || {})) {
+    if (GARMENT_ZONE_OUTPUT_WHITELIST.has(zoneKey)) {
+      filteredZones[zoneKey] = zoneData;
+      continue;
+    }
+    removedNonGarmentZones.push(zoneKey);
+  }
+
+  return {
+    zones: filteredZones,
+    removed_non_garment_zones: removedNonGarmentZones,
+  };
+}
+
+
+const V6_DECISION_CONFIDENCE_CONFIG = Object.freeze({
+  object_evidence: 0.20,
+  pixel_evidence: 0.16,
+  geometry: 0.10,
+  region: 0.14,
+  coverage: 0.10,
+  color_consistency: 0.12,
+  publication: 0.18,
+  skin_like_penalty: 0.08,
+  highlight_penalty: 0.06,
+  neutral_evidence: 0.50,
+});
+
+function normalizeDecisionConfidence(value, fallback = 0) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return Math.max(0, Math.min(1, fallback));
+  return Math.max(0, Math.min(1, n > 1 ? n / 100 : n));
+}
+
+function getZoneDecisionInputs(zone = {}) {
+  const evidence = zone?.evidence_ledger || {};
+  const contamination = evidence?.contamination_scores || {};
+  const publishedColors = Array.isArray(evidence?.published_colors) ? evidence.published_colors : [];
+  const regionColors = Array.isArray(zone?.region_colors) ? zone.region_colors : [];
+  const detectorEvidence = Array.isArray(evidence?.detector_evidence) ? evidence.detector_evidence : [];
+  const cropEvidence = Array.isArray(evidence?.crop_pixel_evidence) ? evidence.crop_pixel_evidence : [];
+  const candidateEvidence = Array.isArray(evidence?.candidate_region_evidence) ? evidence.candidate_region_evidence : [];
+  const pctTotal = (publishedColors.length ? publishedColors : regionColors)
+    .reduce((sum, color) => sum + Math.max(0, Number(color?.pct || 0)), 0);
+  const colorConfidenceValues = (publishedColors.length ? publishedColors : regionColors)
+    .map((color) => normalizeDecisionConfidence(color?.confidence, 0))
+    .filter((value) => Number.isFinite(value));
+  const avgColorConfidence = colorConfidenceValues.length
+    ? colorConfidenceValues.reduce((sum, value) => sum + value, 0) / colorConfidenceValues.length
+    : normalizeDecisionConfidence(zone?.confidence, V6_DECISION_CONFIDENCE_CONFIG.neutral_evidence);
+  const objectEvidence = normalizeDecisionConfidence(
+    Math.max(Number(zone?.score || 0), Number(zone?.confidence || 0)),
+    V6_DECISION_CONFIDENCE_CONFIG.neutral_evidence
+  );
+  const pixelEvidence = cropEvidence.length
+    ? Math.min(1, 0.55 + cropEvidence.length * 0.10)
+    : candidateEvidence.length
+      ? 0.58
+      : 0.42;
+  const geometry = zone?.mask_geometry || zone?.bbox ? 0.72 : 0.5;
+  const region = candidateEvidence.length || regionColors.length ? Math.min(1, 0.55 + Math.max(candidateEvidence.length, regionColors.length) * 0.07) : 0.4;
+  const coverage = Math.max(0, Math.min(1, Number(zone?.coverage || zone?.pct || pctTotal || 0)));
+  const colorConsistency = Math.max(0, Math.min(1, avgColorConfidence));
+  const publication = zone?.primary_color?.hex || zone?.hex ? 0.85 : zone?.interpretation === 'unknown' ? 0.12 : 0.45;
+  const skinPenalty = Math.max(0, Math.min(1, Number(contamination?.skin_or_beige || 0)));
+  const highlightPenalty = Math.max(0, Math.min(1, Number(contamination?.highlight_or_glare || 0)));
+
+  return {
+    object_evidence: objectEvidence,
+    pixel_evidence: pixelEvidence,
+    geometry,
+    region,
+    coverage,
+    color_consistency: colorConsistency,
+    publication,
+    skin_like_penalty: skinPenalty,
+    highlight_penalty: highlightPenalty,
+  };
+}
+
+function computeUnifiedZoneConfidence(zone = {}) {
+  const inputs = getZoneDecisionInputs(zone);
+  const positive =
+    inputs.object_evidence * V6_DECISION_CONFIDENCE_CONFIG.object_evidence +
+    inputs.pixel_evidence * V6_DECISION_CONFIDENCE_CONFIG.pixel_evidence +
+    inputs.geometry * V6_DECISION_CONFIDENCE_CONFIG.geometry +
+    inputs.region * V6_DECISION_CONFIDENCE_CONFIG.region +
+    inputs.coverage * V6_DECISION_CONFIDENCE_CONFIG.coverage +
+    inputs.color_consistency * V6_DECISION_CONFIDENCE_CONFIG.color_consistency +
+    inputs.publication * V6_DECISION_CONFIDENCE_CONFIG.publication;
+  const penalty =
+    inputs.skin_like_penalty * V6_DECISION_CONFIDENCE_CONFIG.skin_like_penalty +
+    inputs.highlight_penalty * V6_DECISION_CONFIDENCE_CONFIG.highlight_penalty;
+  const raw = Math.max(0, Math.min(1, positive - penalty));
+  const rawConfidence = Math.round(raw * 100);
+  const legacyConfidence = Math.round(clamp100(Number(zone?.confidence || zone?.score || 0)));
+  const calibratedConfidence = Math.round(clamp100(rawConfidence * 0.72 + legacyConfidence * 0.28));
+  return {
+    raw_confidence: rawConfidence,
+    calibrated_confidence: calibratedConfidence,
+    unified_confidence: calibratedConfidence,
+    confidence_inputs: Object.fromEntries(Object.entries(inputs).map(([key, value]) => [key, round2(value)])),
+    confidence_weights: { ...V6_DECISION_CONFIDENCE_CONFIG },
+  };
+}
+
+function getV6PublicationState(zone = {}, unifiedConfidence = 0) {
+  const hasPublishableEvidence = Boolean(zone?.primary_color?.hex || zone?.hex || zone?.dominant_color?.hex);
+  if (!hasPublishableEvidence || zone?.interpretation === 'unknown' || zone?.publication_decision === 'reject') {
+    return unifiedConfidence <= 20 ? 'rejected' : 'unknown';
+  }
+  if (unifiedConfidence >= 80) return 'confirmed';
+  if (unifiedConfidence >= 65) return 'probable';
+  if (unifiedConfidence >= 45) return 'possible';
+  return 'unknown';
+}
+
+function buildV6EvidenceChain(zone = {}) {
+  const evidence = zone?.evidence_ledger || {};
+  return [
+    { stage: 'detector', present: Array.isArray(evidence?.detector_evidence) && evidence.detector_evidence.length > 0, evidence: evidence?.detector_evidence || [] },
+    { stage: 'region_selection', present: Array.isArray(evidence?.candidate_region_evidence) && evidence.candidate_region_evidence.length > 0, evidence: evidence?.candidate_region_evidence || [] },
+    { stage: 'pixel_refinement', present: Array.isArray(evidence?.crop_pixel_evidence) && evidence.crop_pixel_evidence.length > 0, evidence: evidence?.crop_pixel_evidence || [] },
+    { stage: 'geometry_validation', present: Boolean(zone?.mask_geometry || zone?.bbox), evidence: zone?.mask_geometry || zone?.bbox || null },
+    { stage: 'contamination_analysis', present: Boolean(evidence?.contamination_scores), evidence: evidence?.contamination_scores || null },
+    { stage: 'alternative_candidates', present: Array.isArray(zone?.rejected_alternatives) && zone.rejected_alternatives.length > 0, evidence: zone?.rejected_alternatives || [] },
+    { stage: 'publication_decision', present: true, evidence: zone?.publication_reason || zone?.publication_reasons?.primary || null },
+  ];
+}
+
+function buildV6DecisionMetrics(zone = {}, unifiedConfidence = 0, publicationState = 'unknown') {
+  const alternatives = Array.isArray(zone?.rejected_alternatives) ? zone.rejected_alternatives : [];
+  const palette = Array.isArray(zone?.display_palette) && zone.display_palette.length
+    ? zone.display_palette
+    : Array.isArray(zone?.region_colors) ? zone.region_colors : [];
+  const confidences = palette.map((color) => Number(color?.confidence || 0)).filter(Number.isFinite).sort((a, b) => b - a);
+  const top = confidences[0] || unifiedConfidence;
+  const second = confidences[1] || 0;
+  const pct = palette.map((color) => Number(color?.pct || 0)).filter(Number.isFinite).sort((a, b) => b - a);
+  const dominantMargin = Math.max(0, (pct[0] || 0) - (pct[1] || 0));
+  const certaintyMap = { confirmed: 1, probable: 0.8, possible: 0.6, unknown: 0.3, rejected: 0 };
+  return {
+    decision_complexity: 1 + alternatives.length + Math.max(0, palette.length - 1),
+    candidate_count: Math.max(1, palette.length + alternatives.length),
+    confidence_spread: Math.round(Math.max(0, top - second)),
+    alternative_margin: Math.round(Math.max(0, unifiedConfidence - second)),
+    dominant_margin: round2(dominantMargin),
+    publication_certainty: certaintyMap[publicationState] ?? 0.3,
+  };
+}
+
+function validateV6DecisionConsistency(zone = {}) {
+  const issues = [];
+  if (!Number.isFinite(Number(zone?.unified_confidence))) issues.push('unified_confidence_missing');
+  if (!['confirmed', 'probable', 'possible', 'unknown', 'rejected'].includes(zone?.publication_state)) issues.push('invalid_publication_state');
+  if (!Array.isArray(zone?.evidence_chain) || zone.evidence_chain.length !== 7) issues.push('evidence_chain_incomplete');
+  if (zone?.publication_state === 'confirmed' && Number(zone?.unified_confidence || 0) < 80) issues.push('confirmed_below_threshold');
+  if (zone?.publication_state === 'rejected' && (zone?.primary_color?.hex || zone?.hex)) issues.push('rejected_has_publishable_color');
+  return { valid: issues.length === 0, issues };
+}
+
+function enrichV6FinalizedZone(zoneKey, zone = {}) {
+  const confidence = computeUnifiedZoneConfidence(zone);
+  const publicationState = getV6PublicationState(zone, confidence.unified_confidence);
+  const evidenceChain = buildV6EvidenceChain(zone);
+  const decisionMetrics = buildV6DecisionMetrics(zone, confidence.unified_confidence, publicationState);
+  const calibrationMetadata = {
+    predicted_confidence: confidence.raw_confidence,
+    final_confidence: confidence.unified_confidence,
+    supporting_evidence: evidenceChain.filter((entry) => entry.present).map((entry) => entry.stage),
+    confidence_source: 'formula_v6_unified_confidence',
+    calibration_ready: true,
+  };
+  const enriched = {
+    ...zone,
+    ...confidence,
+    publication_state: publicationState,
+    evidence_chain: evidenceChain,
+    decision_metrics: decisionMetrics,
+    calibration_metadata: calibrationMetadata,
+  };
+  return {
+    ...enriched,
+    decision_consistency: validateV6DecisionConsistency(enriched),
+  };
+}
+
+function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelligence = {}, segmentedRegions = []) {
+  const roleByName = Object.fromEntries((colorRoles || []).map((r) => [r.role, r]));
+  const dominant = visualIntelligence?.dominant_body_color || roleByName.anchor || normalizedColors[0] || null;
+  const secondary = roleByName.support || normalizedColors[1] || dominant;
+  const accent = roleByName.accent || normalizedColors[2] || secondary;
+  const stabilizer = roleByName.stabilizer || normalizedColors[3] || secondary;
+
+  const segmentedByZone = {};
+  const genericSamRegions = [];
+  for (const region of segmentedRegions || []) {
+    const zone = region?.zone && region.zone !== "unknown" ? region.zone : getZoneFromLabel(region?.segment_label);
+    if (zone === "unknown") {
+      genericSamRegions.push(region);
+      continue;
+    }
+    if (!segmentedByZone[zone]) segmentedByZone[zone] = [];
+    segmentedByZone[zone].push(region);
+  }
+
+  const bodyContextBoxes = []
+    .concat(segmentedByZone.upper_garment || [])
+    .concat(segmentedByZone.lower_garment || [])
+    .concat(segmentedByZone.body_garment || [])
+    .map((r) => r?.mask_geometry?.bbox)
+    .filter(Boolean);
+  const outerContextBoxes = (segmentedByZone.outerwear || []).map((r) => r?.mask_geometry?.bbox).filter(Boolean);
+  const genericContext = {
+    body_bbox: mergeNormalizedBBoxes(bodyContextBoxes),
+    outer_bbox: mergeNormalizedBBoxes(outerContextBoxes),
+  };
+  const genericMaskDebug = [];
+  for (const region of genericSamRegions) {
+    const proposal = estimateGenericMaskZone(region, genericContext);
+    const dominantHex = safeHex(region?.dominant_hex || region?.region_colors?.[0]?.hex || "");
+    const candidateDebug = {
+      mask_id: region?.id || null,
+      coverage: round2(Number(region?.mask_geometry?.coverage || region?.coverage || 0)),
+      dominant_hex: dominantHex || null,
+      region_colors: (Array.isArray(region?.region_colors) ? region.region_colors : [])
+        .map((c) => ({ hex: safeHex(c?.hex) || c?.hex || null, pct: round2(Number(c?.pct || 0)) }))
+        .filter((c) => !!c.hex)
+        .slice(0, 4),
+      estimated_positional_role: proposal.estimated_role,
+      proposed_zone: proposal.proposed_zone,
+      proposed_zone_flags: {
+        upper_garment: proposal.proposed_zone === "upper_garment",
+        body_garment: proposal.proposed_zone === "body_garment",
+        outerwear: proposal.proposed_zone === "outerwear",
+        eyewear: proposal.proposed_zone === "eyewear",
+        fur_trim: proposal.proposed_zone === "fur_trim",
+      },
+      accepted: proposal.accepted,
+      accepted_reasons: proposal.acceptance_reasons,
+      rejected_reasons: proposal.rejection_reasons,
+      top_score: proposal.top_score,
+      threshold_used: proposal.threshold_used,
+      expandsPastBody: proposal.expandsPastBody,
+      nearOuterBoundary: proposal.nearOuterBoundary,
+      body_bbox: proposal.body_bbox,
+      bbox: proposal.bbox,
+      final_acceptance_formula: proposal.decision_formula,
+    };
+    genericMaskDebug.push(candidateDebug);
+    console.info("[SAM DEBUG] Generic mask candidate", candidateDebug);
+
+    if (proposal.accepted && proposal.proposed_zone) {
+      if (!segmentedByZone[proposal.proposed_zone]) segmentedByZone[proposal.proposed_zone] = [];
+      segmentedByZone[proposal.proposed_zone].push({
+        ...region,
+        zone: proposal.proposed_zone,
+        generic_zone_proposal: proposal,
+      });
+    }
+  }
+
+  const zoneMap = {
+    upper_garment: dominant,
+    lower_garment: secondary,
+    outerwear: stabilizer,
+    footwear: accent,
+    eyewear: stabilizer,
+    bag: secondary,
+    hair: dominant,
+    lips: accent,
+    fur_trim: stabilizer,
+    logo_text_detail: accent,
+    accessory_jewelry: accent,
+  };
+
+  const zones = {};
+  const regionColorAnalysis = [];
+  const regionSummary = [];
+  const zoneCandidateSummary = [];
+  const dinoLifecycleTrace = [
+    summarizeDinoStageForTrace("garmentEvidenceRegions", segmentedRegions),
+    summarizeDinoStageForTrace("segmentedByZone.accessory_jewelry", segmentedByZone.accessory_jewelry || []),
+  ];
+  const missedZoneDebug = [];
+  const piecePrimaryHexesByZone = Object.fromEntries(
+    ["upper_garment", "lower_garment", "footwear", "accessory_jewelry", "bag"].map((pieceZone) => {
+      const candidates = (segmentedByZone[pieceZone] || []).flatMap((region) => {
+        const colors = Array.isArray(region?.region_colors) ? region.region_colors : [];
+        const intrinsic = colors.find((color) => color?.intrinsic_material_identity === true);
+        return [
+          intrinsic?.hex || intrinsic?.base,
+          region?.dominant_hex || region?.hex,
+          colors[0]?.hex || colors[0]?.base,
+        ].map((hex) => safeHex(hex || "")).filter(Boolean);
+      });
+      return [pieceZone, [...new Set(candidates)]];
+    })
+  );
+
+  for (const [zoneKey, fallbackColor] of Object.entries(zoneMap)) {
+    const zoneRegions = segmentedByZone[zoneKey] || [];
+    if (zoneKey === "accessory_jewelry") {
+      dinoLifecycleTrace.push(summarizeDinoStageForTrace("zoneRegions", zoneRegions));
+    }
+    let regionColors = zoneRegions
+      .flatMap((r) => {
+        const local = Array.isArray(r?.region_colors) ? r.region_colors : [];
+        if (local.length) return local;
+        const fallbackHex = safeHex(r?.dominant_hex || r?.hex);
+        if (!fallbackHex) return [];
+        return [{ hex: fallbackHex, pct: Number(r?.coverage || r?.confidence || 0.2) }];
+      })
+      .filter((c) => !!c.hex);
+    const evidence = getZoneRegionEvidence(zoneRegions);
+    const isDinoSourceType = (sourceType) => sourceType === "grounding_dino" || sourceType === "dino_detection";
+    const hasHeadwearDinoPrimarySignal = (region) => {
+      const fields = [
+        region?.display_zone_label,
+        region?.accessory_type,
+        region?.object_type,
+        region?.label,
+        region?.category,
+        region?.segment_label,
+      ];
+      return fields.some((value) => /headwear|\bhat\b|\bcap\b|beanie/i.test(String(value || "")));
+    };
+    const selectBestDinoPrimaryRegion = (currentZoneKey, currentZoneRegions = []) => {
+      const candidates = currentZoneRegions.filter((region) => isDinoSourceType(region?.source_type));
+      const fallbackRegion = candidates[0] || null;
+      const fallbackScore = { total: -Infinity };
+      if (!fallbackRegion) {
+        return {
+          region: null,
+          debug: {
+            selected_id: null,
+            selected_label: null,
+            selected_display_zone_label: null,
+            selected_accessory_type: null,
+            selected_dominant_hex: null,
+            selected_top_region_hex: null,
+            selected_top_pct: null,
+            candidate_count: 0,
+            reason: "no_dino_candidates",
+          },
+        };
+      }
+
+      const isSaturatedObjectColor = (hex, topPct) => {
+        const safe = safeHex(hex || "");
+        if (!safe) return false;
+        const saturation = getSat(safe);
+        const lightness = getLight(safe);
+        return saturation >= 0.55 && lightness >= 0.25 && lightness <= 0.7 && Number(topPct || 0) >= 0.45;
+      };
+      const isMutedSkinLikeDustyRose = (hex) => {
+        const safe = safeHex(hex || "");
+        if (!safe) return false;
+        const hue = getHue(safe);
+        const saturation = getSat(safe);
+        const lightness = getLight(safe);
+        const isRoseHue = hue >= 330 || hue <= 25;
+        return isRoseHue && saturation >= 0.08 && saturation <= 0.42 && lightness >= 0.35 && lightness <= 0.68;
+      };
+      const hasSaturatedHeadwearColor = currentZoneKey === "accessory_jewelry" && candidates.some((region) => {
+        if (!hasHeadwearDinoPrimarySignal(region)) return false;
+        const topColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
+        const topPct = Number(topColor?.pct || 0);
+        const colorHex = safeHex(region?.dominant_hex || "") || safeHex(topColor?.hex || "");
+        return isSaturatedObjectColor(colorHex, topPct);
+      });
+
+      const scoreRegion = (region) => {
+        const topColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
+        const topPct = Number(topColor?.pct || 0);
+        const confidence = Number(region?.confidence || 0);
+        const rawCoverage = Number(region?.coverage || region?.mask_geometry?.coverage || 0);
+        const normalizedBox = region?.normalized_bbox || null;
+        const normalizedCoverage = normalizedBox
+          ? Number(normalizedBox?.w || 0) * Number(normalizedBox?.h || 0)
+          : rawCoverage <= 1
+            ? rawCoverage
+            : 0;
+        const coverage = Math.max(0, Math.min(1, normalizedCoverage));
+        const dominantHex = safeHex(region?.dominant_hex || "");
+        const topHex = safeHex(topColor?.hex || "");
+        const evidenceHex = dominantHex || topHex;
+        const hasDominantHex = !!dominantHex;
+        const hasHeadwearSignal = currentZoneKey === "accessory_jewelry" && hasHeadwearDinoPrimarySignal(region);
+        const saturatedObjectScore =
+          currentZoneKey === "accessory_jewelry" && isSaturatedObjectColor(evidenceHex, topPct)
+            ? 180 + (topPct * 120) + (getSat(evidenceHex) * 80)
+            : 0;
+        const mutedPenalty =
+          currentZoneKey === "accessory_jewelry" &&
+          hasSaturatedHeadwearColor &&
+          hasHeadwearSignal &&
+          isMutedSkinLikeDustyRose(evidenceHex)
+            ? 220
+            : 0;
+        const total = currentZoneKey === "accessory_jewelry"
+          ? (
+            (hasHeadwearSignal ? 150 : 0) +
+            (hasDominantHex ? 60 : 0) +
+            (topPct * 500) +
+            (confidence * 120) +
+            (coverage * 100) +
+            saturatedObjectScore -
+            mutedPenalty
+          )
+          : (
+            (hasHeadwearSignal ? 1000 : 0) +
+            (topPct * 100) +
+            (confidence * 10) +
+            (coverage * 10) +
+            (hasDominantHex ? 1 : 0)
+          );
+        return {
+          topPct,
+          confidence,
+          coverage,
+          hasDominantHex,
+          hasHeadwearSignal,
+          saturatedObjectScore,
+          mutedPenalty,
+          total,
+        };
+      };
+
+      let bestRegion = fallbackRegion;
+      let bestScore = scoreRegion(fallbackRegion) || fallbackScore;
+      for (const candidate of candidates.slice(1)) {
+        const candidateScore = scoreRegion(candidate);
+        if (candidateScore.total > bestScore.total) {
+          bestRegion = candidate;
+          bestScore = candidateScore;
+        }
+      }
+
+      const fallbackWasSelected = bestRegion === fallbackRegion;
+      const topColor = Array.isArray(bestRegion?.region_colors) ? bestRegion.region_colors[0] : null;
+      return {
+        region: bestRegion,
+        debug: {
+          selected_id: bestRegion?.id || bestRegion?.region_id || bestRegion?.detection_id || null,
+          selected_label: bestRegion?.label || bestRegion?.segment_label || null,
+          selected_display_zone_label: bestRegion?.display_zone_label || null,
+          selected_accessory_type: bestRegion?.accessory_type || null,
+          selected_dominant_hex: safeHex(bestRegion?.dominant_hex || "") || null,
+          selected_top_region_hex: safeHex(topColor?.hex || "") || null,
+          selected_top_pct: topColor?.pct ?? null,
+          candidate_count: candidates.length,
+          candidate_scores: currentZoneKey === "accessory_jewelry"
+            ? candidates.map((candidate) => {
+              const candidateTopColor = Array.isArray(candidate?.region_colors) ? candidate.region_colors[0] : null;
+              const candidateScore = scoreRegion(candidate);
+              return {
+                id: candidate?.id || candidate?.region_id || candidate?.detection_id || null,
+                label: candidate?.label || candidate?.segment_label || null,
+                dominant_hex: safeHex(candidate?.dominant_hex || "") || null,
+                top_hex: safeHex(candidateTopColor?.hex || "") || null,
+                top_pct: candidateTopColor?.pct ?? null,
+                confidence: candidateScore.confidence,
+                coverage: candidateScore.coverage,
+                headwear_signal: candidateScore.hasHeadwearSignal,
+                saturated_object_score: round2(candidateScore.saturatedObjectScore),
+                muted_penalty: round2(candidateScore.mutedPenalty),
+                total: round2(candidateScore.total),
+              };
+            })
+            : undefined,
+          reason: fallbackWasSelected
+            ? "fallback_first_dino_candidate_retained"
+            : bestScore.hasHeadwearSignal
+              ? "selected_highest_scoring_headwear_dino_candidate"
+              : "selected_highest_scoring_dino_candidate",
+        },
+      };
+    };
+    const refinedRegionColors = zoneRegions
+      .filter((region) => !isDinoSourceType(region?.source_type))
+      .flatMap((region) => Array.isArray(region?.region_colors) ? region.region_colors : []);
+    let rawDinoRegionColors = zoneRegions
+      .filter((region) => isDinoSourceType(region?.source_type))
+      .flatMap((region) => Array.isArray(region?.region_colors) ? region.region_colors : []);
+    const dinoOnlyZone =
+      zoneRegions.length > 0 &&
+      zoneRegions.every((region) => isDinoSourceType(region?.source_type));
+    const dinoPrimarySelection = dinoOnlyZone ? selectBestDinoPrimaryRegion(zoneKey, zoneRegions) : { region: null, debug: null };
+    const dinoPrimaryRegion = dinoPrimarySelection.region;
+    // Large generic footwear boxes often include the trouser hem. Once the
+    // best object-local box is selected, neighboring boxes are diagnostic only.
+    if (zoneKey === "footwear" && dinoPrimaryRegion) {
+      rawDinoRegionColors = Array.isArray(dinoPrimaryRegion?.region_colors)
+        ? dinoPrimaryRegion.region_colors
+        : [];
+      regionColors = rawDinoRegionColors;
+    }
+    const dinoPrimaryHex = dinoOnlyZone
+      ? safeHex(dinoPrimaryRegion?.dominant_hex || dinoPrimaryRegion?.region_colors?.[0]?.hex || "")
+      : null;
+    const preserveDinoZoneColor =
+      ["accessory_jewelry", "bag", "eyewear", "footwear", "lower_garment", "upper_garment"].includes(zoneKey) &&
+      dinoOnlyZone &&
+      !!dinoPrimaryHex;
+
+    const hasColorRegionEvidence = zoneRegions.some((region) => {
+      const sourceType = region?.source_type;
+      const isDinoRegion = sourceType === "grounding_dino" || sourceType === "dino_detection";
+      const explicitRegionColors = Array.isArray(region?.region_colors) ? region.region_colors : [];
+      return !isDinoRegion && explicitRegionColors.length > 0;
+    });
+    const regionClusters = buildColorClusters(regionColors);
+    const consensusCluster = regionClusters[0] || null;
+    const chosenColor = preserveDinoZoneColor
+      ? { ...fallbackColor, hex: dinoPrimaryHex, pct: dinoPrimaryRegion?.region_colors?.[0]?.pct || dinoPrimaryRegion?.coverage || dinoPrimaryRegion?.confidence || consensusCluster?.pct || fallbackColor?.pct }
+      : consensusCluster?.base
+        ? { ...fallbackColor, hex: consensusCluster.base, pct: consensusCluster.pct }
+        : fallbackColor;
+    const chosenPct = Number(chosenColor?.pct || 0.25);
+    const normalizedChosenPct = chosenPct > 1 ? chosenPct / 100 : chosenPct;
+    const computedScore = Math.min(100, Math.max(45, Math.round(normalizedChosenPct * 100)));
+    const promoteFallback = shouldPromoteFallbackZone(zoneKey, evidence, computedScore);
+    const hasExplicitEvidence = hasExplicitZoneRegionEvidence(zoneKey, zoneRegions, evidence);
+    const strongEyewearSignal = zoneKey === "eyewear" ? hasStrongEyewearRegionSignal(zoneRegions, evidence) : false;
+    const strongOuterwearSignal = zoneKey === "outerwear" ? hasStrongOuterwearRegionSignal(zoneRegions, evidence) : false;
+    const strongSignalHelper = zoneKey === "eyewear" ? strongEyewearSignal : zoneKey === "outerwear" ? strongOuterwearSignal : false;
+    const allowZoneFromRegionOnly = ["bag", "accessory_jewelry", "footwear", "logo_text_detail", "fur_trim", "outerwear"].includes(zoneKey);
+    const useRegionCandidate = (hasExplicitEvidence || preserveDinoZoneColor) && zoneRegions.length > 0;
+    const zoneData = useRegionCandidate
+      ? buildZoneCandidate(chosenColor, zoneKey, computedScore)
+      : promoteFallback && !allowZoneFromRegionOnly
+        ? buildZoneCandidate(chosenColor, zoneKey, computedScore)
+        : null;
+    const dominantDarkBodyHex =
+      zones.upper_garment?.dominant_color?.hex ||
+      zones.upper_garment?.hex ||
+      zones.body_garment?.dominant_color?.hex ||
+      zones.body_garment?.hex ||
+      null;
+    const zoneRead = inferZoneColorRead(
+      zoneKey,
+      zoneData,
+      normalizedColors,
+      regionColors,
+      hasColorRegionEvidence || preserveDinoZoneColor,
+      {
+        dominantDarkBodyHex,
+        preservedDinoHex: preserveDinoZoneColor ? dinoPrimaryHex : null,
+        preserveDinoZoneColor,
+        zoneColorSource: preserveDinoZoneColor ? "dino_primary" : consensusCluster?.base ? "cluster" : "fallback",
+        dinoPrimaryRegionSelection: dinoPrimarySelection.debug,
+        selectedDinoRegionColors: Array.isArray(dinoPrimaryRegion?.region_colors) ? dinoPrimaryRegion.region_colors : [],
+        refinedRegionColors,
+        rawDinoRegionColors,
+        otherGarmentPrimaryHexes: Object.entries(piecePrimaryHexesByZone)
+          .filter(([pieceZone]) => ["upper_garment", "lower_garment"].includes(pieceZone) && pieceZone !== zoneKey)
+          .flatMap(([, hexes]) => hexes),
+        otherOwnedPiecePrimaryHexes: Object.entries(piecePrimaryHexesByZone)
+          .filter(([pieceZone]) => ["footwear", "accessory_jewelry", "bag"].includes(pieceZone))
+          .flatMap(([, hexes]) => hexes),
+        evidence,
+      }
+    );
+    if (["eyewear", "outerwear", "fur_trim"].includes(zoneKey)) {
+      const segmentLabels = zoneRegions.map((r) => r?.segment_label || r?.label || r?.zone || "unknown");
+      const regionColorSummary = zoneRegions.map((r) => ({
+        segment_label: r?.segment_label || r?.label || r?.zone || "unknown",
+        coverage: round2(Number(r?.coverage || 0)),
+        confidence: round2(Number(r?.confidence || 0)),
+        region_colors: (Array.isArray(r?.region_colors) ? r.region_colors : [])
+          .map((c) => ({
+            hex: safeHex(c?.hex) || c?.hex || null,
+            pct: round2(Number(c?.pct || 0)),
+            name: c?.name || null,
+          }))
+          .filter((c) => !!c.hex),
+      }));
+      missedZoneDebug.push({
+        zone: zoneKey,
+        region_count: evidence.region_count,
+        coverage: evidence.coverage,
+        weighted_confidence: evidence.weighted_confidence,
+        color_count: evidence.color_count,
+        has_explicit_zone_region_evidence: hasExplicitEvidence,
+        strong_signal_helper: strongSignalHelper,
+        strong_signal_helper_name:
+          zoneKey === "eyewear"
+            ? "hasStrongEyewearRegionSignal"
+            : zoneKey === "outerwear"
+              ? "hasStrongOuterwearRegionSignal"
+              : "none",
+        zone_data_created: !!zoneData,
+        zone_data_hex: zoneData?.hex || null,
+        infer_zone_unknown: zoneRead?.interpretation === "unknown",
+        infer_zone_unknown_reason: zoneRead?._debug?.unknown_reason || null,
+        suppression_gates: zoneRead?._debug?.suppression_gates || null,
+        infer_zone_strong_signal_overrides: zoneRead?._debug?.strong_signal_overrides || null,
+        segment_labels: segmentLabels,
+        region_colors_summary: regionColorSummary,
+      });
+    }
+    regionSummary.push({
+      zone: zoneKey,
+      region_count: evidence.region_count,
+      coverage: evidence.coverage,
+      weighted_confidence: evidence.weighted_confidence,
+      color_count: evidence.color_count,
+    });
+    zoneCandidateSummary.push({
+      zone: zoneKey,
+      has_sam_region: hasColorRegionEvidence,
+      promote_fallback: promoteFallback,
+      score: computedScore,
+      selected_hex: zoneData?.hex || null,
+      confidence: zoneRead?.confidence || 0,
+      zone_color_source: zoneRead?._debug?.zone_color_source || null,
+      preserved_dino_hex: zoneRead?._debug?.preserved_dino_hex || null,
+    });
+
+    const signatureColor = deriveSignatureColorDisplayRead(zoneRead, zoneKey);
+    const accessoryDisplayMetadata = zoneKey === "accessory_jewelry"
+      ? inferAccessoryDisplayMetadata(
+          zoneRegions.flatMap((region) => [
+            region?.segment_label,
+            region?.label,
+            region?.category,
+          ])
+        )
+      : {};
+
+    zones[zoneKey] = {
+      ...(zoneData || {}),
+      ...zoneRead,
+      signature_color: signatureColor,
+      ...accessoryDisplayMetadata,
+    };
+
+    const headwearDebugValues = buildHeadwearDebugValues(zones[zoneKey]);
+    if (headwearDebugValues) {
+      zones[zoneKey].headwear_debug_values = headwearDebugValues;
+    }
+
+    const dominantObj = buildSegmentedColorObject({
+      color: { hex: zoneRead?.dominant_color?.hex, pct: zoneRead?.dominant_color?.pct },
+      zone: zoneKey,
+      role: "dominant",
+      sourceType: hasColorRegionEvidence ? "sam_segment" : "global_palette",
+      segmentLabel: zoneRegions[0]?.segment_label || zoneKey,
+      confidence: zoneRead?.confidence || zoneData?.score || 0,
+    });
+
+    if (dominantObj) regionColorAnalysis.push(dominantObj);
+
+    for (const support of zoneRead.support_colors || []) {
+      const obj = buildSegmentedColorObject({
+        color: support,
+        zone: zoneKey,
+        role: "support",
+        sourceType: hasColorRegionEvidence ? "sam_segment" : "global_palette",
+        segmentLabel: zoneRegions[0]?.segment_label || zoneKey,
+        confidence: Math.max(40, (zoneRead?.confidence || 0) - 12),
+      });
+      if (obj) regionColorAnalysis.push(obj);
+    }
+
+    for (const accentColor of zoneRead.accent_colors || []) {
+      const obj = buildSegmentedColorObject({
+        color: accentColor,
+        zone: zoneKey,
+        role: "accent",
+        sourceType: hasColorRegionEvidence ? "sam_segment" : "global_palette",
+        segmentLabel: zoneRegions[0]?.segment_label || zoneKey,
+        confidence: Math.max(35, (zoneRead?.confidence || 0) - 16),
+      });
+      if (obj) regionColorAnalysis.push(obj);
+    }
+  }
+
+  const onePieceDecision = areLikelyOnePiece(zones, segmentedByZone);
+  if (onePieceDecision.decision) {
+    const baseBody = zones.upper_garment?.hex ? zones.upper_garment : zones.lower_garment;
+    const bodyCandidate = baseBody
+      ? buildZoneCandidate(
+          { hex: baseBody.hex, pct: Math.max(baseBody?.pct || 0.35, 0.35), name: baseBody?.name },
+          "body_garment",
+          Math.max(60, onePieceDecision.confidence)
+        )
+      : null;
+    const bodyRead = inferZoneColorRead("body_garment", bodyCandidate, normalizedColors, [], false);
+    zones.body_garment = {
+      ...bodyCandidate,
+      ...bodyRead,
+      silhouette: "one_piece",
+      one_piece_confidence: onePieceDecision.confidence,
+    };
+    zones.one_piece = {
+      zone: "one_piece",
+      interpretation: "one_piece",
+      confidence: onePieceDecision.confidence,
+      confidence_breakdown: buildConfidenceBreakdown({
+        computedScore: onePieceDecision.confidence,
+        finalConfidence: onePieceDecision.confidence,
+      }),
+      evidence: onePieceDecision.reason,
+      lab_distance: onePieceDecision.lab_distance,
+    };
+
+    if (zones.lower_garment) {
+      const lowerSuppressedConfidence = Math.min(Number(zones.lower_garment?.confidence || 0), 45);
+      zones.lower_garment = withConfidenceBreakdownFinalConfidence({
+        ...zones.lower_garment,
+        hex: null,
+        interpretation: "unknown",
+        confidence: lowerSuppressedConfidence,
+        dominant_color: null,
+        support_colors: [],
+        accent_colors: [],
+        one_piece_suppressed: true,
+      }, lowerSuppressedConfidence);
+    }
+  }
+
+  const dedupeResult = dedupeDarkNeutralZoneReuse(zones);
+  const garmentZoneFilterResult = filterGarmentZoneOutput(dedupeResult.zones);
+  const finalZones = Object.fromEntries(
+    Object.entries(garmentZoneFilterResult.zones).map(([zoneKey, zone]) => [
+      zoneKey,
+      enrichV6FinalizedZone(zoneKey, zone),
+    ])
+  );
+  const denimSummary = {
+    lower_zone_interpretation: finalZones?.lower_garment?.interpretation || "unknown",
+    lower_zone_confidence: Number(finalZones?.lower_garment?.confidence || 0),
+    lower_zone_hex: finalZones?.lower_garment?.hex || null,
+  };
+
+  console.info("[INTERPRET DEBUG] segmented region summary", regionSummary);
+  console.info("[INTERPRET DEBUG] zone candidate summary", zoneCandidateSummary);
+  if (missedZoneDebug.length) {
+    console.info("[INTERPRET DEBUG] missed zone suppression diagnostics", missedZoneDebug);
+  }
+  if (genericMaskDebug.length) {
+    console.info("[INTERPRET DEBUG] generic mask proposal diagnostics", genericMaskDebug);
+  }
+  console.info("[INTERPRET DEBUG] one_piece decision summary", onePieceDecision);
+  console.info("[INTERPRET DEBUG] denim decision summary", denimSummary);
+  if (garmentZoneFilterResult.removed_non_garment_zones.length) {
+    console.info("[INTERPRET DEBUG] removed non-garment zones", garmentZoneFilterResult.removed_non_garment_zones);
+  }
+  console.info(
+    "[INTERPRET DEBUG] final selected zones with confidence",
+    Object.fromEntries(Object.entries(finalZones).map(([k, v]) => [k, Number(v?.confidence || v?.score || 0)]))
+  );
+  console.info("[DINO TRACE] dino_4 inferGarmentZones lifecycle", {
+    stages: dinoLifecycleTrace,
+    change_summary: buildDinoLifecycleChangeSummary(dinoLifecycleTrace),
+  });
+
+  return {
+    version: "garment_zone_v3",
+    segmented_regions: segmentedRegions,
+    zones: finalZones,
+    confidence_breakdown: Object.fromEntries(
+      Object.entries(finalZones).map(([key, value]) => [key, value?.confidence_breakdown || null])
+    ),
+    decision_consistency: Object.fromEntries(
+      Object.entries(finalZones).map(([key, value]) => [key, value?.decision_consistency || { valid: false, issues: ["missing_decision_consistency"] }])
+    ),
+    decision_metrics: Object.fromEntries(
+      Object.entries(finalZones).map(([key, value]) => [key, value?.decision_metrics || null])
+    ),
+    confidence_calibration: Object.fromEntries(
+      Object.entries(finalZones).map(([key, value]) => [key, value?.calibration_metadata || null])
+    ),
+    region_color_analysis: regionColorAnalysis,
+    dino_lifecycle_trace: {
+      target_id: "dino_4",
+      stages: dinoLifecycleTrace,
+      change_summary: buildDinoLifecycleChangeSummary(dinoLifecycleTrace),
+    },
+    generic_mask_debug: genericMaskDebug,
+    removed_non_garment_zones: garmentZoneFilterResult.removed_non_garment_zones,
+  };
+}
+
+function colorClusterWeight(color = {}) {
+  if (color?.pct === undefined || color?.pct === null) return 1;
+  const weight = Number(color.pct);
+  return Number.isFinite(weight) ? weight : 1;
+}
+
+export function buildColorClusters(colors = []) {
+
+  const clusters = [];
+
+  for (const c of colors || []) {
+    const hex = safeHex(c?.hex);
+    if (!hex) continue;
+    const weight = colorClusterWeight(c);
+
+    let placed = false;
+
+    for (const cluster of clusters) {
+      const dist = colorDistanceLab(hex, cluster.base);
+      if (dist < 20) {
+        cluster.colors.push(c);
+        cluster.weight += weight;
+        placed = true;
+        break;
+      }
+    }
+
+    if (!placed) {
+      clusters.push({
+        base: hex,
+        colors: [c],
+        weight,
+      });
+    }
+  }
+
+  const weightedClusters = clusters.filter((c) => Number(c.weight || 0) > 0);
+  const total = weightedClusters.reduce((sum, c) => sum + Number(c.weight || 0), 0) || 1;
+
+  return weightedClusters
+    .map((c) => ({
+      ...c,
+      pct: c.weight / total,
+    }))
+    .sort((a, b) => b.pct - a.pct);
+}
+
+function isMultiColor(clusters = []) {
+  if (clusters.length < 3) return false;
+  const topPct = Number(clusters?.[0]?.pct || 0);
+  return topPct < 0.55;
+}
+
+function isDenimLike(clusters = []) {
+  const blueClusters = clusters.filter((c) => {
+    const h = getHue(c.base);
+    return h >= 200 && h <= 250;
+  });
+
+  const supportiveBlueClusters = clusters.filter((c) => {
+    const h = getHue(c.base);
+    return h >= 190 && h <= 260 && Number(c?.pct || 0) >= 0.12;
+  });
+  const blueCoverage = blueClusters.reduce((sum, c) => sum + Number(c?.pct || 0), 0);
+  const meaningfulCoverage = clusters.reduce((sum, c) => sum + Number(c?.pct || 0), 0) >= 0.55;
+  const lowChroma = clusters.every((c) => {
+    const chromaMag = Number(getPerceptualTraits(c.base)?.chroma_magnitude || 0);
+    const light = getLight(c.base);
+    return chromaMag < 44 && light > 0.2;
+  });
+
+  const midLight = clusters.some((c) => {
+    const l = getLight(c.base);
+    return l >= 0.38 && l <= 0.82;
+  });
+
+  return blueClusters.length >= 2 && supportiveBlueClusters.length >= 2 && blueCoverage >= 0.45 && meaningfulCoverage && lowChroma && midLight;
+}
+
+export function resolveConsumerZonePrimary(type, zoneData, clusters = [], colorEvidence = null) {
+  const finalizedHex = safeHex(zoneData?.dominant_color?.hex || zoneData?.hex || "");
+  const rawHex = safeHex(clusters?.[0]?.base || "");
+  const signatureHex = safeHex(zoneData?.signature_color?.hex || "");
+  const confidence = Number(zoneData?.confidence || zoneData?.score || 0);
+  const minimumConfidence = type === "lower_garment" ? 60 : type === "upper_garment" ? 45 : 56;
+  const consistency = zoneData?.decision_consistency;
+  const consistencyValid = consistency ? consistency.valid !== false : true;
+  const publicationAccepted = zoneData?.publication_decision !== "reject" && zoneData?.validation_decision !== "rejected";
+  const finalizedVsRawDistance = finalizedHex && rawHex ? colorDistanceLab(finalizedHex, rawHex) : null;
+  const signatureCorroborates = finalizedHex && signatureHex ? colorDistanceLab(finalizedHex, signatureHex) < 18 : false;
+  const supportCorroborates = finalizedHex && Array.isArray(zoneData?.support_colors)
+    ? zoneData.support_colors.some((c) => safeHex(c?.hex) && colorDistanceLab(finalizedHex, c.hex) < 18)
+    : false;
+  const locallyConsistent = finalizedVsRawDistance === null || finalizedVsRawDistance < 18;
+
+const v3Publication = zoneData?.color_publication_v3;
+const v3PublishedHex = safeHex(v3Publication?.hex || "");
+const v3PublicationApplied =
+  v3Publication?.action === "publish_v3" &&
+  v3Publication?.applied_to_zone === true &&
+  finalizedHex &&
+  v3PublishedHex === finalizedHex;
+
+if (v3PublicationApplied) {
+  return {
+    status: "resolved",
+    hex: finalizedHex,
+    source: "color_evidence_v3_publication",
+    confidence,
+    finalized_vs_raw_lab: finalizedVsRawDistance,
+    corroboration: {
+      signature: signatureCorroborates,
+      support: supportCorroborates,
+      raw_agreement: locallyConsistent,
+    },
+    publication: {
+      action: v3Publication.action,
+      reason: v3Publication.reason || null,
+      source: v3Publication.source || "color_evidence_v3",
+    },
+  };
+}
+  const corroborated = signatureCorroborates || supportCorroborates || locallyConsistent;
+  const finalizedTrusted = !!finalizedHex && confidence >= minimumConfidence && consistencyValid && publicationAccepted && corroborated;
+  const evidenceHex = safeHex(colorEvidence?.consensus_hex || "");
+  const evidenceSupported = colorEvidence?.decision_state === "supported" && Number(colorEvidence?.region_purity || 0) >= 0.80 && Number(colorEvidence?.family_consensus || 0) >= 0.80;
+  const evidenceVsRawDistance = evidenceHex && rawHex ? colorDistanceLab(evidenceHex, rawHex) : null;
+  const evidenceVsFinalizedDistance = evidenceHex && finalizedHex ? colorDistanceLab(evidenceHex, finalizedHex) : null;
+  const rawTraits = rawHex ? getPerceptualTraits(rawHex) : null;
+  const rawLooksDarkNeutral = !!rawHex && (getLight(rawHex) <= 0.22 || Number(rawTraits?.chroma_magnitude || 0) < 18);
+  const evidenceCanCorrectDarkContamination = evidenceSupported && !!evidenceHex && rawLooksDarkNeutral && evidenceVsRawDistance !== null && evidenceVsRawDistance >= 18 && (!finalizedHex || evidenceVsFinalizedDistance < 18);
+
+  if (evidenceCanCorrectDarkContamination) {
+    return {
+      status: "resolved",
+      hex: evidenceHex,
+      source: "color_evidence_v2_consensus",
+      confidence,
+      finalized_vs_raw_lab: finalizedVsRawDistance,
+      evidence: {
+        region_purity: Number(colorEvidence.region_purity || 0),
+        family_consensus: Number(colorEvidence.family_consensus || 0),
+        consensus_family: colorEvidence.consensus_family || null,
+        consensus_hex: evidenceHex,
+        evidence_vs_raw_lab: evidenceVsRawDistance,
+        evidence_vs_finalized_lab: evidenceVsFinalizedDistance,
+      },
+      corroboration: { signature: signatureCorroborates, support: supportCorroborates, raw_agreement: locallyConsistent },
+    };
+  }
+
+  if (finalizedTrusted) {
+    return {
+      status: "resolved",
+      hex: finalizedHex,
+      source: "finalized_zone_primary",
+      confidence,
+      finalized_vs_raw_lab: finalizedVsRawDistance,
+      corroboration: { signature: signatureCorroborates, support: supportCorroborates, raw_agreement: locallyConsistent },
+    };
+  }
+
+  if (rawHex) {
+    return {
+      status: finalizedHex && finalizedVsRawDistance >= 18 ? "uncertain" : "fallback",
+      hex: rawHex,
+      source: "local_cluster_fallback",
+      confidence,
+      finalized_vs_raw_lab: finalizedVsRawDistance,
+      corroboration: { signature: signatureCorroborates, support: supportCorroborates, raw_agreement: locallyConsistent },
+    };
+  }
+
+  return {
+    status: "uncertain",
+    hex: finalizedHex || null,
+    source: finalizedHex ? "low_confidence_finalized" : "no_color_evidence",
+    confidence,
+    finalized_vs_raw_lab: finalizedVsRawDistance,
+    corroboration: { signature: signatureCorroborates, support: supportCorroborates, raw_agreement: locallyConsistent },
+  };
+}
+
+function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceByZone = {} }) {
+  const z = zones || {};
+  const items = [];
+
+  function getZoneColors(zoneHex) {
+    if (!zoneHex) return [];
+    return (normalizedColors || []).filter((c) => colorDistanceLab(c.hex, zoneHex) < 22);
+  }
+
+  function buildItem(type, zoneData) {
+    const zoneHex = zoneData?.hex || zoneData?.primary_color?.hex || zoneData?.dominant_color?.hex || null;
+    if (!zoneHex) return null;
+    if (
+      ["lower_garment", "footwear"].includes(type) &&
+      Number(zoneData?.confidence || 0) < 56 &&
+      zoneData?.semantic_confirmed !== true
+    ) {
+      return null;
+    }
+    if (
+      type === "outerwear" &&
+      Number(zoneData?.confidence || 0) < 52 &&
+      Number(zoneData?.cluster_count || 0) < 2
+    ) {
+      return null;
+    }
+
+    const zoneColors = getZoneColors(zoneHex);
+    const clusterInput = Array.isArray(zoneData?.support_colors) && zoneData.support_colors.length
+      ? [{ hex: zoneHex, pct: zoneData.pct || 0.5 }, ...zoneData.support_colors]
+      : zoneColors.length
+        ? zoneColors
+        : [{ ...zoneData, hex: zoneHex }];
+    const clusters = buildColorClusters(clusterInput);
+    const rawDominant = clusters[0] || { base: zoneHex, pct: 1 };
+    const consumerColorResolution = resolveConsumerZonePrimary(type, zoneData, clusters, colorEvidenceByZone?.[type] || null);
+    const dominant = { ...rawDominant, base: consumerColorResolution.hex || rawDominant.base };
+
+    const dominantTraits = getPerceptualTraits(dominant.base);
+
+    let material = "mixed_material";
+    let materialConfidence = 50;
+    let displayLabel = zoneData.display_label || zoneData.name || getColorName(dominant.base);
+
+    if (type === "footwear" && zoneData?.semantic_confirmed === true) {
+      material = "mixed_material";
+      materialConfidence = 50;
+      displayLabel = "Footwear";
+    } else if (isDenimLike(clusters) && type === "lower_garment") {
+      material = "denim";
+      materialConfidence = 84;
+      displayLabel = "Light Wash Denim";
+    } else if (
+      isMultiColor(clusters) &&
+      type === "footwear" &&
+      Number(clusters[0]?.pct || 0) < 0.7 &&
+      /sneaker/.test(String([
+        zoneData?.display_label,
+        zoneData?.name,
+        zoneData?.label,
+        zoneData?.garment_type,
+        zoneData?.category,
+      ].filter(Boolean).join(" ")).toLowerCase())
+    ) {
+      material = "mixed_material";
+      materialConfidence = 76;
+      displayLabel = "Multicolor Sneaker";
+    } else if (isMultiColor(clusters) && type === "accessory") {
+      material = "patterned_textile";
+      materialConfidence = 74;
+      displayLabel = "Multicolor Accessory";
+    } else if (type === "fur_trim") {
+      material = "fur";
+      materialConfidence = 68;
+    } else if (type === "logo_text_detail" && dominantTraits.chroma_magnitude < 24) {
+      material = "cotton";
+      materialConfidence = 58;
+    } else if (type === "eyewear" && getLight(dominant.base) < 0.32) {
+      material = "nylon";
+      materialConfidence = 62;
+    } else if (type === "accessory_jewelry" && zoneData?.accessory_type === "belt") {
+      material = "mixed_material";
+      materialConfidence = 50;
+    } else if (type === "lower_garment" && zoneData?.semantic_confirmed === true) {
+      material = "mixed_material";
+      materialConfidence = 50;
+    } else if (type === "accessory_jewelry" && dominantTraits.chroma_magnitude < 20 && getLight(dominant.base) > 0.45) {
+      material = "metallic";
+      materialConfidence = 64;
+    } else if (dominantTraits.temperature === "cool" && dominantTraits.chroma_magnitude < 30) {
+      material = "wool";
+      materialConfidence = 60;
+    } else if (dominantTraits.chroma_magnitude > 48) {
+      material = "knit";
+      materialConfidence = 58;
+    } else if (type === "outerwear") {
+      material = getLight(dominant.base) < 0.4 ? "leather" : "cotton";
+      materialConfidence = 61;
+    }
+
+    if (type === "footwear" && zoneData?.semantic_confirmed !== true && getLight(dominant.base) < 0.35) {
+      material = material === "mixed_material" ? "rubber" : "leather";
+      materialConfidence = Math.max(materialConfidence, 66);
+    }
+
+    if (type === "footwear") {
+      const tanLike = clusters.some((c) => {
+        const h = getHue(c.base);
+        const l = getLight(c.base);
+        const s = getSat(c.base);
+        return h >= 25 && h <= 55 && l >= 0.34 && l <= 0.72 && s >= 0.2;
+      });
+      const tanCoverage = clusters
+        .filter((c) => {
+          const h = getHue(c.base);
+          return h >= 25 && h <= 55;
+        })
+        .reduce((sum, c) => sum + Number(c?.pct || 0), 0);
+      if (/tan|camel|beige|luxury/i.test(displayLabel) && (!tanLike || tanCoverage < 0.42)) {
+        displayLabel = getColorName(dominant.base);
+      }
+      if (Number(zoneData?.confidence || 0) < 58 && clusters.length < 2 && zoneData?.semantic_confirmed !== true) {
+        return null;
+      }
+    }
+
+    const zoneDominantColor = zoneData?.accessory_type === "belt" && zoneData?.dominant_color?.color_identity
+      ? {
+          ...zoneData.dominant_color,
+          hex: safeHex(zoneData.dominant_color.hex),
+          pct: round2(zoneData.dominant_color.pct || 0),
+        }
+      : compactColorRead(zoneData?.dominant_color);
+    const shouldKeepZoneDominantIdentity =
+      ["accessory_jewelry", "bag", "eyewear", "headwear"].includes(type) &&
+      !!zoneDominantColor?.name &&
+      safeHex(zoneDominantColor.hex) === safeHex(dominant.base) &&
+      (zoneData?.accessory_type === "belt" || shouldPreserveDominantAccessoryColor(type, clusters));
+    const dominantColor = shouldKeepZoneDominantIdentity
+      ? zoneDominantColor
+      : withColorIdentity({
+          hex: dominant.base,
+          name: getColorName(dominant.base),
+          pct: round2(dominant.pct),
+        });
+    if (shouldKeepZoneDominantIdentity) {
+      displayLabel = zoneDominantColor.name;
+    }
+    const primaryColor = compactColorRead(dominantColor);
+    if (zoneData?.accessory_type === "belt" && dominantColor?.color_identity && primaryColor) {
+      primaryColor.name = dominantColor.name;
+      primaryColor.color_identity = dominantColor.color_identity;
+    }
+    const supportColors = clusters.slice(1, 3).map((c) => ({
+      hex: c.base,
+      name: getColorName(c.base),
+      pct: round2(c.pct),
+    }));
+    const accentColors = clusters.slice(3, 5).map((c) => ({
+      hex: c.base,
+      name: getColorName(c.base),
+      pct: round2(c.pct),
+    }));
+    const itemMode = zoneData.mode || zoneData.read_mode || (isMultiColor(clusters) ? "multicolor" : "single_color");
+
+    return {
+      type,
+      confidence: zoneData.score || 60,
+      material,
+      material_confidence: materialConfidence,
+      cluster_count: clusters.length,
+      display_label: displayLabel,
+      display_zone_label: zoneData.display_zone_label || null,
+      accessory_type: zoneData.accessory_type || null,
+      object_type: zoneData.object_type || null,
+      headwear_debug_values: buildHeadwearDebugValues(zoneData),
+      consumer_color_resolution: consumerColorResolution,
+      dominant_color: dominantColor,
+      primary_color: primaryColor,
+      color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
+      support_colors: supportColors,
+      accent_colors: accentColors,
+      ...buildGarmentColorProfile({
+        zoneKey: type,
+        mode: itemMode,
+        dominantColor,
+        supportColors,
+        accentColors,
+      }),
+      // Accuracy decision owns the consumer-facing primary after profile metadata is merged.
+      dominant_color: dominantColor,
+      primary_color: primaryColor,
+      color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
+    };
+  }
+
+  items.push(buildItem("upper_garment", z.upper_garment));
+  items.push(buildItem("lower_garment", z.lower_garment));
+  items.push(buildItem("outerwear", z.outerwear));
+  items.push(buildItem("footwear", z.footwear));
+  items.push(buildItem("eyewear", z.eyewear));
+  items.push(buildItem("bag", z.bag));
+  items.push(buildItem("hair", z.hair));
+  items.push(buildItem("lips", z.lips));
+  items.push(buildItem("fur_trim", z.fur_trim));
+  items.push(buildItem("logo_text_detail", z.logo_text_detail));
+  items.push(buildItem("accessory_jewelry", z.accessory_jewelry));
+
+  return {
+    version: "garment_scaffold_v2",
+    detected_items: items.filter(Boolean),
+  };
+}
+/* =========================
+   CATEGORY / MODE HELPERS
+========================= */
+
+function familyBiasForCategory(category) {
+  const c = normalizeCategoryLabel(category, "piece");
+  const defaults = {
+    jacket: ["anchor", "support", "stabilizer", "accent"],
+    shirt: ["support", "anchor", "stabilizer", "accent"],
+    sweater: ["support", "anchor", "stabilizer", "accent"],
+    hoodie: ["support", "anchor", "stabilizer", "accent"],
+    pants: ["stabilizer", "anchor", "support", "accent"],
+    shorts: ["stabilizer", "support", "anchor", "accent"],
+    shoes: ["stabilizer", "anchor", "support", "accent"],
+    boots: ["stabilizer", "anchor", "support", "accent"],
+    sneakers: ["stabilizer", "support", "anchor", "accent"],
+    accessory: ["accent", "support", "stabilizer", "anchor"],
+    piece: ["anchor", "support", "stabilizer", "accent"],
+  };
+  return defaults[c] || defaults.piece;
+}
+
+function buildAmazonSearchLink(query) {
+  const tag = process.env.AMAZON_PARTNER_TAG || "visioncore-20";
+  const encoded = encodeURIComponent(String(query || "").trim());
+  return `https://www.amazon.com/s?k=${encoded}&tag=${tag}`;
+}
+
+/* =========================
+   CATEGORY / CONTEXT LOCK
+========================= */
+const CATEGORY_CONTEXT_ANCHORS = {
+  jacket: ["fashion", "outfit", "mens"],
+  shirt: ["fashion", "outfit", "mens"],
+  sweater: ["fashion", "outfit", "mens"],
+  hoodie: ["fashion", "outfit", "mens"],
+  pants: ["fashion", "outfit", "mens"],
+  shorts: ["fashion", "outfit", "mens"],
+  shoes: ["fashion", "outfit", "mens"],
+  boots: ["fashion", "outfit", "mens"],
+  sneakers: ["fashion", "outfit", "mens"],
+  accessory: ["fashion", "outfit", "mens"],
+  piece: ["fashion", "outfit"],
+};
+
+const AMBIGUOUS_COLOR_NEGATIVES = {
+  tan: ["-tanning", "-lotion", "-spray", "-self-tanner", "-bronzer", "-skincare", "-cream"],
+};
+
+function resolveCategorySubtypes(category) {
+  const normalized = normalizeCategoryLabel(category, "piece");
+  return CATEGORY_SUBTYPES[normalized] || [normalized];
+}
+
+function getCategorySubtypeForIndex(category, idx = 0) {
+  const subtypes = resolveCategorySubtypes(category);
+  return subtypes[idx % subtypes.length] || normalizeCategoryLabel(category, "piece");
+}
+
+function dedupeKeywords(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const value of arr || []) {
+    const key = normalizeText(value);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
+function getQueryAnchorsForCategory(category, industry = "fashion") {
+  const normalized = normalizeCategoryLabel(category, "piece");
+  const anchors = CATEGORY_CONTEXT_ANCHORS[normalized] || [industry];
+  const extra = industry && !anchors.includes(industry) ? [industry] : [];
+  return dedupeKeywords([...anchors, ...extra]);
+}
+
+function getNegativeQueryTermsForKeyword(keyword) {
+  const key = normalizeText(keyword);
+  return AMBIGUOUS_COLOR_NEGATIVES[key] || [];
+}
+
+function buildContextualAmazonQueries({ colorKeyword, category, industry = "fashion", limit = 3 }) {
+  const cleanColor = normalizeText(colorKeyword);
+  const normalizedCategory = normalizeCategoryLabel(category, "piece");
+  const subtypes = resolveCategorySubtypes(normalizedCategory);
+  const anchors = getQueryAnchorsForCategory(normalizedCategory, industry);
+  const negatives = getNegativeQueryTermsForKeyword(cleanColor);
+
+  const queries = subtypes.slice(0, limit).map((subtype) => {
+    const parts = [cleanColor, subtype, ...anchors, ...negatives].filter(Boolean);
+    return parts.join(" ");
+  });
+
+  return dedupeKeywords(queries);
+}
+
+function buildPrimaryContextualQuery({ colorKeyword, category, industry = "fashion", subtype = null }) {
+  const cleanColor = normalizeText(colorKeyword);
+  const normalizedCategory = normalizeCategoryLabel(category, "piece");
+  const anchors = getQueryAnchorsForCategory(normalizedCategory, industry);
+  const negatives = getNegativeQueryTermsForKeyword(cleanColor);
+
+  const chosenSubtype =
+    normalizeText(subtype) || resolveCategorySubtypes(normalizedCategory)[0] || normalizedCategory;
+
+  const parts = [cleanColor, chosenSubtype, ...anchors, ...negatives].filter(Boolean);
+  return parts.join(" ");
+}
+
+/* =========================
+   COLOR FAMILY (V2 TAXONOMY)
+========================= */
+function classifyColorV2(dominantHex) {
+  const c = chroma(dominantHex);
+  const [hRaw, sRaw, lRaw] = c.hsl();
+  const h = Number.isFinite(hRaw) ? hRaw : 0;
+  const s = clamp01(sRaw || 0);
+  const l = clamp01(lRaw || 0);
+
+  let family = "neutral";
+  if (s < 0.12) family = "neutral";
+  else if (l > 0.78 && s < 0.35) family = "pastel";
+  else {
+    const earthHue = (h >= 15 && h <= 65) || (h >= 80 && h <= 165);
+    if (earthHue && s <= 0.6 && l >= 0.22 && l <= 0.78) family = "earth";
+    else if (s >= 0.55) family = "bold";
+    else family = "neutral";
+  }
+
+  let lane = "other";
+  if (h >= 345 || h < 15) lane = "red";
+  else if (h >= 15 && h < 45) lane = "orange";
+  else if (h >= 45 && h < 75) lane = "yellow";
+  else if (h >= 75 && h < 165) lane = "green";
+  else if (h >= 165 && h < 210) lane = "cyan";
+  else if (h >= 210 && h < 255) lane = "blue";
+  else if (h >= 255 && h < 315) lane = "purple";
+  else if (h >= 315 && h < 345) lane = "pink";
+
+  const vivid = s >= 0.7;
+  const dark = l <= 0.35;
+
+  return { family, lane, vivid, dark, h, s, l };
+}
+
+/* =========================
+   V2 PALETTE ENGINE
+========================= */
+function generatePalettesV2(dominantHex) {
+  let base = safeHex(dominantHex);
+
+  if (!base || typeof base !== "string") {
+    console.warn("⚠️ Invalid dominantHex — forcing fallback");
+    base = "#7A7A7A";
+  }
+
+  try {
+    const meta = classifyColorV2(base);
+
+    const balanceHexes = uniqHexes([
+      "#111111",
+      "#2B2B2B",
+      "#7A7A7A",
+      "#CFCFCF",
+      "#F5F1E8",
+    ]);
+
+    const comp = rotateHue(base, 180);
+    const split1 = rotateHue(base, 150);
+    const split2 = rotateHue(base, 210);
+
+    const contrastHexes = uniqHexes([
+      setTone(comp, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
+      setTone(split1, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
+      setTone(split2, { sMul: 1.0, lAdd: meta.dark ? 0.25 : 0.05 }),
+    ]);
+
+    const cohesionHexes = uniqHexes([
+      setTone(base, { sMul: 0.85, lAdd: 0.18 }),
+      setTone(base, { sMul: 0.75, lAdd: 0.08 }),
+      setTone(base, { sMul: 1.0, lAdd: 0.0 }),
+      setTone(base, { sMul: 0.9, lAdd: -0.1 }),
+      setTone(base, { sMul: 0.8, lAdd: -0.18 }),
+    ]);
+
+    let emphasisHexes;
+    if (meta.vivid) {
+      emphasisHexes = uniqHexes([
+        setTone(rotateHue(base, 200), { sMul: 0.85, lAdd: meta.dark ? 0.22 : 0.06 }),
+        setTone(rotateHue(base, -200), { sMul: 0.85, lAdd: meta.dark ? 0.22 : 0.06 }),
+        setTone(rotateHue(base, 120), { sMul: 0.8, lAdd: meta.dark ? 0.18 : 0.04 }),
+      ]);
+    } else {
+      emphasisHexes = uniqHexes([
+        setTone(base, { sMul: 1.25, lAdd: 0.02 }),
+        setTone(rotateHue(base, 150), { sMul: 1.1, lAdd: 0.06 }),
+        setTone(rotateHue(base, 210), { sMul: 1.1, lAdd: 0.06 }),
+      ]);
+    }
+
+    const naturalHexes = uniqHexes(
+      [
+        chroma.mix(base, "#556B2F", 0.55, "lab").hex().toUpperCase(),
+        chroma.mix(base, "#8B4513", 0.5, "lab").hex().toUpperCase(),
+        chroma.mix(base, "#B87333", 0.45, "lab").hex().toUpperCase(),
+        chroma.mix(base, "#D2B48C", 0.55, "lab").hex().toUpperCase(),
+        chroma.mix(base, "#2F5D50", 0.55, "lab").hex().toUpperCase(),
+      ].map((h) => setTone(h, { sMul: 0.75, lAdd: meta.dark ? 0.18 : 0.0 }))
+    );
+
+    const tri1 = rotateHue(base, 120);
+    const tri2 = rotateHue(base, 240);
+    const tet1 = rotateHue(base, 90);
+    const tet2 = rotateHue(base, 270);
+
+    const exploreHexes = uniqHexes([
+      setTone(tri1, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
+      setTone(tri2, { sMul: 0.95, lAdd: meta.dark ? 0.22 : 0.05 }),
+      setTone(tet1, { sMul: 0.9, lAdd: meta.dark ? 0.22 : 0.05 }),
+      setTone(tet2, { sMul: 0.9, lAdd: meta.dark ? 0.22 : 0.05 }),
+    ]);
+
+    return {
+      dominantHex: base,
+      dominantName: getColorName(base),
+      classification: {
+        family: meta.family,
+        lane: meta.lane,
+        vivid: meta.vivid,
+        h: Math.round(meta.h),
+        s: Number(meta.s.toFixed(3)),
+        l: Number(meta.l.toFixed(3)),
+      },
+      palettes: {
+        balance: {
+          hexes: balanceHexes,
+          named_hexes: buildNamedHexes(balanceHexes),
+          reason: "Neutral anchors for stability and broad compatibility.",
+        },
+        contrast: {
+          hexes: contrastHexes,
+          named_hexes: buildNamedHexes(contrastHexes),
+          reason: "Complementary and split-complementary accents with tonal normalization.",
+        },
+        cohesion: {
+          hexes: cohesionHexes,
+          named_hexes: buildNamedHexes(cohesionHexes),
+          reason: "Same-hue tonal ladder from light to deep for cohesive systems.",
+        },
+        emphasis: {
+          hexes: emphasisHexes,
+          named_hexes: buildNamedHexes(emphasisHexes),
+          reason: meta.vivid
+            ? "Vivid base with controlled accents."
+            : "Muted base with boosted saturation and energetic shift.",
+        },
+        natural: {
+          hexes: naturalHexes,
+          named_hexes: buildNamedHexes(naturalHexes),
+          reason: "Earth blends via LAB mixing with muted toning.",
+        },
+        explore: {
+          hexes: exploreHexes,
+          named_hexes: buildNamedHexes(exploreHexes),
+          reason: "Triad and tetrad harmonies with tonal normalization.",
+        },
+      },
+    };
+  } catch (err) {
+    console.error("❌ Palette engine crash:", err);
+
+    return {
+      dominantHex: "#7A7A7A",
+      dominantName: "Neutral Gray",
+      classification: {
+        family: "neutral",
+        lane: "neutral",
+        vivid: false,
+        h: 0,
+        s: 0,
+        l: 0.5,
+      },
+      palettes: {
+        balance: {
+          hexes: ["#111111", "#7A7A7A", "#FFFFFF"],
+          named_hexes: [],
+          reason: "Fallback",
+        },
+        contrast: {
+          hexes: ["#111111", "#FFFFFF"],
+          named_hexes: [],
+          reason: "Fallback",
+        },
+        cohesion: {
+          hexes: ["#7A7A7A"],
+          named_hexes: [],
+          reason: "Fallback",
+        },
+        emphasis: {
+          hexes: ["#7A7A7A"],
+          named_hexes: [],
+          reason: "Fallback",
+        },
+        natural: {
+          hexes: ["#7A7A7A"],
+          named_hexes: [],
+          reason: "Fallback",
+        },
+        explore: {
+          hexes: ["#7A7A7A"],
+          named_hexes: [],
+          reason: "Fallback",
+        },
+      },
+    };
+  }
+}
+/* =========================
+   OUTFIT SCORING ENGINE
+========================= */
+const LEGACY_MODE_RULES = {
+  Balance: { harmony: 0.34, applicability: 0.28, versatility: 0.24, boldness: 0.14 },
+  Contrast: { harmony: 0.2, applicability: 0.2, versatility: 0.2, boldness: 0.4 },
+  Cohesion: { harmony: 0.44, applicability: 0.24, versatility: 0.22, boldness: 0.1 },
+  Natural: { harmony: 0.4, applicability: 0.3, versatility: 0.2, boldness: 0.1 },
+  Explore: { harmony: 0.25, applicability: 0.25, versatility: 0.25, boldness: 0.25 },
+};
+
+function normalizeDetectedColors(topColors, dominantHex) {
+  return mergeDominantAndImportantColors(topColors, dominantHex)
+    .slice(0, 8)
+    .map((c) => ({
+      ...c,
+      structural_role: classifyStructuralRole(c),
+    }));
+}
+
+function assignColorRoles(normalizedColors) {
+  const colors = [...(normalizedColors || [])];
+  if (!colors.length) return [];
+
+  const dominantHex = colors[0]?.hex || null;
+
+  const enriched = colors.map((c) => {
+    const surfaceRole = classifySurfaceRole(c, dominantHex);
+    return {
+      ...c,
+      surface_role: surfaceRole,
+      chroma_magnitude: Number(c?.perceptual?.chroma_magnitude || 0),
+      visual_weight: Number(c?.importance?.visual_weight || 0),
+      contrast_potential: Number(c?.importance?.contrast_potential || 0),
+      highlight_strength: Number(c?.importance?.highlight_strength || 0),
+      shadow_strength: Number(c?.importance?.shadow_strength || 0),
+      accent_strength: Number(c?.importance?.accent_strength || 0),
+      labL: Number(c?.lab?.l || 0),
+      pctNum: Number(c?.pct || 0),
+    };
+  });
+
+  // ANCHOR = dominant body fabric, not trim/detail/highlight
+  const anchorCandidates = enriched
+    .map((c) => {
+      let score = 0;
+
+      score += c.pctNum * 42;
+      score += c.visual_weight * 0.34;
+      score += 100 - Math.abs(c.labL - 48) * 1.05;
+      score += Math.max(0, 22 - Math.abs(c.chroma_magnitude - 24) * 0.35);
+
+      if (c.structural_role === "body") score += 22;
+      if (c.structural_role === "trim") score += 4;
+      if (c.structural_role === "highlight") score -= 16;
+      if (c.structural_role === "shadow") score -= 10;
+      if (c.structural_role === "graphic") score -= 22;
+
+      if (c.surface_role === "body_fabric") score += 34;
+      if (c.surface_role === "shadow_structure") score += 18;
+      if (c.surface_role === "trim") score -= 16;
+      if (c.surface_role === "highlight_trim") score -= 20;
+      if (c.surface_role === "graphic_detail") score -= 30;
+      if (c.surface_role === "micro_accent") score -= 34;
+
+      // prevent tiny accent colors from becoming anchor
+      if (c.pctNum <= 0.16) score -= 24;
+      if (c.chroma_magnitude > 48 && c.pctNum <= 0.18) score -= 18;
+
+      return { ...c, _anchorScore: clamp100(score) };
+    })
+    .sort((a, b) => b._anchorScore - a._anchorScore);
+
+  const anchor = anchorCandidates[0] || enriched[0];
+
+  // SUPPORT = color that extends anchor, not another fake warm neutral
+  const supportCandidates = enriched
+    .filter((c) => c.hex !== anchor.hex)
+    .map((c) => {
+      let score = 0;
+
+      const dist = colorDistanceLab(anchor.hex, c.hex);
+      const hueGap = hueDistance(anchor.hex, c.hex);
+
+      score += 86 - Math.abs(dist - 24) * 0.95;
+      score += c.visual_weight * 0.16;
+      score += c.pctNum * 10;
+
+      if (c.structural_role === "body") score += 10;
+      if (c.structural_role === "trim") score += 8;
+      if (c.structural_role === "graphic") score -= 18;
+      if (c.structural_role === "highlight") score -= 8;
+
+      if (c.surface_role === "body_fabric") score += 18;
+      if (c.surface_role === "shadow_structure") score += 10;
+      if (c.surface_role === "trim") score += 6;
+      if (c.surface_role === "graphic_detail") score -= 25;
+      if (c.surface_role === "micro_accent") score -= 28;
+      if (c.surface_role === "highlight_trim") score -= 12;
+
+      // stop muddy earth tones from stealing support unless truly dominant
+      if (c.family === "earth" && c.chroma_magnitude < 36 && c.pctNum < 0.22) {
+        score -= 48;
+      }
+
+      // favor blue / denim / cool / charcoal extension when it reads real
+      if (["blue", "cyan", "purple"].includes(c.lane)) score += 16;
+      if (c.family === "neutral" && c.chroma_magnitude >= 14) score += 8;
+
+      // support should not be too close to anchor or too wild
+      if (dist < 8) score -= 18;
+      if (hueGap > 115 && c.chroma_magnitude > 45) score -= 16;
+
+      return { ...c, _roleScore: clamp100(score) };
+    })
+    .sort((a, b) => b._roleScore - a._roleScore);
+
+  const support = supportCandidates[0] || anchor;
+
+  // ACCENT = high-attention detail, not another neutral body tone
+  const accentCandidates = enriched
+    .filter((c) => c.hex !== anchor.hex && c.hex !== support.hex)
+    .map((c) => {
+      let score = 0;
+
+      const dist = colorDistanceLab(anchor.hex, c.hex);
+      const hueGap = hueDistance(anchor.hex, c.hex);
+
+      score += Math.min(56, dist * 0.9);
+      score += Math.min(26, c.chroma_magnitude * 0.34);
+      score += c.contrast_potential * 0.24;
+      score += c.accent_strength * 0.26;
+      score += c.highlight_strength * 0.12;
+      score += c.visual_weight * 0.12;
+
+      if (c.vivid) score += 10;
+      if (c.structural_role === "accent") score += 16;
+      if (c.structural_role === "graphic") score += 28;
+      if (c.structural_role === "highlight") score += 18;
+      if (c.structural_role === "body") score -= 14;
+
+      if (c.surface_role === "graphic_detail") score += 36;
+      if (c.surface_role === "micro_accent") score += 34;
+      if (c.surface_role === "highlight_trim") score += 18;
+      if (c.surface_role === "trim") score += 8;
+      if (c.surface_role === "body_fabric") score -= 26;
+      if (c.surface_role === "shadow_structure") score -= 12;
+
+      // neutrals should almost never win accent unless clearly contrast-driving
+      if (c.family === "neutral" && c.chroma_magnitude < 22 && c.contrast_potential < 72) {
+        score -= 42;
+      }
+
+      // colorful lanes get rewarded
+      if (!["neutral", "pastel"].includes(c.family)) score += 12;
+      if (["red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink"].includes(c.lane)) {
+        score += 8;
+      }
+
+      if (hueGap < 10 && c.chroma_magnitude < 30) score -= 20;
+
+      return { ...c, _roleScore: clamp100(score) };
+    })
+    .sort((a, b) => b._roleScore - a._roleScore);
+
+  const accent =
+    accentCandidates[0] ||
+    enriched.find((c) => c.hex !== anchor.hex && c.hex !== support.hex) ||
+    support;
+
+  // STABILIZER = grounding neutral / shadow / quiet structure
+  const stabilizerCandidates = enriched
+    .filter((c) => ![anchor.hex, support.hex, accent.hex].includes(c.hex))
+    .map((c) => {
+      let score = 0;
+
+      score += 54;
+      score += c.shadow_strength * 0.2;
+      score += c.visual_weight * 0.12;
+
+      if (c.family === "neutral") score += 24;
+      if (c.family === "earth" && c.chroma_magnitude < 26) score += 8;
+      if (c.chroma_magnitude < 24) score += 16;
+      if (c.labL < 46) score += 12;
+
+      if (c.structural_role === "shadow") score += 28;
+      if (c.structural_role === "trim") score += 8;
+      if (c.structural_role === "highlight") score -= 12;
+      if (c.structural_role === "graphic") score -= 20;
+
+      if (c.surface_role === "shadow_structure") score += 24;
+      if (c.surface_role === "trim") score += 8;
+      if (c.surface_role === "body_fabric") score += 6;
+      if (c.surface_role === "graphic_detail") score -= 24;
+      if (c.surface_role === "micro_accent") score -= 28;
+      if (c.surface_role === "highlight_trim") score -= 16;
+
+      return { ...c, _roleScore: clamp100(score) };
+    })
+    .sort((a, b) => b._roleScore - a._roleScore);
+
+  const stabilizer =
+    stabilizerCandidates[0] ||
+    enriched
+      .filter((c) => c.hex !== anchor.hex && c.hex !== support.hex)
+      .sort((a, b) => a.chroma_magnitude - b.chroma_magnitude)[0] ||
+    anchor;
+
+  return [
+    {
+      hex: anchor.hex,
+      name: anchor.name || getColorName(anchor.hex),
+      role: "anchor",
+      family: titleCase(anchor.family),
+      weight: 0.34,
+      lab: anchor.lab,
+      perceptual: anchor.perceptual,
+      importance: anchor.importance,
+      structural_role: anchor.structural_role,
+    },
+    {
+      hex: support.hex,
+      name: support.name || getColorName(support.hex),
+      role: "support",
+      family: titleCase(support.family),
+      weight: 0.28,
+      lab: support.lab,
+      perceptual: support.perceptual,
+      importance: support.importance,
+      structural_role: support.structural_role,
+    },
+    {
+      hex: accent.hex,
+      name: accent.name || getColorName(accent.hex),
+      role: "accent",
+      family: titleCase(accent.family),
+      weight: 0.14,
+      lab: accent.lab,
+      perceptual: accent.perceptual,
+      importance: accent.importance,
+      structural_role: accent.structural_role,
+    },
+    {
+      hex: stabilizer.hex,
+      name: stabilizer.name || getColorName(stabilizer.hex),
+      role: "stabilizer",
+      family: titleCase(stabilizer.family),
+      weight: 0.24,
+      lab: stabilizer.lab,
+      perceptual: stabilizer.perceptual,
+      importance: stabilizer.importance,
+      structural_role: stabilizer.structural_role,
+    },
+  ];
+}
+
+function enforceStructuralPreservation(colorRoles, normalizedColors) {
+  const roles = [...(colorRoles || [])];
+
+  const highlight = normalizedColors.find((c) => c.structural_role === "highlight");
+  const shadow = normalizedColors.find((c) => c.structural_role === "shadow");
+
+  if (highlight && !roles.find((r) => r.hex === highlight.hex)) {
+    roles.push({
+      hex: highlight.hex,
+      name: highlight.name || getColorName(highlight.hex),
+      role: "accent",
+      family: titleCase(highlight.family || "neutral"),
+      weight: 0.14,
+      lab: highlight.lab,
+      perceptual: highlight.perceptual,
+      importance: highlight.importance,
+      structural_role: highlight.structural_role,
+      forced: true,
+    });
+  }
+
+  if (shadow && !roles.find((r) => r.hex === shadow.hex)) {
+    roles.push({
+      hex: shadow.hex,
+      name: shadow.name || getColorName(shadow.hex),
+      role: "stabilizer",
+      family: titleCase(shadow.family || "neutral"),
+      weight: 0.24,
+      lab: shadow.lab,
+      perceptual: shadow.perceptual,
+      importance: shadow.importance,
+      structural_role: shadow.structural_role,
+      forced: true,
+    });
+  }
+
+  const ordered = [];
+  const wanted = ["anchor", "support", "accent", "stabilizer"];
+
+  for (const roleName of wanted) {
+    const hit = roles.find((r) => r.role === roleName);
+    if (hit && !ordered.find((x) => x.hex === hit.hex)) {
+      ordered.push(hit);
+    }
+  }
+
+  for (const role of roles) {
+    if (!ordered.find((x) => x.hex === role.hex) && ordered.length < 4) {
+      ordered.push(role);
+    }
+  }
+
+  return ordered.slice(0, 4);
+}
+
+function buildDetectedPalette(colorRoles, normalizedColors) {
+  const primary = [];
+  const secondary = [];
+  const accent = [];
+
+  const roleMap = Object.fromEntries((colorRoles || []).map((r) => [r.role, r.hex]));
+
+  if (roleMap.anchor) primary.push(roleMap.anchor);
+  if (roleMap.support) primary.push(roleMap.support);
+  if (roleMap.stabilizer) secondary.push(roleMap.stabilizer);
+
+  const extraSecondary = (normalizedColors || [])
+    .map((c) => c.hex)
+    .filter((hex) => !primary.includes(hex) && !secondary.includes(hex) && hex !== roleMap.accent)
+    .slice(0, 2);
+
+  secondary.push(...extraSecondary);
+
+  if (roleMap.accent) accent.push(roleMap.accent);
+
+  const primaryHexes = uniqHexes(primary);
+  const secondaryHexes = uniqHexes(secondary);
+  const accentHexes = uniqHexes(accent);
+
+  return {
+    primary: primaryHexes,
+    secondary: secondaryHexes,
+    accent: accentHexes,
+    named: {
+      primary: buildNamedHexes(primaryHexes),
+      secondary: buildNamedHexes(secondaryHexes),
+      accent: buildNamedHexes(accentHexes),
+    },
+  };
+}
+
+function computeHarmonyScore(colors) {
+  if (!colors.length) return 70;
+  const distances = [];
+  for (let i = 0; i < colors.length; i += 1) {
+    for (let j = i + 1; j < colors.length; j += 1) {
+      distances.push(colorDistanceLab(colors[i], colors[j]));
+    }
+  }
+  if (!distances.length) return 84;
+  const avgDist = avg(distances);
+  return Math.round(clamp100(92 - Math.abs(avgDist - 42) * 0.75));
+}
+
+function computeApplicabilityScore(colors, colorRoles) {
+  if (!colors.length) return 70;
+  const neutralCount = colors.filter((hex) => classifyColorV2(hex).family === "neutral").length;
+  const earthCount = colors.filter((hex) => classifyColorV2(hex).family === "earth").length;
+  const stabilizerExists = (colorRoles || []).some((r) => r.role === "stabilizer");
+  const anchorExists = (colorRoles || []).some((r) => r.role === "anchor");
+  return Math.round(
+    clamp100(62 + neutralCount * 8 + earthCount * 5 + (stabilizerExists ? 8 : 0) + (anchorExists ? 5 : 0))
+  );
+}
+
+function computeVersatilityScore(colors) {
+  if (!colors.length) return 70;
+  const sats = colors.map((hex) => getSat(hex));
+  const lights = colors.map((hex) => getLight(hex));
+  const neutralCount = colors.filter((hex) => classifyColorV2(hex).family === "neutral").length;
+  const satAvg = avg(sats);
+  const lightSpread = Math.max(...lights) - Math.min(...lights);
+  return Math.round(clamp100(58 + neutralCount * 7 + (1 - satAvg) * 18 + Math.min(16, lightSpread * 28)));
+}
+
+function computeBoldnessScore(colors) {
+  if (!colors.length) return 60;
+  const distances = [];
+  const sats = colors.map((hex) => getSat(hex));
+  const lights = colors.map((hex) => getLight(hex));
+  for (let i = 0; i < colors.length; i += 1) {
+    for (let j = i + 1; j < colors.length; j += 1) {
+      distances.push(hueDistance(colors[i], colors[j]));
+    }
+  }
+  const hueAvg = avg(distances);
+  const satAvg = avg(sats);
+  const lightSpread = Math.max(...lights) - Math.min(...lights);
+  return Math.round(clamp100(22 + Math.min(38, hueAvg * 0.18) + satAvg * 24 + lightSpread * 20));
+}
+
+function computeScoreBreakdown(colorRoles, normalizedColors) {
+  const roleOrdered = (colorRoles || []).map((r) => r.hex);
+  const fallback = (normalizedColors || []).map((c) => c.hex);
+  const colors = uniqHexes([...roleOrdered, ...fallback]).slice(0, 5);
+
+  return {
+    harmony: computeHarmonyScore(colors),
+    applicability: computeApplicabilityScore(colors, colorRoles),
+    versatility: computeVersatilityScore(colors),
+    boldness: computeBoldnessScore(colors),
+  };
+}
+
+function normalizeEngineModeScores(modeScores = {}) {
+  if (Array.isArray(modeScores)) {
+    return modeScores
+      .map((entry) => ({ mode: entry?.mode, score: Number(entry?.score) || 0 }))
+      .filter((entry) => entry.mode)
+      .sort((a, b) => b.score - a.score);
+  }
+
+  return Object.entries(modeScores)
+    .map(([mode, score]) => ({ mode, score: Number(score) || 0 }))
+    .sort((a, b) => b.score - a.score);
+}
+
+function toEngineModeScores(modeScores = []) {
+  if (!Array.isArray(modeScores)) return modeScores || {};
+  return modeScores.reduce((acc, entry) => {
+    if (entry?.mode) acc[entry.mode] = Number(entry.score) || 0;
+    return acc;
+  }, {});
+}
+
+function computeOverallScore(scoreBreakdown) {
+  if (typeof scoreEngine?.computeOverallScore === "function") {
+    return scoreEngine.computeOverallScore(scoreBreakdown);
+  }
+
+  return Math.round(
+    clamp100(
+      scoreBreakdown.harmony * 0.32 +
+        scoreBreakdown.applicability * 0.28 +
+        scoreBreakdown.versatility * 0.24 +
+        scoreBreakdown.boldness * 0.16
+    )
+  );
+}
+
+function computeModeScore(mode, scoreBreakdown) {
+  if (typeof scoreEngine?.computeModeScore === "function") {
+    return scoreEngine.computeModeScore(mode, scoreBreakdown);
+  }
+
+  const weights = LEGACY_MODE_RULES[mode];
+  if (!weights) return 0;
+
+  return Math.round(
+    clamp100(
+      scoreBreakdown.harmony * weights.harmony +
+        scoreBreakdown.applicability * weights.applicability +
+        scoreBreakdown.versatility * weights.versatility +
+        scoreBreakdown.boldness * weights.boldness
+    )
+  );
+}
+
+function computeModeScores(scoreBreakdown) {
+  if (typeof scoreEngine?.computeModeScores === "function") {
+    return normalizeEngineModeScores(scoreEngine.computeModeScores(scoreBreakdown));
+  }
+
+  return Object.keys(LEGACY_MODE_RULES)
+    .map((mode) => ({
+      mode,
+      score: computeModeScore(mode, scoreBreakdown),
+    }))
+    .sort((a, b) => b.score - a.score);
+}
+
+function getBestMode(modeScores) {
+  const normalizedModeScores = normalizeEngineModeScores(modeScores);
+  if (!normalizedModeScores.length) return { mode: "Balance", score: 0 };
+
+  if (typeof scoreEngine?.getBestMode === "function") {
+    const bestMode = scoreEngine.getBestMode(toEngineModeScores(normalizedModeScores));
+    const bestScore = normalizedModeScores.find((entry) => entry.mode === bestMode)?.score ?? 0;
+    return { mode: bestMode || normalizedModeScores[0].mode, score: bestScore };
+  }
+
+  return normalizedModeScores[0];
+}
+
+function scoreOutfit(scoreBreakdown) {
+  if (typeof scoreEngine?.scoreOutfit === "function") {
+    const scored = scoreEngine.scoreOutfit(scoreBreakdown);
+    const modeScores = normalizeEngineModeScores(scored?.modeScores || computeModeScores(scoreBreakdown));
+    const best = getBestMode(modeScores);
+
+    return {
+      outfit_score: scored?.overallScore ?? computeOverallScore(scoreBreakdown),
+      best_mode: scored?.bestMode || best.mode,
+      best_mode_score: modeScores.find((entry) => entry.mode === (scored?.bestMode || best.mode))?.score ?? best.score,
+      score_breakdown: scored?.scoreBreakdown || scoreBreakdown,
+      mode_scores: modeScores,
+    };
+  }
+
+  const modeScores = computeModeScores(scoreBreakdown);
+  const best = getBestMode(modeScores);
+
+  return {
+    outfit_score: computeOverallScore(scoreBreakdown),
+    best_mode: best.mode,
+    best_mode_score: best.score,
+    score_breakdown: scoreBreakdown,
+    mode_scores: modeScores,
+  };
+}
+
+/* =========================
+   STYLE IDENTITY SYSTEM
+========================= */
+
+function deriveStyleIdentity(bestMode, scoreBreakdown = {}) {
+  const identity = deriveStyleIdentityFromStyleIdentity(bestMode, scoreBreakdown);
+
+  return {
+    modifier: identity.modifier,
+    base_archetype: identity.base_archetype,
+    label: identity.label,
+  };
+}
+
+function buildWhyThisWorks(colorRoles) {
+  const anchor = colorRoles.find((r) => r.role === "anchor");
+  const support = colorRoles.find((r) => r.role === "support");
+  const accent = colorRoles.find((r) => r.role === "accent");
+  const stabilizer = colorRoles.find((r) => r.role === "stabilizer");
+
+  const anchorTraits = anchor?.perceptual || {};
+  const supportTraits = support?.perceptual || {};
+  const accentTraits = accent?.perceptual || {};
+  const stabilizerTraits = stabilizer?.perceptual || {};
+
+  const anchorDescriptor = `${anchorTraits.depth || "mid"} ${anchorTraits.temperature || "balanced"} ${anchor?.name || anchor?.hex || "anchor tone"}`;
+  const buildRoleDescriptor = (descriptor, colorName, fallbackName) => {
+    const prefix = String(descriptor || "").trim();
+    const name = String(colorName || fallbackName || "tone").trim();
+    if (!prefix) return name;
+    const normalizedPrefix = prefix.toLowerCase();
+    const normalizedName = name.toLowerCase();
+    return normalizedName === normalizedPrefix || normalizedName.startsWith(`${normalizedPrefix} `)
+      ? name
+      : `${prefix} ${name}`;
+  };
+
+  const supportDescriptor = buildRoleDescriptor(supportTraits.intensity || "balanced", support?.name || support?.hex, "support tone");
+  const stabilizerDescriptor = buildRoleDescriptor(stabilizerTraits.intensity || "balanced", stabilizer?.name || stabilizer?.hex, "stabilizer tone");
+  const accentDescriptor = buildRoleDescriptor(accentTraits.intensity || "balanced", accent?.name || accent?.hex, "accent tone");
+
+  return `The ${anchorDescriptor} anchor establishes the visual center, while ${supportDescriptor} extends the palette with compatible support. ${stabilizerDescriptor} adds grounding stability, and ${accentDescriptor} introduces controlled emphasis without overwhelming the overall structure.`;
+}
+
+function buildSuggestedAdjustment(scoreBreakdown, colorRoles, bestMode) {
+  const mode = normalizeModeLabel(bestMode);
+
+  const accent = colorRoles.find((r) => r.role === "accent");
+  const stabilizer = colorRoles.find((r) => r.role === "stabilizer");
+  const support = colorRoles.find((r) => r.role === "support");
+  const anchor = colorRoles.find((r) => r.role === "anchor");
+
+  const accentName = accent?.name || accent?.hex || "the accent tone";
+  const stabilizerName = stabilizer?.name || stabilizer?.hex || "the stabilizer tone";
+  const supportName = support?.name || support?.hex || "the support tone";
+  const anchorName = anchor?.name || anchor?.hex || "the anchor tone";
+
+  if (mode === "Natural") {
+    if (scoreBreakdown.boldness > 70) {
+      return `This look performs best in Natural mode. Softening the intensity of ${accentName} slightly would create a more grounded and organic balance.`;
+    }
+
+    if (scoreBreakdown.versatility < 75) {
+      return `This look performs best in Natural mode. Introducing a slightly more neutral or earthy support tone alongside ${supportName} would improve versatility.`;
+    }
+
+    return `This look performs best in Natural mode. Deepening ${stabilizerName} slightly would enhance grounding and elevate the overall composition.`;
+  }
+
+  if (mode === "Cohesion") {
+    if (scoreBreakdown.boldness > 65) {
+      return `This look performs best in Cohesion mode. Reducing the intensity of ${accentName} would improve tonal unity and strengthen overall harmony.`;
+    }
+
+    return `This look performs best in Cohesion mode. Tightening the tonal range around the ${anchorName} anchor would create a more seamless and refined visual flow.`;
+  }
+
+  if (mode === "Contrast") {
+    if (scoreBreakdown.boldness < 60) {
+      return `This look performs best in Contrast mode. Increasing the separation between ${anchorName} and ${accentName} would create stronger visual impact.`;
+    }
+
+    return `This look performs best in Contrast mode. Slightly sharpening the contrast between tones would make the composition feel more dynamic.`;
+  }
+
+  if (mode === "Balance") {
+    if (scoreBreakdown.boldness > 75) {
+      return `This look performs best in Balance mode. Slightly reducing the dominance of ${accentName} would improve overall equilibrium.`;
+    }
+
+    return `This look performs best in Balance mode. Reinforcing ${stabilizerName} would create a more even distribution across the palette.`;
+  }
+
+  if (mode === "Explore") {
+    return `This look performs best in Explore mode. You can push variation further by introducing a more unexpected accent while maintaining structure through ${anchorName}.`;
+  }
+
+  return `Refining the relationship between ${anchorName}, ${supportName}, and ${accentName} would improve the overall outfit score.`;
+}
+
+function buildPublishedGarmentColorAuthority(garmentZones, fallbackColors = []) {
+  const zones = garmentZones?.zones || {};
+  const orderedKeys = ["upper_garment", "lower_garment", "body_garment", "outerwear", "footwear", "bag", "accessory_jewelry", "eyewear"];
+  const authoritative = [];
+  for (const zone of orderedKeys) {
+    const z = zones[zone];
+    if (!z || z.interpretation === "unknown" || z.one_piece_suppressed) continue;
+    const hex = safeHex(z.hex || z.dominant_color?.hex || "");
+    if (!hex || authoritative.some((c) => c.hex === hex)) continue;
+    authoritative.push({ hex, pct: Math.max(0.01, Math.min(1, Number(z.dominant_color?.pct ?? z.pct ?? 0.25))), name: getColorName(hex), source_zone: zone, source: "published_garment_primary" });
+  }
+  if (!authoritative.length) return fallbackColors;
+  for (const c of fallbackColors) {
+    if (authoritative.length >= 5) break;
+    if (!c?.hex || authoritative.some((x) => x.hex === c.hex)) continue;
+    authoritative.push({ ...c, source: c.source || "global_palette_fallback" });
+  }
+  return authoritative;
+}
+
+function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], dinoGarmentRegions = [], pipeline = null, decodedImage = null, perception_v6_mode, v6_mode, semanticConstraints = null }) {
+  const perceptionV6Mode = normalizePerceptionV6Mode(perception_v6_mode ?? v6_mode, "shadow");
+  const confirmedSemanticPieces = new Set(semanticConstraints?.confirmed_pieces || []);
+  const suppressedSemanticPieces = new Set(semanticConstraints?.suppressed_pieces || []);
+  const normalizedColors = normalizeDetectedColors(topColors, dominantHex);
+  const baseRoles = assignColorRoles(normalizedColors);
+  const colorRoles = enforceStructuralPreservation(baseRoles, normalizedColors);
+
+  const visualIntelligence = buildVisualIntelligence({
+    dominantHex,
+    normalizedColors,
+    colorRoles,
+  });
+
+  const inputSegmentedRegions = Array.isArray(segmentedRegions) ? segmentedRegions : [];
+  const samRegions = inputSegmentedRegions.filter(
+    (region) => region?.source_type !== "grounding_dino" && region?.source_type !== "dino_detection"
+  );
+  const inputDinoRegions = inputSegmentedRegions.filter(
+    (region) => region?.source_type === "grounding_dino" || region?.source_type === "dino_detection"
+  );
+  const dinoRegions = attachBeltLocalizationV1(dedupeDinoRegionsByZoneAndOverlap(
+    [...inputDinoRegions, ...(Array.isArray(dinoGarmentRegions) ? dinoGarmentRegions : [])].filter(
+      (region, idx, arr) => idx === arr.findIndex((candidate) => candidate?.id === region?.id && candidate?.segment_label === region?.segment_label && candidate?.zone === region?.zone)
+    )
+  ), samRegions);
+  const samZones = new Set(samRegions.map((region) => region?.zone).filter((zone) => zone && zone !== "unknown"));
+  const dedupedDinoRegions = samRegions.length
+    ? dinoRegions.filter((region) => region?.zone === "accessory_jewelry" || !samZones.has(region?.zone))
+    : dinoRegions;
+  const rawGarmentEvidenceRegions = samRegions.length ? samRegions.concat(dedupedDinoRegions) : dinoRegions;
+  const pieceColorOwnership = applyPieceColorOwnershipV1({
+    decodedImage,
+    regions: rawGarmentEvidenceRegions,
+  });
+  const lowerGarmentPurity = applyLowerGarmentPurityV2({
+    decodedImage,
+    regions: pieceColorOwnership.regions,
+  });
+  const upperGarmentPurity = applyUpperGarmentPurityV1({
+    decodedImage,
+    regions: lowerGarmentPurity.regions,
+  });
+  const beltLocalizationCandidates = dinoRegions
+    .filter((region) => region?.belt_localization)
+    .map((region) => ({
+      region_id: region.id || null,
+      label: region.label || region.segment_label || "belt",
+      object_type: "belt",
+      confidence: Number(region.confidence || 0),
+      ...region.belt_localization,
+      semantic_confirmed: confirmedSemanticPieces.has("belt"),
+      publication_eligible: confirmedSemanticPieces.has("belt") && region?.belt_localization?.geometry_valid === true,
+    }));
+  const garmentEvidenceRegions = upperGarmentPurity.regions.filter(
+    (region) => !(
+      region?.object_type === "belt" &&
+      region?.shadow_only === true &&
+      !confirmedSemanticPieces.has("belt")
+    )
+  );
+  const garmentZoneSource = getGarmentZoneSource(samRegions, dedupedDinoRegions);
+  const dinoLifecycleTrace = [
+    summarizeDinoStageForTrace("analysis.dinoGarmentRegions", dinoGarmentRegions),
+    summarizeDinoStageForTrace("inputDinoRegions", inputDinoRegions),
+    summarizeDinoStageForTrace("dedupedDinoRegions", dedupedDinoRegions),
+    summarizeDinoStageForTrace("garmentEvidenceRegions", garmentEvidenceRegions),
+  ];
+
+  const legacyGarmentZones = inferGarmentZones(
+    normalizedColors,
+    colorRoles,
+    visualIntelligence,
+    garmentEvidenceRegions
+  );
+  if (perceptionV6Mode === "assist") {
+    const directIdentityRequired = new Set(["outerwear", "eyewear", "bag", "fur_trim"]);
+    for (const zone of directIdentityRequired) {
+      const hasDirectDinoIdentity = dinoRegions.some((region) =>
+        region?.zone === zone && (
+          Number(region?.confidence || 0) <= 1
+            ? Number(region?.confidence || 0) * 100
+            : Number(region?.confidence || 0)
+        ) >= 35
+      );
+      const hasExplicitSegmentIdentity = samRegions.some((region) => {
+        const label = String(region?.segment_label || region?.label || "").trim();
+        return region?.zone === zone && !/^segment_?\d+$/i.test(label) && getZoneFromLabel(label) === zone;
+      });
+      if (!hasDirectDinoIdentity && !hasExplicitSegmentIdentity) delete legacyGarmentZones.zones?.[zone];
+    }
+  }
+  for (const piece of suppressedSemanticPieces) {
+    delete legacyGarmentZones.zones?.[piece];
+  }
+  for (const piece of confirmedSemanticPieces) {
+    if (legacyGarmentZones.zones?.[piece]) {
+      legacyGarmentZones.zones[piece].semantic_confirmed = true;
+    }
+  }
+  if (confirmedSemanticPieces.has("belt")) {
+    const confirmedBeltRegion = dinoRegions.find((region) =>
+      region?.object_type === "belt" &&
+      region?.belt_localization?.semantic_match === true &&
+      region?.belt_localization?.confidence_valid === true &&
+      region?.belt_localization?.geometry_valid === true &&
+      region?.dominant_hex
+    );
+    if (confirmedBeltRegion) {
+      let dominantColor = withColorIdentity({
+        hex: confirmedBeltRegion.dominant_hex,
+        name: getColorName(confirmedBeltRegion.dominant_hex),
+        pct: Number(confirmedBeltRegion?.region_colors?.[0]?.pct || 1),
+      });
+      if (getLight(dominantColor.hex) < 0.12) {
+        dominantColor = {
+          ...dominantColor,
+          name: "Jet Black",
+          color_identity: {
+            name: "Jet Black",
+            translation: "Black",
+            family: "black",
+            tone: "deep",
+          },
+        };
+      }
+      legacyGarmentZones.zones.accessory_jewelry = {
+        name: "Belt",
+        label: "Belt",
+        display_label: "Belt",
+        display_zone_label: "Belt",
+        accessory_type: "belt",
+        object_type: "belt",
+        hex: dominantColor.hex,
+        dominant_color: dominantColor,
+        // A detector box around a narrow belt inevitably includes nearby shirt,
+        // trousers, skin, and buckle pixels. Until an independent object mask
+        // validates a secondary color, publish only the belt's dominant color.
+        support_colors: [],
+        confidence: Number(confirmedBeltRegion.confidence || 0),
+        score: Number(confirmedBeltRegion.confidence || 0),
+        cluster_count: Number(confirmedBeltRegion.region_colors?.length || 1),
+        source_type: "grounding_dino",
+        evidence_ids: [confirmedBeltRegion.id].filter(Boolean),
+        publication_decision: "publish",
+        validation_decision: "accepted",
+        validation_reason: "visioncore_waist_geometry_plus_external_semantic_confirmation",
+        external_color_authority: false,
+        semantic_confirmed: true,
+      };
+    }
+  }
+  const perceptionV5 = analyzePerceptionV5({ regions: garmentEvidenceRegions, pipeline });
+  const perceptionV6 = analyzePerceptionV6({ perceptionV5, regions: garmentEvidenceRegions, decodedImage, mode: perceptionV6Mode });
+  const rejectedZones = new Set(perceptionV6.publication_decisions.filter((decision) => !decision.published).map((decision) => decision.zone));
+  const acceptedZones = new Set(perceptionV6.zone_reconciliation.map((decision) => decision.zone));
+  const suppressibleZones = new Set(["eyewear", "accessory_jewelry", "bag", "footwear"]);
+  let publishedZones;
+  if (perceptionV6Mode === "authoritative") {
+    publishedZones = perceptionV6.publication_gating.allowed
+      ? Object.fromEntries(perceptionV6.zone_reconciliation.map((decision) => {
+          const legacy = legacyGarmentZones.zones?.[decision.zone] || null;
+          const dominantObjectColor = decision.object_local_colors?.[0] || null;
+          return [decision.zone, {
+            ...(legacy || {}),
+            name: decision.selected_label,
+            label: decision.selected_label,
+            hex: dominantObjectColor?.hex || legacy?.hex || null,
+            object_local_colors: decision.object_local_colors || [],
+            evidence_ids: decision.selected_evidence_ids || [],
+            validation_decision: "accepted",
+            publication_decision: "publish",
+            reconciliation_result: decision.resolution,
+            legacy_diagnostic: legacy,
+            perception_source: "v6_reconciliation",
+          }];
+        }))
+      : {};
+  } else if (perceptionV6Mode === "assist") {
+    const acceptedPublicationByZone = new Map();
+    for (const decision of perceptionV6.zone_reconciliation || []) {
+      acceptedPublicationByZone.set(decision.zone, decision);
+    }
+    const acceptedLabelsByZone = new Map();
+    for (const decision of perceptionV6.publication_decisions || []) {
+      if (!decision?.published) continue;
+      const labels = acceptedLabelsByZone.get(decision.zone) || new Set();
+      labels.add(String(decision.label || "").trim().toLowerCase());
+      acceptedLabelsByZone.set(decision.zone, labels);
+    }
+    publishedZones = Object.fromEntries(Object.entries(legacyGarmentZones.zones || {}).flatMap(([zone, legacy]) => {
+      if (suppressibleZones.has(zone) && rejectedZones.has(zone) && !acceptedZones.has(zone)) return [];
+      if (zone === "footwear") {
+        const reconciliation = acceptedPublicationByZone.get(zone) || null;
+        const objectColors = reconciliation?.object_local_colors || [];
+        const dominantObjectColor = objectColors[0] || null;
+        if (!dominantObjectColor) return [[zone, legacy]];
+        return [[zone, {
+          ...legacy,
+          name: reconciliation.selected_label || legacy?.name,
+          label: reconciliation.selected_label || legacy?.label,
+          hex: dominantObjectColor.hex,
+          dominant_color: dominantObjectColor,
+          primary_color: dominantObjectColor,
+          object_local_colors: objectColors,
+          support_colors: objectColors.slice(1),
+          detected_colors: objectColors,
+          region_colors: objectColors,
+          evidence_ids: reconciliation.selected_evidence_ids || [],
+          validation_decision: "accepted",
+          publication_decision: "publish",
+          reconciliation_result: "v6_object_local_color_reconciled",
+          perception_source: "v6_assist_object_local_color",
+        }]];
+      }
+      if (zone !== "accessory_jewelry") return [[zone, legacy]];
+
+      const legacyObjectType = String(legacy?.object_type || legacy?.accessory_type || "").trim().toLowerCase();
+      const acceptedLabels = acceptedLabelsByZone.get(zone) || new Set();
+      const legacyIdentityAccepted = legacyObjectType ? acceptedLabels.has(legacyObjectType) : true;
+      const legacyIdentityMarketSafe = shouldPublishMarketAccessoryIdentity({
+        legacy,
+        headwearEnabled: MARKET_HEADWEAR_PUBLICATION_ENABLED,
+      });
+      if (legacyIdentityAccepted && legacyIdentityMarketSafe) return [[zone, legacy]];
+
+      // If a legacy headwear identity is suppressed, still allow a separately accepted
+      // non-headwear reconciliation (for example a real necklace in the same canonical zone).
+      const reconciliation = acceptedPublicationByZone.get(zone) || null;
+      if (!reconciliation?.selected_label) return [];
+      if (!shouldPublishMarketAccessoryIdentity({
+        selectedLabel: reconciliation.selected_label,
+        headwearEnabled: MARKET_HEADWEAR_PUBLICATION_ENABLED,
+      })) return [];
+      const displayMetadata = inferAccessoryDisplayMetadata([reconciliation.selected_label]);
+      const dominantObjectColor = reconciliation.object_local_colors?.[0] || null;
+      return [[zone, {
+        ...legacy,
+        ...displayMetadata,
+        name: reconciliation.selected_label,
+        label: reconciliation.selected_label,
+        hex: dominantObjectColor?.hex || legacy?.hex || null,
+        object_local_colors: reconciliation.object_local_colors || [],
+        evidence_ids: reconciliation.selected_evidence_ids || [],
+        validation_decision: "accepted",
+        publication_decision: "publish",
+        reconciliation_result: "v6_object_identity_reconciled",
+        legacy_diagnostic: legacy,
+        perception_source: "v6_assist_identity_reconciliation",
+      }]];
+    }));
+  } else {
+    publishedZones = legacyGarmentZones.zones || {};
+  }
+  const garmentZones = perceptionV6Mode === "shadow" ? legacyGarmentZones : {
+    ...legacyGarmentZones,
+    zones: publishedZones,
+    publication_mode: perceptionV6Mode,
+    legacy_zones: legacyGarmentZones.zones,
+    v6_publication_diagnostics: perceptionV6.publication_decisions,
+  };
+  const fullDinoLifecycleTrace = [
+    ...dinoLifecycleTrace,
+    ...((legacyGarmentZones?.dino_lifecycle_trace?.stages || []).filter((stage) =>
+      !dinoLifecycleTrace.some((existing) => existing.stage === stage.stage)
+    )),
+    ...perceptionV6.lifecycle_trace.map((entry) => ({
+      ...entry,
+      stage: `perception_v6.${entry.stage}`,
+    })),
+  ];
+  console.info("[DINO TRACE] dino_4 buildOutfitAnalysis lifecycle", {
+    stages: fullDinoLifecycleTrace,
+    change_summary: buildDinoLifecycleChangeSummary(fullDinoLifecycleTrace),
+  });
+
+  const colorEvidenceShadowZones = attachColorEvidenceToZones({
+    zones: garmentZones?.zones || {},
+    regions: garmentEvidenceRegions,
+    decodedImage,
+  });
+  const signatureAuthorityZones = applySignatureColorAuthorityV2(colorEvidenceShadowZones);
+  const accessoryInstancesV1 = buildAccessoryInstancesV1({ perceptionV6 });
+  const baseAuthoritativeGarmentZones = buildPublishedGarmentZonesV2(garmentZones, signatureAuthorityZones);
+  // Keep the legacy accessory_jewelry zone for existing clients. In assist and
+  // authoritative modes, also expose every independently validated jewelry
+  // instance under its own stable zone key so simultaneous pieces are not lost.
+  const authoritativeGarmentZones = {
+    ...baseAuthoritativeGarmentZones,
+    zones: perceptionV6Mode === "shadow"
+      ? baseAuthoritativeGarmentZones.zones
+      : { ...baseAuthoritativeGarmentZones.zones, ...accessoryInstancesV1.zones },
+    accessory_instances: accessoryInstancesV1.instances,
+    accessory_instance_version: accessoryInstancesV1.version,
+  };
+  const colorEvidenceByZone = Object.fromEntries(
+    Object.entries(authoritativeGarmentZones?.zones || {}).map(([zone, value]) => [zone, value?.color_evidence_v1 || null])
+  );
+  const garmentAnalysis = inferGarmentAndMaterial({
+  zones: authoritativeGarmentZones.zones,
+  normalizedColors,
+  colorEvidenceByZone,
+});
+
+  const sceneOwnership = buildSceneOwnershipV1({
+    authoritativeGarmentZones,
+    garmentAnalysis,
+    normalizedColors,
+  });
+  const fallbackReasoningColors = buildPublishedGarmentColorAuthority(authoritativeGarmentZones, normalizedColors);
+  const reasoningColors = sceneOwnership.outfit_palette.length >= 2
+    ? sceneOwnership.outfit_palette
+    : fallbackReasoningColors;
+  const reasoningBaseRoles = assignColorRoles(reasoningColors);
+  const reasoningColorRoles = enforceStructuralPreservation(reasoningBaseRoles, reasoningColors);
+  const scoreBreakdown = computeScoreBreakdown(reasoningColorRoles, reasoningColors);
+  const scoredOutfit = scoreOutfit(scoreBreakdown);
+  const modeScores = scoredOutfit.mode_scores;
+  const best = getBestMode(modeScores);
+  const detectedPalette = buildDetectedPalette(reasoningColorRoles, reasoningColors);
+  const styleIdentity = deriveStyleIdentity(best.mode, scoreBreakdown);
+  const visualImportance = collectImportantColors(topColors, dominantHex);
+  const outfitScore = scoredOutfit.outfit_score;
+  const primaryColorIdentity = normalizedColors[0]?.color_identity || null;
+
+  return {
+    analysis_type: "outfit_score",
+    outfit_score: outfitScore,
+    best_mode: best.mode,
+    best_mode_score: best.score,
+    score_breakdown: scoreBreakdown,
+    mode_scores: modeScores,
+    detected_palette: detectedPalette,
+    color_identity_summary: buildColorIdentitySummary(primaryColorIdentity),
+    garment_identity: buildGarmentIdentity(normalizedColors[0], normalizedColors.slice(1, 4)),
+    color_roles: reasoningColorRoles,
+    color_authority: {
+      source: reasoningColors === sceneOwnership.outfit_palette ? "scene_ownership_v1_outfit" : (reasoningColors === normalizedColors ? "global_palette_fallback" : "published_garment_primaries"),
+      colors: reasoningColors.map((c) => ({ hex: c.hex, name: c.name || getColorName(c.hex), source_zone: c.source_zone || null, source: c.source || null })),
+    },
+    style_identity: styleIdentity,
+    why_this_works: buildWhyThisWorks(reasoningColorRoles),
+    suggested_adjustment: buildSuggestedAdjustment(scoreBreakdown, reasoningColorRoles, best.mode),
+    visual_importance: visualImportance,
+    visual_intelligence: visualIntelligence,
+    visual_intelligence_layer: visualIntelligence,
+    garment_zones: authoritativeGarmentZones,
+    scene_ownership_v1: sceneOwnership,
+    piece_color_ownership_v1: pieceColorOwnership.summary,
+    lower_garment_purity_v2: lowerGarmentPurity.summary,
+    upper_garment_purity_v1: upperGarmentPurity.summary,
+    belt_localization_v1: {
+      version: "belt_localization_v1",
+      mode: confirmedSemanticPieces.has("belt") ? "confirmed_assist" : "shadow",
+      candidates: beltLocalizationCandidates,
+      validated_count: beltLocalizationCandidates.filter((candidate) => candidate.validated || candidate.publication_eligible).length,
+      publication_changed: confirmedSemanticPieces.has("belt") && beltLocalizationCandidates.some((candidate) => candidate.publication_eligible),
+      color_changed: false,
+    },
+    semantic_publication_policy_v1: semanticConstraints || {
+      version: "semantic_publication_policy_v1",
+      confirmed_pieces: [],
+      suppressed_pieces: [],
+      authority_owner: "visioncore",
+      external_color_authority: false,
+    },
+    perception_v5: perceptionV5,
+    perception_v6: perceptionV6,
+    perception_v6_mode: perceptionV6Mode,
+    accessory_instances_v1: accessoryInstancesV1,
+    dino_lifecycle_trace: {
+      target_id: "dino_4",
+      stages: fullDinoLifecycleTrace,
+      change_summary: buildDinoLifecycleChangeSummary(fullDinoLifecycleTrace),
+    },
+    segmented_regions: authoritativeGarmentZones.segmented_regions || garmentEvidenceRegions,
+    region_color_analysis: authoritativeGarmentZones.region_color_analysis || [],
+    detail_colors: visualIntelligence?.body_vs_detail?.detail_colors || [],
+    accessory_analysis: [
+      ...(garmentAnalysis?.detected_items || []).filter((item) =>
+        ["accessory_jewelry", "eyewear", "bag"].includes(item.type)
+      ),
+      ...accessoryInstancesV1.instances,
+    ],
+    confidence_scores: {
+      outfit: outfitScore,
+      best_mode: best.score,
+      zones: Object.fromEntries(
+        Object.entries(authoritativeGarmentZones?.zones || {}).map(([k, v]) => [k, Number(v?.confidence || v?.score || 0)])
+      ),
+    },
+    confidence_breakdown: authoritativeGarmentZones?.confidence_breakdown || {},
+    material_analysis: garmentAnalysis,
+    pipeline: pipeline ? { ...pipeline, garment_zone_source: garmentZoneSource } : {
+      sam_enabled: false,
+      sam_ok: false,
+      sam_reason: "not_requested",
+      fallback_mode: true,
+      garment_zone_source: garmentZoneSource,
+    },
+    garment_analysis: garmentAnalysis,
+    structural_analysis: normalizedColors.map((c) => ({
+      hex: c.hex,
+      name: c.name,
+      structural_role: c.structural_role,
+      surface_role: classifySurfaceRole(c, dominantHex),
+      importance: c.importance,
+    })),
+  };
+}
+
+/* =========================
+   RETRIEVAL INTENT + PIECE SCORING
+========================= */
+function getRoleHexMap(outfitAnalysis) {
+  const roles = Array.isArray(outfitAnalysis?.color_roles) ? outfitAnalysis.color_roles : [];
+  return {
+    anchor: roles.find((r) => r.role === "anchor")?.hex || null,
+    support: roles.find((r) => r.role === "support")?.hex || null,
+    accent: roles.find((r) => r.role === "accent")?.hex || null,
+    stabilizer: roles.find((r) => r.role === "stabilizer")?.hex || null,
+  };
+}
+
+function getDisplayPaletteForRetrieval(outfitAnalysis) {
+  const roleMap = getRoleHexMap(outfitAnalysis);
+  const detected = outfitAnalysis?.detected_palette || {};
+
+  return {
+    anchor: roleMap.anchor,
+    support: roleMap.support,
+    stabilizer: roleMap.stabilizer,
+    accent: roleMap.accent,
+    primary: Array.isArray(detected.primary) ? detected.primary : [],
+    secondary: Array.isArray(detected.secondary) ? detected.secondary : [],
+    accent_group: Array.isArray(detected.accent) ? detected.accent : [],
+    named: detected.named || {
+      primary: buildNamedHexes(Array.isArray(detected.primary) ? detected.primary : []),
+      secondary: buildNamedHexes(Array.isArray(detected.secondary) ? detected.secondary : []),
+      accent: buildNamedHexes(Array.isArray(detected.accent) ? detected.accent : []),
+    },
+  };
+}
+
+function getRetailColorKeywords(hex) {
+  const safe = safeHex(hex);
+  if (!safe) return [];
+
+  const h = getHue(safe);
+  const s = getSat(safe);
+  const l = getLight(safe);
+
+  if (s < 0.08 && l < 0.18) return ["black", "jet black", "deep black"];
+  if (s < 0.12 && l < 0.42) return ["charcoal", "dark gray", "graphite"];
+  if (s < 0.12 && l < 0.68) return ["gray", "slate gray", "stone"];
+  if (s < 0.16 && l >= 0.82) return ["white", "off white", "ivory"];
+  if (s < 0.18 && l >= 0.68) return ["cream", "light beige", "oatmeal"];
+
+  if (h >= 345 || h < 15) return l < 0.45 ? ["burgundy", "wine", "oxblood"] : ["red", "crimson", "rose"];
+  if (h >= 15 && h < 35) return l < 0.5 ? ["brown", "cognac", "rust"] : ["tan", "camel", "caramel"];
+  if (h >= 35 && h < 55) return l < 0.5 ? ["mustard", "golden brown", "amber"] : ["beige", "sand", "khaki"];
+  if (h >= 55 && h < 85) return ["olive", "sage", "moss"];
+  if (h >= 85 && h < 165) return l < 0.45 ? ["forest green", "olive green", "deep green"] : ["sage green", "muted green", "green"];
+  if (h >= 165 && h < 210) return ["teal", "blue green", "sea green"];
+  if (h >= 210 && h < 255) {
+    if (l < 0.3 && !isNavyCandidate(safe)) return ["black", "graphite black", "charcoal"];
+    return l < 0.45 ? ["navy", "deep blue", "midnight blue"] : ["blue", "steel blue", "powder blue"];
+  }
+  if (h >= 255 && h < 315) return l < 0.45 ? ["plum", "eggplant", "deep purple"] : ["lavender", "soft purple", "mauve"];
+  return ["neutral", "muted", "classic"];
+}
+
+function getNegativeKeywordsForMode(mode) {
+  const selectedMode = normalizeModeLabel(mode);
+  const map = {
+    Balance: ["neon", "rainbow", "multi-color", "graphic"],
+    Contrast: ["washed out", "faded neutral only"],
+    Cohesion: ["neon", "multi-color", "graphic", "rainbow"],
+    Natural: ["neon", "patent", "highlighter", "fluorescent"],
+    Explore: [],
+  };
+  return map[selectedMode] || [];
+}
+
+function getStyleKeywordsForMode(mode) {
+  const selectedMode = normalizeModeLabel(mode);
+  const map = {
+    Balance: ["balanced", "versatile", "clean"],
+    Contrast: ["contrast", "bold", "statement"],
+    Cohesion: ["cohesive", "tonal", "clean"],
+    Natural: ["natural", "earth tone", "muted"],
+    Explore: ["experimental", "creative", "expressive"],
+  };
+  return map[selectedMode] || [];
+}
+
+const OCCASION_SEARCH_KEYWORDS = Object.freeze({
+  formal: Object.freeze(["formal", "tailored", "dress"]),
+  business: Object.freeze(["business", "professional", "business casual"]),
+  business_casual: Object.freeze(["business casual", "professional"]),
+  streetwear: Object.freeze(["streetwear", "urban"]),
+  athleisure: Object.freeze(["athleisure", "activewear"]),
+  evening: Object.freeze(["evening", "night out"]),
+  casual: Object.freeze(["casual", "everyday"]),
+  smart_casual: Object.freeze(["smart casual"]),
+});
+
+function getOccasionSearchKeywords(occasion) {
+  const normalizedOccasion = normalizeText(occasion).replace(/[\s-]+/g, "_");
+  if (!OCCASION_IDS.includes(normalizedOccasion)) return [];
+  return OCCASION_SEARCH_KEYWORDS[normalizedOccasion] || [];
+}
+
+function getRolePriorityForModeAndTarget(mode, targetItem) {
+  const selectedMode = normalizeModeLabel(mode);
+  const categoryBias = familyBiasForCategory(targetItem);
+
+  const modeBias = {
+    Balance: ["anchor", "stabilizer", "support", "accent"],
+    Contrast: ["accent", "anchor", "support", "stabilizer"],
+    Cohesion: ["anchor", "support", "stabilizer", "accent"],
+    Natural: ["support", "anchor", "stabilizer", "accent"],
+    Explore: ["accent", "support", "anchor", "stabilizer"],
+  }[selectedMode] || ["anchor", "support", "stabilizer", "accent"];
+
+  const merged = [];
+  for (const role of [...categoryBias, ...modeBias]) {
+    if (!merged.includes(role)) merged.push(role);
+  }
+  return merged;
+}
+
+function buildSearchTermsFromIntent(retrievalIntent) {
+  const category = normalizeCategoryLabel(retrievalIntent?.target_item, "piece");
+  const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
+  const mode = normalizeModeLabel(retrievalIntent?.selected_mode);
+
+  const colorKeywords = dedupeKeywords(palettePriority.flatMap((entry) => getRetailColorKeywords(entry?.hex)));
+
+  return {
+    primary_keywords: CATEGORY_SEARCH_KEYWORDS[category] || CATEGORY_SEARCH_KEYWORDS.piece,
+    color_keywords: colorKeywords,
+    style_keywords: dedupeKeywords([
+      ...getStyleKeywordsForMode(mode),
+      ...getOccasionSearchKeywords(retrievalIntent?.occasion),
+    ]),
+    negative_keywords: getNegativeKeywordsForMode(mode),
+  };
+}
+
+function buildRetrievalIntent(outfitAnalysis, opts = {}) {
+  const normalizedOccasion = normalizeText(opts.occasion).replace(/[\s-]+/g, "_");
+  const occasion = OCCASION_IDS.includes(normalizedOccasion) ? normalizedOccasion : "";
+  const occasionTargetDefault = OCCASION_CATEGORIES[occasion]?.[0];
+  const occasionModeDefault = OCCASION_MODES[occasion]?.[0];
+  const hasExplicitSelectedMode = normalizeText(opts.selectedMode) !== "";
+  const rawTargetItem = normalizeText(opts.targetItem);
+  const selectedMode = normalizeModeLabel(
+    hasExplicitSelectedMode ? opts.selectedMode : occasionModeDefault || outfitAnalysis?.best_mode || "Balance"
+  );
+  const sourceItem = normalizeCategoryLabel(opts.sourceItem || "piece", "piece");
+  const targetItem = normalizeCategoryLabel(
+    !rawTargetItem || rawTargetItem === "piece" ? occasionTargetDefault || "piece" : opts.targetItem,
+    "piece"
+  );
+  const industry = normalizeText(opts.industry || "fashion") || "fashion";
+  const matchStrictness = normalizeText(opts.matchStrictness || "medium") || "medium";
+  const resultCount = Number.isFinite(Number(opts.resultCount))
+    ? Math.max(1, Math.min(60, Number(opts.resultCount)))
+    : 24;
+  const rolePriorityOrder = getRolePriorityForModeAndTarget(selectedMode, targetItem);
+  const roleMap = getRoleHexMap(outfitAnalysis);
+  const roleObjects = Array.isArray(outfitAnalysis?.color_roles) ? outfitAnalysis.color_roles : [];
+
+  const palettePriority = rolePriorityOrder
+    .map((role, idx) => {
+      const roleHex = roleMap[role];
+      const roleObj = roleObjects.find((r) => r.role === role);
+      if (!roleHex) return null;
+      return {
+        role,
+        hex: roleHex,
+        name: roleObj?.name || getColorName(roleHex),
+        priority: idx + 1,
+        usage_bias: familyBiasForCategory(targetItem),
+      };
+    })
+    .filter(Boolean);
+
+  const intent = {
+    analysis_type: "inventory_retrieval",
+    selected_mode: selectedMode,
+    best_mode_score: outfitAnalysis?.best_mode_score ?? 0,
+    source_item: sourceItem,
+    target_item: targetItem,
+    industry,
+    retrieval_goal: opts.retrievalGoal || "extend_palette",
+    match_strictness: matchStrictness,
+    result_count: resultCount,
+    initial_display_count: 4,
+    expanded_display_count: Math.max(8, Math.min(resultCount, 12)),
+    role_priority: rolePriorityOrder,
+    palette_priority: palettePriority,
+    palette: getDisplayPaletteForRetrieval(outfitAnalysis),
+    context: {
+      domain: industry,
+      category: targetItem,
+      subtypes: resolveCategorySubtypes(targetItem),
+      anchors: getQueryAnchorsForCategory(targetItem, industry),
+    },
+    ranking_rules: {
+      prefer_role_order: rolePriorityOrder,
+      prefer_neutrals_first:
+        selectedMode === "Natural" || targetItem === "pants" || targetItem === "shoes" || targetItem === "boots",
+      allow_accent_results: true,
+      accent_max_ratio: selectedMode === "Contrast" || selectedMode === "Explore" ? 0.35 : 0.15,
+      min_color_fit_score: matchStrictness === "strict" ? 78 : matchStrictness === "loose" ? 52 : 64,
+    },
+  };
+
+  if (occasion) {
+    Object.defineProperty(intent, "occasion", {
+      value: occasion,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  intent.search_terms = buildSearchTermsFromIntent(intent);
+  return intent;
+}
+
+function normalizeInventoryProduct(product, idx = 0) {
+  const title = String(product?.title || product?.name || product?.product_title || `Product ${idx + 1}`);
+  const category = normalizeCategoryLabel(product?.category || product?.type || product?.itemType || "piece", "piece");
+  const colorHex = safeHex(
+    product?.color_hex ||
+      product?.colorHex ||
+      product?.hex ||
+      product?.dominantHex ||
+      product?.dominant_hex
+  );
+
+  const styleTags = Array.isArray(product?.style_tags)
+    ? product.style_tags
+    : Array.isArray(product?.styleTags)
+      ? product.styleTags
+      : [];
+
+  return {
+    ...product,
+    id: product?.id || product?.product_id || `product_${idx + 1}`,
+    title,
+    category,
+    color_hex: colorHex,
+    color_name: colorHex ? getColorName(colorHex) : null,
+    brand: product?.brand || null,
+    image_url: product?.image_url || product?.imageUrl || null,
+    affiliate_link: product?.affiliate_link || product?.affiliateLink || null,
+    style_tags: styleTags,
+  };
+}
+
+function getStrictnessScalar(matchStrictness) {
+  const m = normalizeText(matchStrictness);
+  if (m === "strict") return 1.2;
+  if (m === "loose") return 0.8;
+  return 1.0;
+}
+
+function computeRoleFitForProduct(productHex, retrievalIntent) {
+  const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
+  if (!productHex || !palettePriority.length) {
+    return { score: 55, matchedRole: null, matchedHex: null };
+  }
+
+  const strictnessScalar = getStrictnessScalar(retrievalIntent.match_strictness);
+  let best = { score: 0, matchedRole: null, matchedHex: null };
+
+  palettePriority.forEach((entry) => {
+    const dist = colorDistanceLab(productHex, entry.hex);
+    const priorityWeight = Math.max(0.2, 1 - (entry.priority - 1) * 0.18);
+    const baseScore = clamp100(100 - dist * 1.15 * strictnessScalar);
+    const score = clamp100(baseScore * priorityWeight);
+    if (score > best.score) {
+      best = { score: Math.round(score), matchedRole: entry.role, matchedHex: entry.hex };
+    }
+  });
+
+  return best;
+}
+
+function computeModeAlignmentForProduct(productHex, retrievalIntent) {
+  if (!productHex) return 45;
+
+  const mode = normalizeModeLabel(retrievalIntent?.selected_mode);
+  const roleMap = {
+    anchor: retrievalIntent?.palette_priority?.find((x) => x.role === "anchor")?.hex || null,
+    support: retrievalIntent?.palette_priority?.find((x) => x.role === "support")?.hex || null,
+    stabilizer: retrievalIntent?.palette_priority?.find((x) => x.role === "stabilizer")?.hex || null,
+    accent: retrievalIntent?.palette_priority?.find((x) => x.role === "accent")?.hex || null,
+  };
+
+  const anchor = roleMap.anchor;
+  const support = roleMap.support;
+  const stabilizer = roleMap.stabilizer;
+  const accent = roleMap.accent;
+
+  const family = classifyColorV2(productHex).family;
+  const sat = getSat(productHex);
+
+  if (mode === "Cohesion") {
+    const d1 = anchor ? colorDistanceLab(productHex, anchor) : 40;
+    const d2 = support ? colorDistanceLab(productHex, support) : 40;
+    return Math.round(clamp100(96 - Math.min(d1, d2) * 1.05));
+  }
+
+  if (mode === "Contrast") {
+    const ref = anchor || support || stabilizer || accent;
+    const hueGap = ref ? hueDistance(productHex, ref) : 90;
+    return Math.round(clamp100(30 + Math.min(60, hueGap * 0.55) + sat * 12));
+  }
+
+  if (mode === "Natural") {
+    const goodFamily = family === "earth" || family === "neutral" || family === "pastel";
+    return Math.round(clamp100((goodFamily ? 82 : 58) + (1 - sat) * 12));
+  }
+
+  if (mode === "Balance") {
+    const d1 = anchor ? colorDistanceLab(productHex, anchor) : 40;
+    const d2 = stabilizer ? colorDistanceLab(productHex, stabilizer) : 40;
+    const avgDist = avg([d1, d2]);
+    return Math.round(clamp100(88 - Math.abs(avgDist - 30) * 0.9));
+  }
+
+  if (mode === "Explore") {
+    return Math.round(clamp100(62 + sat * 18));
+  }
+
+  return 70;
+}
+
+function computeCategoryFitForProduct(product, retrievalIntent) {
+  const target = normalizeCategoryLabel(retrievalIntent?.target_item, "piece");
+  const category = normalizeCategoryLabel(product?.category || "piece", "piece");
+  const title = normalizeText(product?.title || "");
+
+  if (target === category) return 96;
+  if (title.includes(target)) return 88;
+  if (target === "jacket" && CATEGORY_COMPATIBILITY.jacket?.includes(category)) return 85;
+  if (target === "shirt" && CATEGORY_COMPATIBILITY.shirt?.includes(category)) return 85;
+  if (target === "pants" && CATEGORY_COMPATIBILITY.pants?.includes(category)) return 86;
+  if (target === "shoes" && CATEGORY_COMPATIBILITY.shoes?.includes(category)) return 84;
+  if (target === "accessory" && ["bag", "cap", "belt", "watch"].some((x) => title.includes(x))) return 84;
+
+  const occasion = normalizeText(retrievalIntent?.occasion).replace(/[\s-]+/g, "_");
+  const occasionDefaultTarget = normalizeCategoryLabel(OCCASION_CATEGORIES[occasion]?.[0], "piece");
+  const allowsOccasionCategoryBoost =
+    OCCASION_IDS.includes(occasion) && target === occasionDefaultTarget;
+  if (
+    allowsOccasionCategoryBoost &&
+    OCCASION_CATEGORIES[occasion]?.some((occasionCategory) => normalizeCategoryLabel(occasionCategory, "piece") === category)
+  ) {
+    return 84;
+  }
+
+  return 58;
+}
+
+function computeVersatilityFitForProduct(productHex) {
+  if (!productHex) return 55;
+  const family = classifyColorV2(productHex).family;
+  const sat = getSat(productHex);
+  const light = getLight(productHex);
+
+  let score = 58;
+  if (family === "neutral") score += 24;
+  if (family === "earth") score += 15;
+  if (family === "pastel") score += 10;
+  score += (1 - sat) * 10;
+  if (light > 0.15 && light < 0.86) score += 8;
+  return Math.round(clamp100(score));
+}
+
+function computeColorFitForProduct(productHex, retrievalIntent) {
+  if (!productHex) return 0;
+  const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
+  if (!palettePriority.length) return 0;
+
+  const strictnessScalar = getStrictnessScalar(retrievalIntent.match_strictness);
+  const distances = palettePriority.map((entry) => colorDistanceLab(productHex, entry.hex));
+  const bestDist = Math.min(...distances);
+  return Math.round(clamp100(100 - bestDist * 1.2 * strictnessScalar));
+}
+
+function scoreProductFit(product, retrievalIntent) {
+  const normalized = normalizeInventoryProduct(product);
+  const roleFit = computeRoleFitForProduct(normalized.color_hex, retrievalIntent);
+  const colorFit = computeColorFitForProduct(normalized.color_hex, retrievalIntent);
+  const modeAlignment = computeModeAlignmentForProduct(normalized.color_hex, retrievalIntent);
+  const categoryFit = computeCategoryFitForProduct(normalized, retrievalIntent);
+  const versatilityFit = computeVersatilityFitForProduct(normalized.color_hex);
+
+  const pieceFitScore = Math.round(
+    clamp100(
+      colorFit * 0.28 +
+        roleFit.score * 0.24 +
+        modeAlignment * 0.18 +
+        categoryFit * 0.18 +
+        versatilityFit * 0.12
+    )
+  );
+
+  return {
+    ...normalized,
+    piece_fit_score: pieceFitScore,
+    score_breakdown: {
+      color_fit: colorFit,
+      role_fit: roleFit.score,
+      mode_alignment: modeAlignment,
+      category_fit: categoryFit,
+      versatility_fit: versatilityFit,
+    },
+    matched_role: roleFit.matchedRole,
+    matched_mode: retrievalIntent?.selected_mode || null,
+    why_it_matches:
+      roleFit.matchedRole
+        ? `Strong ${roleFit.matchedRole} alignment for ${retrievalIntent?.selected_mode || "selected"} mode with solid category relevance.`
+        : `General palette fit for ${retrievalIntent?.selected_mode || "selected"} mode.`,
+  };
+}
+
+function rankProducts(products, retrievalIntent) {
+  const rows = Array.isArray(products) ? products : [];
+  return rows
+    .map((product, idx) => scoreProductFit(normalizeInventoryProduct(product, idx), retrievalIntent))
+    .filter((item) => item.piece_fit_score >= (retrievalIntent?.ranking_rules?.min_color_fit_score || 0) * 0.9)
+    .sort((a, b) => b.piece_fit_score - a.piece_fit_score);
+}
+
+function generateRetrievalPreviewProducts(retrievalIntent) {
+  const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
+  const target = normalizeCategoryLabel(retrievalIntent?.target_item, "piece");
+  const out = [];
+
+  palettePriority.forEach((entry, idx) => {
+    const keyword = getRetailColorKeywords(entry.hex)[0] || "Classic";
+    const subtype = getCategorySubtypeForIndex(target, idx);
+
+    out.push({
+      id: `preview_${entry.role}_${idx + 1}`,
+      title: `${titleCase(keyword)} ${titleCase(subtype)}`,
+      category: target,
+      color_hex: entry.hex,
+      color_name: entry.name || getColorName(entry.hex),
+      brand: "Preview",
+      affiliate_link: buildAmazonSearchLink(
+        buildPrimaryContextualQuery({
+          colorKeyword: keyword,
+          category: target,
+          industry: retrievalIntent?.industry || "fashion",
+          subtype,
+        })
+      ),
+      image_url: null,
+      style_tags: [normalizeModeLabel(retrievalIntent.selected_mode).toLowerCase(), entry.role],
+    });
+  });
+
+  if (palettePriority[0]?.hex) {
+    const distractorHex = safeHex(rotateHue(palettePriority[0].hex, 130)) || "#FF4D4D";
+    out.push({
+      id: "preview_distractor_1",
+      title: `Bright Accent ${titleCase(getCategorySubtypeForIndex(target, 0))}`,
+      category: target,
+      color_hex: distractorHex,
+      color_name: getColorName(distractorHex),
+      brand: "Preview",
+      affiliate_link: buildAmazonSearchLink(`bright ${getCategorySubtypeForIndex(target, 0)} fashion outfit`),
+      image_url: null,
+      style_tags: ["experimental"],
+    });
+  }
+
+  return out;
+}
+
+function shopperLabelForRole(role) {
+  const map = {
+    anchor: "Best Match",
+    support: "Soft Match",
+    stabilizer: "Safe Neutral",
+    accent: "Bold Option",
+  };
+  return map[role] || titleCase(role);
+}
+
+function shopperReasonForRole(role) {
+  const map = {
+    anchor: "Best extension for maintaining the look.",
+    support: "Blends smoothly with the palette.",
+    stabilizer: "Grounds the outfit with a stable neutral.",
+    accent: "Adds a stronger pop if you want more energy.",
+  };
+  return map[role] || "Recommended match for this direction.";
+}
+
+function buildRoleQueries(retrievalIntent) {
+  const target = normalizeCategoryLabel(retrievalIntent?.target_item, "piece");
+  const palettePriority = Array.isArray(retrievalIntent?.palette_priority) ? retrievalIntent.palette_priority : [];
+
+  return palettePriority.map((entry, idx) => {
+    const keywords = getRetailColorKeywords(entry.hex);
+    const subtype = getCategorySubtypeForIndex(target, idx);
+
+    const primaryQuery = buildPrimaryContextualQuery({
+      colorKeyword: keywords[0],
+      category: target,
+      industry: retrievalIntent?.industry || "fashion",
+      subtype,
+    });
+
+    const expandedQueries = dedupeKeywords(
+      keywords.flatMap((keyword) =>
+        buildContextualAmazonQueries({
+          colorKeyword: keyword,
+          category: target,
+          industry: retrievalIntent?.industry || "fashion",
+          limit: 3,
+        })
+      )
+    ).slice(0, 3);
+
+    return {
+      role: entry.role,
+      shopper_label: shopperLabelForRole(entry.role),
+      color_hex: entry.hex,
+      color_name: entry.name || getColorName(entry.hex),
+      subtype,
+      primary_query: primaryQuery,
+      expanded_queries: expandedQueries,
+      amazon_link: buildAmazonSearchLink(primaryQuery),
+      expanded_links: expandedQueries.map((q) => ({
+        query: q,
+        amazon_link: buildAmazonSearchLink(q),
+      })),
+      reason: shopperReasonForRole(entry.role),
+    };
+  });
+}
+
+function buildAlternativeDirections(outfitAnalysis, opts = {}) {
+  const current = normalizeModeLabel(opts.currentMode || outfitAnalysis?.best_mode || "Balance");
+  const targetItem = normalizeCategoryLabel(opts.targetItem || "piece", "piece");
+
+  return (Array.isArray(outfitAnalysis?.mode_scores) ? outfitAnalysis.mode_scores : [])
+    .filter((row) => normalizeModeLabel(row.mode) !== current)
+    .slice(0, 3)
+    .map((row) => ({
+      mode: normalizeModeLabel(row.mode),
+      score: row.score,
+      target_item: targetItem,
+      action_label: `Try ${normalizeModeLabel(row.mode)}`,
+    }));
+}
+
+function buildShoppingAssist(outfitAnalysis, retrievalIntent, rankedProducts = []) {
+  const displayCount = retrievalIntent?.initial_display_count || 4;
+  const expandedCount = retrievalIntent?.expanded_display_count || 12;
+
+  const roleQueries = buildRoleQueries(retrievalIntent);
+  const roleQueryMap = Object.fromEntries(roleQueries.map((row) => [row.role, row]));
+
+  const topResults = rankedProducts.slice(0, displayCount).map((product) => {
+    const fallbackRole = product.matched_role || "support";
+    const roleRow = roleQueryMap[fallbackRole] || roleQueries[0] || null;
+
+    return {
+      id: product.id,
+      title: product.title,
+      shopper_label: shopperLabelForRole(fallbackRole),
+      role: fallbackRole,
+      reason: roleRow?.reason || shopperReasonForRole(fallbackRole),
+      piece_fit_score: product.piece_fit_score,
+      matched_mode: product.matched_mode,
+      color_hex: product.color_hex,
+      color_name: product.color_name || (product.color_hex ? getColorName(product.color_hex) : null),
+      amazon_link:
+        product.affiliate_link ||
+        roleRow?.amazon_link ||
+        buildAmazonSearchLink(
+          buildPrimaryContextualQuery({
+            colorKeyword: getRetailColorKeywords(product.color_hex)[0] || "classic",
+            category: retrievalIntent.target_item,
+            industry: retrievalIntent?.industry || "fashion",
+            subtype: roleRow?.subtype || getCategorySubtypeForIndex(retrievalIntent.target_item, 0),
+          })
+        ),
+      query:
+        roleRow?.primary_query ||
+        buildPrimaryContextualQuery({
+          colorKeyword: getRetailColorKeywords(product.color_hex)[0] || "classic",
+          category: retrievalIntent.target_item,
+          industry: retrievalIntent?.industry || "fashion",
+          subtype: roleRow?.subtype || getCategorySubtypeForIndex(retrievalIntent.target_item, 0),
+        }),
+      why_it_matches: product.why_it_matches,
+    };
+  });
+
+  const moreOptions = rankedProducts.slice(displayCount, expandedCount).map((product) => {
+    const fallbackRole = product.matched_role || "support";
+    const roleRow = roleQueryMap[fallbackRole] || roleQueries[0] || null;
+
+    return {
+      id: product.id,
+      title: product.title,
+      shopper_label: shopperLabelForRole(fallbackRole),
+      role: fallbackRole,
+      piece_fit_score: product.piece_fit_score,
+      color_hex: product.color_hex,
+      color_name: product.color_name || (product.color_hex ? getColorName(product.color_hex) : null),
+      amazon_link:
+        product.affiliate_link ||
+        roleRow?.amazon_link ||
+        buildAmazonSearchLink(
+          buildPrimaryContextualQuery({
+            colorKeyword: getRetailColorKeywords(product.color_hex)[0] || "classic",
+            category: retrievalIntent.target_item,
+            industry: retrievalIntent?.industry || "fashion",
+            subtype: roleRow?.subtype || getCategorySubtypeForIndex(retrievalIntent.target_item, 0),
+          })
+        ),
+      query:
+        roleRow?.primary_query ||
+        buildPrimaryContextualQuery({
+          colorKeyword: getRetailColorKeywords(product.color_hex)[0] || "classic",
+          category: retrievalIntent.target_item,
+          industry: retrievalIntent?.industry || "fashion",
+          subtype: roleRow?.subtype || getCategorySubtypeForIndex(retrievalIntent.target_item, 0),
+        }),
+    };
+  });
+
+  return {
+    target_item: retrievalIntent.target_item,
+    source_item: retrievalIntent.source_item,
+    selected_mode: retrievalIntent.selected_mode,
+    best_mode_score: retrievalIntent.best_mode_score,
+    intro: `Top picks for building this look further with a ${retrievalIntent.target_item}.`,
+    top_paths: topResults,
+    more_options: {
+      available: moreOptions.length > 0,
+      count: moreOptions.length,
+      label: "More Options",
+      items: moreOptions,
+    },
+    role_search_paths: roleQueries,
+    try_another_direction: buildAlternativeDirections(outfitAnalysis, {
+      currentMode: retrievalIntent.selected_mode,
+      targetItem: retrievalIntent.target_item,
+    }),
+  };
+}
+
+const REPLICATE_SAM_TIMEOUT_MS = 90000;
+const REPLICATE_SAM_POLL_MS = 1200;
+const REPLICATE_SAM_POLL_RETRY_MAX = 3;
+const REPLICATE_SAM_POLL_RETRY_DELAY_MIN_MS = 500;
+const REPLICATE_SAM_POLL_RETRY_DELAY_MAX_MS = 1200;
+const DEFAULT_REPLICATE_SAM_VERSION =
+  process.env.REPLICATE_SAM_VERSION ||
+  "b88dc2ea8f814e5f4af2bac79f2414079800b5035b065d4eab99c857ab67e125";
+const DEFAULT_REPLICATE_SAM_MODEL = process.env.REPLICATE_SAM_MODEL || "meta/sam-2";
+const DEFAULT_REPLICATE_GROUNDING_DINO_VERSION =
+  process.env.REPLICATE_GROUNDING_DINO_VERSION ||
+  "efd10a8ddc57ea28773327e881ce95e20cc1d734c589f7dd01d2036921ed78aa";
+const DEFAULT_GROUNDING_DINO_QUERY =
+  process.env.GROUNDING_DINO_QUERY ||
+  "person. hat. bag. shoes. boots. sneakers. loafer. horsebit loafer. penny loafer. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. belt. waist belt. belt buckle. watch. necklace. chain necklace. pendant. cross pendant. bracelet. earring. stud earring. earrings. ring. brooch. pin. shoe hardware. horsebit shoe hardware. accessory.";
+const DEFAULT_GROUNDING_DINO_GARMENT_QUERY =
+  "shirt. collared shirt. sweater. hoodie. jacket. coat. pants. trousers. shorts. skirt. dress. shoes. boots. loafer.";
+const DEFAULT_GROUNDING_DINO_ACCESSORY_QUERY =
+  "belt. belt buckle. watch. bracelet. ring. necklace. chain necklace. pendant. cross pendant. earring. stud earring. bag. glasses. hat. horsebit shoe hardware. shoe hardware.";
+
+function getSamPredictionsUrl(modelId = DEFAULT_REPLICATE_SAM_MODEL) {
+  const configured = String(process.env.REPLICATE_SAM_MODEL_PREDICTIONS_URL || "").trim();
+  if (configured) return configured;
+  return `https://api.replicate.com/v1/models/${modelId}/predictions`;
+}
+
+async function replicateRequest(url, options = {}, timeoutMs = REPLICATE_SAM_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const method = String(options?.method || "GET").toUpperCase();
+  let bodyTopLevelKeys = [];
+  if (typeof options?.body === "string" && options.body.trim()) {
+    try {
+      const parsedBody = JSON.parse(options.body);
+      if (parsedBody && typeof parsedBody === "object" && !Array.isArray(parsedBody)) {
+        bodyTopLevelKeys = Object.keys(parsedBody);
+      }
+    } catch {
+      bodyTopLevelKeys = [];
+    }
+  }
+
+  console.info("[SAM DEBUG] Replicate request dispatch", {
+    method,
+    url,
+    bodyTopLevelKeys,
+  });
+
+  try {
+    const resp = await fetch(url, {
+      ...options,
+      method,
+      signal: controller.signal,
+    });
+    const text = await resp.text();
+
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch (parseError) {
+      console.warn("[SAM DEBUG] Replicate response JSON parse failed", {
+        url,
+        parseError: parseError?.message || String(parseError),
+        preview: String(text || "").slice(0, 240),
+      });
+      data = null;
+    }
+
+    if (!resp.ok) {
+      throw new Error(data?.detail || `Replicate request failed (${resp.status})`);
+    }
+
+    return data;
+  } catch (error) {
     if (error?.name === "AbortError") {
       throw new Error("Replicate SAM timed out");
     }
