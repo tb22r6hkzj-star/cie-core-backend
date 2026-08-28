@@ -10,13 +10,20 @@ const PIECE_ALIASES = Object.freeze({
   shoe: "footwear",
   loafers: "footwear",
   loafer: "footwear",
-  necklace: "accessory_jewelry",
-  necklaces: "accessory_jewelry",
+  necklace: "necklace",
+  necklaces: "necklace",
+  chain: "necklace",
+  chains: "necklace",
+  watch: "watch",
+  watches: "watch",
+  earring: "earrings",
+  earrings: "earrings",
+  ring: "ring",
+  rings: "ring",
+  bracelet: "bracelet",
+  bracelets: "bracelet",
   jewelry: "accessory_jewelry",
   jewellery: "accessory_jewelry",
-  chain: "accessory_jewelry",
-  chains: "accessory_jewelry",
-  watch: "accessory_jewelry",
   sunglasses: "eyewear",
   glasses: "eyewear",
 });
@@ -31,7 +38,12 @@ export function normalizeSemanticPieceV1(value) {
   if (/(shirt|polo|blouse|sweater|hoodie|top)/.test(token)) return "upper_garment";
   if (/(trouser|pants|jeans|shorts|skirt)/.test(token)) return "lower_garment";
   if (/(shoe|loafer|sneaker|boot|footwear|heel|sandal)/.test(token)) return "footwear";
-  if (/(watch|necklace|jewel|chain|pendant|earring|ear_stud|bracelet|ring)/.test(token)) return "accessory_jewelry";
+  if (/(necklace|chain|pendant)/.test(token)) return "necklace";
+  if (/(earring|ear_stud)/.test(token)) return "earrings";
+  if (/(bracelet)/.test(token)) return "bracelet";
+  if (/(watch)/.test(token)) return "watch";
+  if (/(^|_)ring(s)?($|_)/.test(token)) return "ring";
+  if (/(jewel)/.test(token)) return "accessory_jewelry";
   if (/(eyewear|glasses|sunglasses)/.test(token)) return "eyewear";
   if (/(belt)/.test(token)) return "belt";
   return token || null;
@@ -52,7 +64,7 @@ function evidenceSupportsPiece(piece, value = {}) {
   for (const [alias, canonical] of Object.entries(PIECE_ALIASES)) {
     if (canonical === piece && tokens.has(alias)) return true;
   }
-  if (piece === "accessory_jewelry" && ["accessory", "jewelry", "necklace", "chain", "watch"].some((token) => tokens.has(token))) return true;
+  if (piece === "accessory_jewelry" && ["accessory", "jewelry"].some((token) => tokens.has(token))) return true;
   return false;
 }
 
