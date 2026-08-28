@@ -42,6 +42,14 @@ export function buildSemanticPublicationConstraintsV1({ reconciliation = {}, out
     ) {
       suppressedPieces.add(piece);
     }
+
+    if (
+      candidate?.action === "inventory_omission" &&
+      confidence >= CONFIRMATION_THRESHOLD &&
+      !hasDirectDinoEvidence(piece, outfitAnalysis)
+    ) {
+      suppressedPieces.add(piece);
+    }
   }
 
   return {
