@@ -22,6 +22,12 @@ test("belt aliases retain canonical belt identity", () => {
   }
 });
 
+test("combined footwear label remains spatial footwear evidence", () => {
+  const mapping = mapDinoLabel("shoes sneakers");
+  assert.equal(mapping.zone, "footwear");
+  assert.equal(mapping.category, "sneakers");
+});
+
 test("DINO waist geometry plus a tight SAM mask validates only in shadow", () => {
   const [result] = attachBeltLocalizationV1([belt()], [sam()]);
   assert.equal(result.belt_localization.validated, true);
