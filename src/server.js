@@ -3135,7 +3135,14 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         const topColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
         const topPct = Number(topColor?.pct || 0);
         const confidence = Number(region?.confidence || 0);
-        const coverage = Number(region?.coverage || region?.mask_geometry?.coverage || 0);
+        const rawCoverage = Number(region?.coverage || region?.mask_geometry?.coverage || 0);
+        const normalizedBox = region?.normalized_bbox || null;
+        const normalizedCoverage = normalizedBox
+          ? Number(normalizedBox?.w || 0) * Number(normalizedBox?.h || 0)
+          : rawCoverage <= 1
+            ? rawCoverage
+            : 0;
+        const coverage = Math.max(0, Math.min(1, normalizedCoverage));
         const dominantHex = safeHex(region?.dominant_hex || "");
         const topHex = safeHex(topColor?.hex || "");
         const evidenceHex = dominantHex || topHex;
@@ -3759,7 +3766,7 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       material = "denim";
       materialConfidence = 84;
       displayLabel = "Light Wash Denim";
-    } else if (isMultiColor(clusters) && type === "footwear") {
+    } else if (isMultiColor(clusters) && type === "footwear" && Number(clusters[0]?.pct || 0) < 0.7) {
       material = "mixed_material";
       materialConfidence = 76;
       displayLabel = "Multicolor Sneaker";
@@ -3777,6 +3784,9 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       material = "nylon";
       materialConfidence = 62;
     } else if (type === "accessory_jewelry" && zoneData?.accessory_type === "belt") {
+      material = "mixed_material";
+      materialConfidence = 50;
+    } else if (type === "lower_garment" && zoneData?.semantic_confirmed === true) {
       material = "mixed_material";
       materialConfidence = 50;
     } else if (type === "accessory_jewelry" && dominantTraits.chroma_magnitude < 20 && getLight(dominant.base) > 0.45) {
@@ -3824,7 +3834,7 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       ["accessory_jewelry", "bag", "eyewear", "headwear"].includes(type) &&
       !!zoneDominantColor?.name &&
       safeHex(zoneDominantColor.hex) === safeHex(dominant.base) &&
-      shouldPreserveDominantAccessoryColor(type, clusters);
+      (zoneData?.accessory_type === "belt" || shouldPreserveDominantAccessoryColor(type, clusters));
     const dominantColor = shouldKeepZoneDominantIdentity
       ? zoneDominantColor
       : withColorIdentity({
