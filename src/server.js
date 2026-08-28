@@ -53,6 +53,7 @@ import { applySignatureColorAuthorityV2 } from "./intelligence/signatureColorAut
 import { buildSceneOwnershipV1 } from "./intelligence/sceneOwnershipV1.js";
 import { runOpenAISemanticObserverV1 } from "./intelligence/external/openaiSemanticObserverV1.js";
 import { reconcileExternalSemanticsV1 } from "./intelligence/external/semanticReconciliationV1.js";
+import { buildSemanticPublicationConstraintsV1 } from "./intelligence/external/semanticPublicationPolicyV1.js";
 import { attachBeltLocalizationV1 } from "./intelligence/beltLocalizationV1.js";
 import { resolveMaskStrengthV1, resolveOpaqueMaskStrengthV1 } from "./intelligence/maskStrengthV1.js";
 import { normalizeExternalIntelligenceMode } from "./intelligence/visionCoreExternalIntelligencePolicyV1.js";
@@ -4845,8 +4846,10 @@ function buildPublishedGarmentColorAuthority(garmentZones, fallbackColors = []) 
   return authoritative;
 }
 
-function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], dinoGarmentRegions = [], pipeline = null, decodedImage = null, perception_v6_mode, v6_mode }) {
+function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], dinoGarmentRegions = [], pipeline = null, decodedImage = null, perception_v6_mode, v6_mode, semanticConstraints = null }) {
   const perceptionV6Mode = normalizePerceptionV6Mode(perception_v6_mode ?? v6_mode, "shadow");
+  const confirmedSemanticPieces = new Set(semanticConstraints?.confirmed_pieces || []);
+  const suppressedSemanticPieces = new Set(semanticConstraints?.suppressed_pieces || []);
   const normalizedColors = normalizeDetectedColors(topColors, dominantHex);
   const baseRoles = assignColorRoles(normalizedColors);
   const colorRoles = enforceStructuralPreservation(baseRoles, normalizedColors);
@@ -4894,9 +4897,15 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
       object_type: "belt",
       confidence: Number(region.confidence || 0),
       ...region.belt_localization,
+      semantic_confirmed: confirmedSemanticPieces.has("belt"),
+      publication_eligible: confirmedSemanticPieces.has("belt") && region?.belt_localization?.geometry_valid === true,
     }));
   const garmentEvidenceRegions = upperGarmentPurity.regions.filter(
-    (region) => !(region?.object_type === "belt" && region?.shadow_only === true)
+    (region) => !(
+      region?.object_type === "belt" &&
+      region?.shadow_only === true &&
+      !confirmedSemanticPieces.has("belt")
+    )
   );
   const garmentZoneSource = getGarmentZoneSource(samRegions, dedupedDinoRegions);
   const dinoLifecycleTrace = [
@@ -4912,6 +4921,45 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     visualIntelligence,
     garmentEvidenceRegions
   );
+  for (const piece of suppressedSemanticPieces) {
+    delete legacyGarmentZones.zones?.[piece];
+  }
+  if (confirmedSemanticPieces.has("belt")) {
+    const confirmedBeltRegion = dinoRegions.find((region) =>
+      region?.object_type === "belt" &&
+      region?.belt_localization?.semantic_match === true &&
+      region?.belt_localization?.confidence_valid === true &&
+      region?.belt_localization?.geometry_valid === true &&
+      region?.dominant_hex
+    );
+    if (confirmedBeltRegion) {
+      const dominantColor = withColorIdentity({
+        hex: confirmedBeltRegion.dominant_hex,
+        name: getColorName(confirmedBeltRegion.dominant_hex),
+        pct: Number(confirmedBeltRegion?.region_colors?.[0]?.pct || 1),
+      });
+      legacyGarmentZones.zones.accessory_jewelry = {
+        name: "Belt",
+        label: "Belt",
+        display_label: "Belt",
+        display_zone_label: "Belt",
+        accessory_type: "belt",
+        object_type: "belt",
+        hex: dominantColor.hex,
+        dominant_color: dominantColor,
+        support_colors: (confirmedBeltRegion.region_colors || []).slice(1, 3),
+        confidence: Number(confirmedBeltRegion.confidence || 0),
+        score: Number(confirmedBeltRegion.confidence || 0),
+        cluster_count: Number(confirmedBeltRegion.region_colors?.length || 1),
+        source_type: "grounding_dino",
+        evidence_ids: [confirmedBeltRegion.id].filter(Boolean),
+        publication_decision: "publish",
+        validation_decision: "accepted",
+        validation_reason: "visioncore_waist_geometry_plus_external_semantic_confirmation",
+        external_color_authority: false,
+      };
+    }
+  }
   const perceptionV5 = analyzePerceptionV5({ regions: garmentEvidenceRegions, pipeline });
   const perceptionV6 = analyzePerceptionV6({ perceptionV5, regions: garmentEvidenceRegions, decodedImage, mode: perceptionV6Mode });
   const rejectedZones = new Set(perceptionV6.publication_decisions.filter((decision) => !decision.published).map((decision) => decision.zone));
@@ -5078,11 +5126,18 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     upper_garment_purity_v1: upperGarmentPurity.summary,
     belt_localization_v1: {
       version: "belt_localization_v1",
-      mode: "shadow",
+      mode: confirmedSemanticPieces.has("belt") ? "confirmed_assist" : "shadow",
       candidates: beltLocalizationCandidates,
-      validated_count: beltLocalizationCandidates.filter((candidate) => candidate.validated).length,
-      publication_changed: false,
+      validated_count: beltLocalizationCandidates.filter((candidate) => candidate.validated || candidate.publication_eligible).length,
+      publication_changed: confirmedSemanticPieces.has("belt") && beltLocalizationCandidates.some((candidate) => candidate.publication_eligible),
       color_changed: false,
+    },
+    semantic_publication_policy_v1: semanticConstraints || {
+      version: "semantic_publication_policy_v1",
+      confirmed_pieces: [],
+      suppressed_pieces: [],
+      authority_owner: "visioncore",
+      external_color_authority: false,
     },
     perception_v5: perceptionV5,
     perception_v6: perceptionV6,
@@ -7653,10 +7708,41 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       cache: externalSemanticCache,
       cacheKey: `${publicUrl}:visioncore_external_handoff_v1:${OPENAI_SEMANTIC_MODEL}`,
     });
-    const semanticReconciliation = reconcileExternalSemanticsV1({
+    let semanticReconciliation = reconcileExternalSemanticsV1({
       handoff: externalSemantic?.handoff,
       outfitAnalysis,
     });
+    const semanticPublicationConstraints = buildSemanticPublicationConstraintsV1({
+      reconciliation: semanticReconciliation,
+      outfitAnalysis,
+    });
+    if (
+      semanticPublicationConstraints.confirmed_pieces.length ||
+      semanticPublicationConstraints.suppressed_pieces.length
+    ) {
+      outfitAnalysis = buildOutfitAnalysis({
+        dominantHex: analysis.dominantHex,
+        topColors: analysis.topColors,
+        segmentedRegions,
+        decodedImage: analysis.decodedImage,
+        perception_v6_mode: MARKET_PERCEPTION_V6_MODE,
+        dinoGarmentRegions: analysis.dinoGarmentRegions,
+        pipeline: analysis.pipeline,
+        semanticConstraints: semanticPublicationConstraints,
+      });
+      outfitAnalysis = {
+        ...outfitAnalysis,
+        capture_quality_v1: captureQuality,
+      };
+      outfitAnalysis.consumer_evidence_v1 = buildConsumerEvidenceV1({
+        outfitAnalysis,
+        captureQuality,
+      });
+      semanticReconciliation = reconcileExternalSemanticsV1({
+        handoff: externalSemantic?.handoff,
+        outfitAnalysis,
+      });
+    }
     console.info("[EXTERNAL INTELLIGENCE] semantic observer", {
       configured_mode: EXTERNAL_INTELLIGENCE_MODE,
       effective_mode: effectiveExternalIntelligenceMode,
@@ -7712,7 +7798,11 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           reason: externalSemantic.reason || null,
           disposition: externalSemantic?.handoff?.disposition || null,
           semantic_reconciliation: semanticReconciliation,
-          publication_changed: false,
+          semantic_publication_policy: semanticPublicationConstraints,
+          publication_changed: Boolean(
+            semanticPublicationConstraints.confirmed_pieces.length ||
+            semanticPublicationConstraints.suppressed_pieces.length
+          ),
           authority_owner: "visioncore",
         },
         capture_quality: captureQuality,
