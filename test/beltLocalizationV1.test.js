@@ -28,6 +28,12 @@ test("combined footwear label remains spatial footwear evidence", () => {
   assert.equal(mapping.category, "sneakers");
 });
 
+test("combined pants/skirt label remains lower-garment evidence", () => {
+  const mapped = mapDinoLabel("pants skirt", 0.54);
+  assert.equal(mapped?.zone, "lower_garment");
+  assert.equal(mapped?.category, "pants");
+});
+
 test("DINO waist geometry plus a tight SAM mask validates only in shadow", () => {
   const [result] = attachBeltLocalizationV1([belt()], [sam()]);
   assert.equal(result.belt_localization.validated, true);
