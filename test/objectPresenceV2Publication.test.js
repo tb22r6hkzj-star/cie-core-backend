@@ -64,4 +64,11 @@ test("rejected headwear cannot borrow acceptance from real jewelry in the same c
   assert.notEqual(String(accessory.object_type || "").toLowerCase(), "hat");
   assert.equal(String(accessory.object_type || "").toLowerCase(), "necklace");
   assert.equal(accessory.perception_source, "v6_assist_identity_reconciliation");
+
+  const necklaceInstance = analysis.garment_zones.zones.accessory_necklace;
+  assert.ok(necklaceInstance, "the independently validated necklace should have a dedicated UI zone");
+  assert.equal(necklaceInstance.display_zone_label, "Necklace");
+  assert.equal(necklaceInstance.external_color_authority, false);
+  assert.equal(analysis.accessory_instances_v1.detected_count, 1);
+  assert.equal(analysis.garment_zones.accessory_instances.length, 1);
 });

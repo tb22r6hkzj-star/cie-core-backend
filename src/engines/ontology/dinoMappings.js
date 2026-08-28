@@ -212,9 +212,11 @@ export const DINO_LABEL_MAPPINGS = [
     label,
     category: 'accessory',
     zone: 'accessory_jewelry',
-    display_zone_label: 'Jewelry',
-    accessory_type: label,
-    object_type: label,
+    display_zone_label: label.startsWith('earring')
+      ? 'Earrings'
+      : `${label.slice(0, 1).toUpperCase()}${label.slice(1)}`,
+    accessory_type: label.startsWith('earring') ? 'earrings' : label,
+    object_type: label.startsWith('earring') ? 'earrings' : label,
     confidence_floor: 0,
   })),
   {
