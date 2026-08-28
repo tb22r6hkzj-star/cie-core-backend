@@ -62,6 +62,30 @@ test("belt support requires a validated DINO plus SAM localization record", () =
   assert.equal(result.color_changed, false);
 });
 
+test("belt waist geometry can be independently corroborated before publication", () => {
+  const result = reconcileExternalSemanticsV1({
+    handoff: {
+      mode: "shadow",
+      semantic_observation: {
+        claims: [{ piece: "belt", action: "support", confidence: 0.99, zone: "waist" }],
+      },
+    },
+    outfitAnalysis: {
+      belt_localization_v1: {
+        candidates: [{
+          confidence: 59,
+          semantic_match: true,
+          confidence_valid: true,
+          geometry_valid: true,
+          validated: false,
+        }],
+      },
+    },
+  });
+  assert.equal(result.candidates[0].spatial_evidence.source, "dino_waist_geometry_v1");
+  assert.equal(result.candidates[0].status, "corroborated_shadow_candidate");
+});
+
 test("a hat region cannot corroborate a watch or necklace claim", () => {
   const result = reconcile([
     { action: "support", piece: "watch", confidence: 0.97 },
