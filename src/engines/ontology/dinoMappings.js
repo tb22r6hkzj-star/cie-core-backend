@@ -80,6 +80,14 @@ export const DINO_LABEL_MAPPINGS = [
     confidence_floor: 0,
   },
   {
+    // Grounding DINO can join adjacent open-vocabulary prompts. The box is
+    // still lower-body evidence even when the returned label is combined.
+    label: 'pants skirt',
+    category: 'pants',
+    zone: 'lower_garment',
+    confidence_floor: 0.4,
+  },
+  {
     label: 'jeans',
     category: 'pants',
     zone: 'lower_garment',
