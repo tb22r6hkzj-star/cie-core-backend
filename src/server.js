@@ -5069,6 +5069,29 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     }
     publishedZones = Object.fromEntries(Object.entries(legacyGarmentZones.zones || {}).flatMap(([zone, legacy]) => {
       if (suppressibleZones.has(zone) && rejectedZones.has(zone) && !acceptedZones.has(zone)) return [];
+      if (zone === "footwear") {
+        const reconciliation = acceptedPublicationByZone.get(zone) || null;
+        const objectColors = reconciliation?.object_local_colors || [];
+        const dominantObjectColor = objectColors[0] || null;
+        if (!dominantObjectColor) return [[zone, legacy]];
+        return [[zone, {
+          ...legacy,
+          name: reconciliation.selected_label || legacy?.name,
+          label: reconciliation.selected_label || legacy?.label,
+          hex: dominantObjectColor.hex,
+          dominant_color: dominantObjectColor,
+          primary_color: dominantObjectColor,
+          object_local_colors: objectColors,
+          support_colors: objectColors.slice(1),
+          detected_colors: objectColors,
+          region_colors: objectColors,
+          evidence_ids: reconciliation.selected_evidence_ids || [],
+          validation_decision: "accepted",
+          publication_decision: "publish",
+          reconciliation_result: "v6_object_local_color_reconciled",
+          perception_source: "v6_assist_object_local_color",
+        }]];
+      }
       if (zone !== "accessory_jewelry") return [[zone, legacy]];
 
       const legacyObjectType = String(legacy?.object_type || legacy?.accessory_type || "").trim().toLowerCase();
