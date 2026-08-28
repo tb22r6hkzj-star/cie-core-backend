@@ -6,7 +6,7 @@ function confidence01(value) {
 }
 
 function boxOf(value = {}) {
-  const raw = value?.bbox || value?.mask_geometry?.bbox || value;
+  const raw = value?.normalized_bbox || value?.mask_geometry?.bbox || value?.bbox || value;
   const x = Number(raw?.x_min ?? raw?.x);
   const y = Number(raw?.y_min ?? raw?.y);
   const w = Number(raw?.width ?? raw?.w ?? (Number(raw?.x_max) - x));
