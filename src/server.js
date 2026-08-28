@@ -3762,7 +3762,11 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
     let materialConfidence = 50;
     let displayLabel = zoneData.display_label || zoneData.name || getColorName(dominant.base);
 
-    if (isDenimLike(clusters) && type === "lower_garment") {
+    if (type === "footwear" && zoneData?.semantic_confirmed === true) {
+      material = "mixed_material";
+      materialConfidence = 50;
+      displayLabel = "Footwear";
+    } else if (isDenimLike(clusters) && type === "lower_garment") {
       material = "denim";
       materialConfidence = 84;
       displayLabel = "Light Wash Denim";
@@ -3803,7 +3807,7 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       materialConfidence = 61;
     }
 
-    if (type === "footwear" && getLight(dominant.base) < 0.35) {
+    if (type === "footwear" && zoneData?.semantic_confirmed !== true && getLight(dominant.base) < 0.35) {
       material = material === "mixed_material" ? "rubber" : "leather";
       materialConfidence = Math.max(materialConfidence, 66);
     }
@@ -3829,7 +3833,13 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       }
     }
 
-    const zoneDominantColor = compactColorRead(zoneData?.dominant_color);
+    const zoneDominantColor = zoneData?.accessory_type === "belt" && zoneData?.dominant_color?.color_identity
+      ? {
+          ...zoneData.dominant_color,
+          hex: safeHex(zoneData.dominant_color.hex),
+          pct: round2(zoneData.dominant_color.pct || 0),
+        }
+      : compactColorRead(zoneData?.dominant_color);
     const shouldKeepZoneDominantIdentity =
       ["accessory_jewelry", "bag", "eyewear", "headwear"].includes(type) &&
       !!zoneDominantColor?.name &&
@@ -4936,6 +4946,23 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     visualIntelligence,
     garmentEvidenceRegions
   );
+  if (perceptionV6Mode === "assist") {
+    const directIdentityRequired = new Set(["outerwear", "eyewear", "bag", "fur_trim"]);
+    for (const zone of directIdentityRequired) {
+      const hasDirectDinoIdentity = dinoRegions.some((region) =>
+        region?.zone === zone && (
+          Number(region?.confidence || 0) <= 1
+            ? Number(region?.confidence || 0) * 100
+            : Number(region?.confidence || 0)
+        ) >= 35
+      );
+      const hasExplicitSegmentIdentity = samRegions.some((region) => {
+        const label = String(region?.segment_label || region?.label || "").trim();
+        return region?.zone === zone && !/^segment_?\d+$/i.test(label) && getZoneFromLabel(label) === zone;
+      });
+      if (!hasDirectDinoIdentity && !hasExplicitSegmentIdentity) delete legacyGarmentZones.zones?.[zone];
+    }
+  }
   for (const piece of suppressedSemanticPieces) {
     delete legacyGarmentZones.zones?.[piece];
   }
