@@ -3855,6 +3855,11 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
     if (shouldKeepZoneDominantIdentity) {
       displayLabel = zoneDominantColor.name;
     }
+    const primaryColor = compactColorRead(dominantColor);
+    if (zoneData?.accessory_type === "belt" && dominantColor?.color_identity && primaryColor) {
+      primaryColor.name = dominantColor.name;
+      primaryColor.color_identity = dominantColor.color_identity;
+    }
     const supportColors = clusters.slice(1, 3).map((c) => ({
       hex: c.base,
       name: getColorName(c.base),
@@ -3880,7 +3885,7 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       headwear_debug_values: buildHeadwearDebugValues(zoneData),
       consumer_color_resolution: consumerColorResolution,
       dominant_color: dominantColor,
-      primary_color: compactColorRead(dominantColor),
+      primary_color: primaryColor,
       color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
       support_colors: supportColors,
       accent_colors: accentColors,
@@ -3893,7 +3898,7 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       }),
       // Accuracy decision owns the consumer-facing primary after profile metadata is merged.
       dominant_color: dominantColor,
-      primary_color: compactColorRead(dominantColor),
+      primary_color: primaryColor,
       color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
     };
   }
