@@ -37,7 +37,10 @@ export const OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1 = Object.freeze({
 function semanticPrompt(visionCoreEvidence = {}) {
   return [
     "You are a semantic observer inside VisionCore, not the final authority.",
-    "Identify garment/accessory types, patterns, material cues, and possible ownership conflicts.",
+    "Create a comprehensive inventory with one claim for every clearly visible garment and accessory, including tops, bottoms, outerwear, belts, footwear, eyewear, bags, watches, necklaces, and other jewelry.",
+    "Use action=support when you independently observe an item, even when VisionCore did not list it. Use contradict only when VisionCore appears to list an item that is not visibly present.",
+    "Identify garment/accessory types, body zones, patterns, material cues, and possible ownership conflicts.",
+    "Do not identify the person or infer protected, demographic, medical, religious, or socioeconomic traits.",
     "Do not calculate or override hex, RGB, LAB, percentages, outfit scores, or publication decisions.",
     "If evidence is ambiguous, abstain or request targeted reanalysis.",
     `VisionCore evidence: ${JSON.stringify(visionCoreEvidence)}`,
@@ -48,6 +51,7 @@ export function buildOpenAISemanticRequestV1({ imageUrl, visionCoreEvidence = {}
   if (!imageUrl) throw new Error("VisionCore semantic observer requires imageUrl");
   return {
     model,
+    store: false,
     reasoning: { effort: "low" },
     input: [{
       role: "user",
@@ -85,6 +89,12 @@ function estimateModelCost(model, usage = {}) {
   return input * rates.input / 1_000_000 + output * rates.output / 1_000_000;
 }
 
+function semanticTimeoutMs(value = process.env.OPENAI_SEMANTIC_TIMEOUT_MS) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 30_000;
+  return Math.min(60_000, Math.max(5_000, Math.round(parsed)));
+}
+
 export async function runOpenAISemanticObserverV1({
   mode = "off",
   apiKey = process.env.OPENAI_API_KEY,
@@ -92,6 +102,7 @@ export async function runOpenAISemanticObserverV1({
   visionCoreEvidence = {},
   visionCoreDecision = {},
   model = process.env.OPENAI_SEMANTIC_MODEL || "gpt-5.6-luna",
+  timeoutMs = process.env.OPENAI_SEMANTIC_TIMEOUT_MS,
   fetchImpl = globalThis.fetch,
   cache = null,
   cacheKey = null,
@@ -104,7 +115,7 @@ export async function runOpenAISemanticObserverV1({
 
   const request = buildOpenAISemanticRequestV1({ imageUrl, visionCoreEvidence, model });
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeout = setTimeout(() => controller.abort(), semanticTimeoutMs(timeoutMs));
   const startedAt = Date.now();
   try {
     const response = await fetchImpl("https://api.openai.com/v1/responses", {

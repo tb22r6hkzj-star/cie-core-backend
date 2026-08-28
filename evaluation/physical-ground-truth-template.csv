@@ -1,0 +1,2 @@
+garment_id,item_category,item_subtype,material,finish,pattern,color_field_id,measurement_location,lab_l,lab_a,lab_b,measurement_device,illuminant_observer,device_calibrated_at,measured_at,operator_id,reference_card_present,photo_ids,annotation_status,consent_reference,retention_choice,notes
+VC-GARMENT-001,,,,,,,,,,,,,,,,,,,,,

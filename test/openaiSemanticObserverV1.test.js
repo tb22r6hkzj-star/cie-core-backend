@@ -7,8 +7,11 @@ test("request grants OpenAI semantic observation but no color authority", () => 
   const prompt = request.input[0].content[0].text;
   assert.match(prompt, /not the final authority/i);
   assert.match(prompt, /Do not calculate or override hex/i);
+  assert.match(prompt, /one claim for every clearly visible garment and accessory/i);
+  assert.match(prompt, /Do not identify the person/i);
   assert.equal(request.input[0].content[1].detail, "high");
   assert.equal(request.text.format.strict, true);
+  assert.equal(request.store, false);
 });
 
 test("off mode makes no provider call", async () => {
@@ -55,6 +58,28 @@ test("provider failure fails open to VisionCore", async () => {
   assert.equal(result.ok, false);
   assert.equal(result.fail_open, true);
   assert.equal(result.handoff.authority_owner, "visioncore");
+});
+
+test("semantic timeout is bounded and still fails open", async () => {
+  let aborted = false;
+  const result = await runOpenAISemanticObserverV1({
+    mode: "shadow",
+    apiKey: "test-key",
+    imageUrl: "https://example.test/outfit.jpg",
+    timeoutMs: 1,
+    fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => {
+        aborted = true;
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      });
+    }),
+  });
+  assert.equal(aborted, true);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "external_timeout");
+  assert.equal(result.fail_open, true);
 });
 
 test("image-hash cache prevents repeat model calls", async () => {

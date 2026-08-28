@@ -52,7 +52,13 @@ import { buildPublishedGarmentZonesV2 } from "./intelligence/publishedGarmentZon
 import { applySignatureColorAuthorityV2 } from "./intelligence/signatureColorAuthorityV2.js";
 import { buildSceneOwnershipV1 } from "./intelligence/sceneOwnershipV1.js";
 import { runOpenAISemanticObserverV1 } from "./intelligence/external/openaiSemanticObserverV1.js";
+import { reconcileExternalSemanticsV1 } from "./intelligence/external/semanticReconciliationV1.js";
+import { buildSemanticPublicationConstraintsV1 } from "./intelligence/external/semanticPublicationPolicyV1.js";
+import { attachBeltLocalizationV1 } from "./intelligence/beltLocalizationV1.js";
+import { resolveMaskStrengthV1, resolveOpaqueMaskStrengthV1 } from "./intelligence/maskStrengthV1.js";
 import { normalizeExternalIntelligenceMode } from "./intelligence/visionCoreExternalIntelligencePolicyV1.js";
+import { evaluateCaptureQualityV1 } from "./intelligence/captureQualityGateV1.js";
+import { buildConsumerEvidenceV1 } from "./intelligence/consumerEvidenceV1.js";
 import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
 import { mapDinoLabel } from "./engines/ontology/dinoMappings.js";
 import {
@@ -110,7 +116,11 @@ const MARKET_PERCEPTION_V6_MODE = normalizePerceptionV6Mode(
 // Market safety: headwear perception remains available internally, but customer-facing
 // assist publication stays off until hair-vs-headwear discrimination is validated.
 const MARKET_HEADWEAR_PUBLICATION_ENABLED = marketHeadwearPublicationEnabled(process.env);
-const EXTERNAL_INTELLIGENCE_MODE = normalizeExternalIntelligenceMode(process.env.VISIONCORE_EXTERNAL_INTELLIGENCE_MODE, "off");
+// Market default is shadow: OpenAI may observe semantics when a protected key is
+// present, but it can never change color math or publication. Missing credentials
+// still skip cleanly and preserve the VisionCore result.
+const EXTERNAL_INTELLIGENCE_MODE = normalizeExternalIntelligenceMode(process.env.VISIONCORE_EXTERNAL_INTELLIGENCE_MODE, "shadow");
+const OPENAI_SEMANTIC_MODEL = process.env.OPENAI_SEMANTIC_MODEL || "gpt-5.6-luna";
 const externalSemanticCache = new Map();
 
 function buildExternalSemanticEvidence(outfitAnalysis = {}) {
@@ -191,6 +201,9 @@ app.get("/api/debug/status", (_req, res) => {
       PIXELCUT_API_KEY: !!process.env.PIXELCUT_API_KEY,
       PIXELCUT_ENDPOINT: !!process.env.PIXELCUT_ENDPOINT,
       AMAZON_PARTNER_TAG: !!process.env.AMAZON_PARTNER_TAG,
+      OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
+      VISIONCORE_EXTERNAL_INTELLIGENCE_MODE: EXTERNAL_INTELLIGENCE_MODE,
+      OPENAI_SEMANTIC_MODEL,
     },
   });
 });
@@ -3122,7 +3135,14 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         const topColor = Array.isArray(region?.region_colors) ? region.region_colors[0] : null;
         const topPct = Number(topColor?.pct || 0);
         const confidence = Number(region?.confidence || 0);
-        const coverage = Number(region?.coverage || region?.mask_geometry?.coverage || 0);
+        const rawCoverage = Number(region?.coverage || region?.mask_geometry?.coverage || 0);
+        const normalizedBox = region?.normalized_bbox || null;
+        const normalizedCoverage = normalizedBox
+          ? Number(normalizedBox?.w || 0) * Number(normalizedBox?.h || 0)
+          : rawCoverage <= 1
+            ? rawCoverage
+            : 0;
+        const coverage = Math.max(0, Math.min(1, normalizedCoverage));
         const dominantHex = safeHex(region?.dominant_hex || "");
         const topHex = safeHex(topColor?.hex || "");
         const evidenceHex = dominantHex || topHex;
@@ -3708,10 +3728,12 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
   }
 
   function buildItem(type, zoneData) {
-    if (!zoneData?.hex) return null;
+    const zoneHex = zoneData?.hex || zoneData?.primary_color?.hex || zoneData?.dominant_color?.hex || null;
+    if (!zoneHex) return null;
     if (
       ["lower_garment", "footwear"].includes(type) &&
-      Number(zoneData?.confidence || 0) < 56
+      Number(zoneData?.confidence || 0) < 56 &&
+      zoneData?.semantic_confirmed !== true
     ) {
       return null;
     }
@@ -3723,14 +3745,14 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       return null;
     }
 
-    const zoneColors = getZoneColors(zoneData.hex);
+    const zoneColors = getZoneColors(zoneHex);
     const clusterInput = Array.isArray(zoneData?.support_colors) && zoneData.support_colors.length
-      ? [{ hex: zoneData.hex, pct: zoneData.pct || 0.5 }, ...zoneData.support_colors]
+      ? [{ hex: zoneHex, pct: zoneData.pct || 0.5 }, ...zoneData.support_colors]
       : zoneColors.length
         ? zoneColors
-        : [zoneData];
+        : [{ ...zoneData, hex: zoneHex }];
     const clusters = buildColorClusters(clusterInput);
-    const rawDominant = clusters[0] || { base: zoneData.hex, pct: 1 };
+    const rawDominant = clusters[0] || { base: zoneHex, pct: 1 };
     const consumerColorResolution = resolveConsumerZonePrimary(type, zoneData, clusters, colorEvidenceByZone?.[type] || null);
     const dominant = { ...rawDominant, base: consumerColorResolution.hex || rawDominant.base };
 
@@ -3740,11 +3762,15 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
     let materialConfidence = 50;
     let displayLabel = zoneData.display_label || zoneData.name || getColorName(dominant.base);
 
-    if (isDenimLike(clusters) && type === "lower_garment") {
+    if (type === "footwear" && zoneData?.semantic_confirmed === true) {
+      material = "mixed_material";
+      materialConfidence = 50;
+      displayLabel = "Footwear";
+    } else if (isDenimLike(clusters) && type === "lower_garment") {
       material = "denim";
       materialConfidence = 84;
       displayLabel = "Light Wash Denim";
-    } else if (isMultiColor(clusters) && type === "footwear") {
+    } else if (isMultiColor(clusters) && type === "footwear" && Number(clusters[0]?.pct || 0) < 0.7) {
       material = "mixed_material";
       materialConfidence = 76;
       displayLabel = "Multicolor Sneaker";
@@ -3761,6 +3787,12 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
     } else if (type === "eyewear" && getLight(dominant.base) < 0.32) {
       material = "nylon";
       materialConfidence = 62;
+    } else if (type === "accessory_jewelry" && zoneData?.accessory_type === "belt") {
+      material = "mixed_material";
+      materialConfidence = 50;
+    } else if (type === "lower_garment" && zoneData?.semantic_confirmed === true) {
+      material = "mixed_material";
+      materialConfidence = 50;
     } else if (type === "accessory_jewelry" && dominantTraits.chroma_magnitude < 20 && getLight(dominant.base) > 0.45) {
       material = "metallic";
       materialConfidence = 64;
@@ -3775,7 +3807,7 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       materialConfidence = 61;
     }
 
-    if (type === "footwear" && getLight(dominant.base) < 0.35) {
+    if (type === "footwear" && zoneData?.semantic_confirmed !== true && getLight(dominant.base) < 0.35) {
       material = material === "mixed_material" ? "rubber" : "leather";
       materialConfidence = Math.max(materialConfidence, 66);
     }
@@ -3796,17 +3828,23 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       if (/tan|camel|beige|luxury/i.test(displayLabel) && (!tanLike || tanCoverage < 0.42)) {
         displayLabel = getColorName(dominant.base);
       }
-      if (Number(zoneData?.confidence || 0) < 58 && clusters.length < 2) {
+      if (Number(zoneData?.confidence || 0) < 58 && clusters.length < 2 && zoneData?.semantic_confirmed !== true) {
         return null;
       }
     }
 
-    const zoneDominantColor = compactColorRead(zoneData?.dominant_color);
+    const zoneDominantColor = zoneData?.accessory_type === "belt" && zoneData?.dominant_color?.color_identity
+      ? {
+          ...zoneData.dominant_color,
+          hex: safeHex(zoneData.dominant_color.hex),
+          pct: round2(zoneData.dominant_color.pct || 0),
+        }
+      : compactColorRead(zoneData?.dominant_color);
     const shouldKeepZoneDominantIdentity =
       ["accessory_jewelry", "bag", "eyewear", "headwear"].includes(type) &&
       !!zoneDominantColor?.name &&
       safeHex(zoneDominantColor.hex) === safeHex(dominant.base) &&
-      shouldPreserveDominantAccessoryColor(type, clusters);
+      (zoneData?.accessory_type === "belt" || shouldPreserveDominantAccessoryColor(type, clusters));
     const dominantColor = shouldKeepZoneDominantIdentity
       ? zoneDominantColor
       : withColorIdentity({
@@ -3816,6 +3854,11 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
         });
     if (shouldKeepZoneDominantIdentity) {
       displayLabel = zoneDominantColor.name;
+    }
+    const primaryColor = compactColorRead(dominantColor);
+    if (zoneData?.accessory_type === "belt" && dominantColor?.color_identity && primaryColor) {
+      primaryColor.name = dominantColor.name;
+      primaryColor.color_identity = dominantColor.color_identity;
     }
     const supportColors = clusters.slice(1, 3).map((c) => ({
       hex: c.base,
@@ -3842,7 +3885,7 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       headwear_debug_values: buildHeadwearDebugValues(zoneData),
       consumer_color_resolution: consumerColorResolution,
       dominant_color: dominantColor,
-      primary_color: compactColorRead(dominantColor),
+      primary_color: primaryColor,
       color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
       support_colors: supportColors,
       accent_colors: accentColors,
@@ -3855,7 +3898,7 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       }),
       // Accuracy decision owns the consumer-facing primary after profile metadata is merged.
       dominant_color: dominantColor,
-      primary_color: compactColorRead(dominantColor),
+      primary_color: primaryColor,
       color_identity_summary: buildColorIdentitySummary(dominantColor?.color_identity),
     };
   }
@@ -4833,8 +4876,10 @@ function buildPublishedGarmentColorAuthority(garmentZones, fallbackColors = []) 
   return authoritative;
 }
 
-function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], dinoGarmentRegions = [], pipeline = null, decodedImage = null, perception_v6_mode, v6_mode }) {
+function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], dinoGarmentRegions = [], pipeline = null, decodedImage = null, perception_v6_mode, v6_mode, semanticConstraints = null }) {
   const perceptionV6Mode = normalizePerceptionV6Mode(perception_v6_mode ?? v6_mode, "shadow");
+  const confirmedSemanticPieces = new Set(semanticConstraints?.confirmed_pieces || []);
+  const suppressedSemanticPieces = new Set(semanticConstraints?.suppressed_pieces || []);
   const normalizedColors = normalizeDetectedColors(topColors, dominantHex);
   const baseRoles = assignColorRoles(normalizedColors);
   const colorRoles = enforceStructuralPreservation(baseRoles, normalizedColors);
@@ -4852,11 +4897,11 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
   const inputDinoRegions = inputSegmentedRegions.filter(
     (region) => region?.source_type === "grounding_dino" || region?.source_type === "dino_detection"
   );
-  const dinoRegions = dedupeDinoRegionsByZoneAndOverlap(
+  const dinoRegions = attachBeltLocalizationV1(dedupeDinoRegionsByZoneAndOverlap(
     [...inputDinoRegions, ...(Array.isArray(dinoGarmentRegions) ? dinoGarmentRegions : [])].filter(
       (region, idx, arr) => idx === arr.findIndex((candidate) => candidate?.id === region?.id && candidate?.segment_label === region?.segment_label && candidate?.zone === region?.zone)
     )
-  );
+  ), samRegions);
   const samZones = new Set(samRegions.map((region) => region?.zone).filter((zone) => zone && zone !== "unknown"));
   const dedupedDinoRegions = samRegions.length
     ? dinoRegions.filter((region) => !samZones.has(region?.zone))
@@ -4874,7 +4919,24 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     decodedImage,
     regions: lowerGarmentPurity.regions,
   });
-  const garmentEvidenceRegions = upperGarmentPurity.regions;
+  const beltLocalizationCandidates = dinoRegions
+    .filter((region) => region?.belt_localization)
+    .map((region) => ({
+      region_id: region.id || null,
+      label: region.label || region.segment_label || "belt",
+      object_type: "belt",
+      confidence: Number(region.confidence || 0),
+      ...region.belt_localization,
+      semantic_confirmed: confirmedSemanticPieces.has("belt"),
+      publication_eligible: confirmedSemanticPieces.has("belt") && region?.belt_localization?.geometry_valid === true,
+    }));
+  const garmentEvidenceRegions = upperGarmentPurity.regions.filter(
+    (region) => !(
+      region?.object_type === "belt" &&
+      region?.shadow_only === true &&
+      !confirmedSemanticPieces.has("belt")
+    )
+  );
   const garmentZoneSource = getGarmentZoneSource(samRegions, dedupedDinoRegions);
   const dinoLifecycleTrace = [
     summarizeDinoStageForTrace("analysis.dinoGarmentRegions", dinoGarmentRegions),
@@ -4889,6 +4951,80 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     visualIntelligence,
     garmentEvidenceRegions
   );
+  if (perceptionV6Mode === "assist") {
+    const directIdentityRequired = new Set(["outerwear", "eyewear", "bag", "fur_trim"]);
+    for (const zone of directIdentityRequired) {
+      const hasDirectDinoIdentity = dinoRegions.some((region) =>
+        region?.zone === zone && (
+          Number(region?.confidence || 0) <= 1
+            ? Number(region?.confidence || 0) * 100
+            : Number(region?.confidence || 0)
+        ) >= 35
+      );
+      const hasExplicitSegmentIdentity = samRegions.some((region) => {
+        const label = String(region?.segment_label || region?.label || "").trim();
+        return region?.zone === zone && !/^segment_?\d+$/i.test(label) && getZoneFromLabel(label) === zone;
+      });
+      if (!hasDirectDinoIdentity && !hasExplicitSegmentIdentity) delete legacyGarmentZones.zones?.[zone];
+    }
+  }
+  for (const piece of suppressedSemanticPieces) {
+    delete legacyGarmentZones.zones?.[piece];
+  }
+  for (const piece of confirmedSemanticPieces) {
+    if (legacyGarmentZones.zones?.[piece]) {
+      legacyGarmentZones.zones[piece].semantic_confirmed = true;
+    }
+  }
+  if (confirmedSemanticPieces.has("belt")) {
+    const confirmedBeltRegion = dinoRegions.find((region) =>
+      region?.object_type === "belt" &&
+      region?.belt_localization?.semantic_match === true &&
+      region?.belt_localization?.confidence_valid === true &&
+      region?.belt_localization?.geometry_valid === true &&
+      region?.dominant_hex
+    );
+    if (confirmedBeltRegion) {
+      let dominantColor = withColorIdentity({
+        hex: confirmedBeltRegion.dominant_hex,
+        name: getColorName(confirmedBeltRegion.dominant_hex),
+        pct: Number(confirmedBeltRegion?.region_colors?.[0]?.pct || 1),
+      });
+      if (getLight(dominantColor.hex) < 0.12) {
+        dominantColor = {
+          ...dominantColor,
+          name: "Jet Black",
+          color_identity: {
+            name: "Jet Black",
+            translation: "Black",
+            family: "black",
+            tone: "deep",
+          },
+        };
+      }
+      legacyGarmentZones.zones.accessory_jewelry = {
+        name: "Belt",
+        label: "Belt",
+        display_label: "Belt",
+        display_zone_label: "Belt",
+        accessory_type: "belt",
+        object_type: "belt",
+        hex: dominantColor.hex,
+        dominant_color: dominantColor,
+        support_colors: (confirmedBeltRegion.region_colors || []).slice(1, 3),
+        confidence: Number(confirmedBeltRegion.confidence || 0),
+        score: Number(confirmedBeltRegion.confidence || 0),
+        cluster_count: Number(confirmedBeltRegion.region_colors?.length || 1),
+        source_type: "grounding_dino",
+        evidence_ids: [confirmedBeltRegion.id].filter(Boolean),
+        publication_decision: "publish",
+        validation_decision: "accepted",
+        validation_reason: "visioncore_waist_geometry_plus_external_semantic_confirmation",
+        external_color_authority: false,
+        semantic_confirmed: true,
+      };
+    }
+  }
   const perceptionV5 = analyzePerceptionV5({ regions: garmentEvidenceRegions, pipeline });
   const perceptionV6 = analyzePerceptionV6({ perceptionV5, regions: garmentEvidenceRegions, decodedImage, mode: perceptionV6Mode });
   const rejectedZones = new Set(perceptionV6.publication_decisions.filter((decision) => !decision.published).map((decision) => decision.zone));
@@ -5053,6 +5189,21 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     piece_color_ownership_v1: pieceColorOwnership.summary,
     lower_garment_purity_v2: lowerGarmentPurity.summary,
     upper_garment_purity_v1: upperGarmentPurity.summary,
+    belt_localization_v1: {
+      version: "belt_localization_v1",
+      mode: confirmedSemanticPieces.has("belt") ? "confirmed_assist" : "shadow",
+      candidates: beltLocalizationCandidates,
+      validated_count: beltLocalizationCandidates.filter((candidate) => candidate.validated || candidate.publication_eligible).length,
+      publication_changed: confirmedSemanticPieces.has("belt") && beltLocalizationCandidates.some((candidate) => candidate.publication_eligible),
+      color_changed: false,
+    },
+    semantic_publication_policy_v1: semanticConstraints || {
+      version: "semantic_publication_policy_v1",
+      confirmed_pieces: [],
+      suppressed_pieces: [],
+      authority_owner: "visioncore",
+      external_color_authority: false,
+    },
     perception_v5: perceptionV5,
     perception_v6: perceptionV6,
     perception_v6_mode: perceptionV6Mode,
@@ -5762,7 +5913,7 @@ const DEFAULT_REPLICATE_GROUNDING_DINO_VERSION =
   "efd10a8ddc57ea28773327e881ce95e20cc1d734c589f7dd01d2036921ed78aa";
 const DEFAULT_GROUNDING_DINO_QUERY =
   process.env.GROUNDING_DINO_QUERY ||
-  "person. hat. bag. shoes. boots. sneakers. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. accessory.";
+  "person. hat. bag. shoes. boots. sneakers. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. belt. waist belt. belt buckle. watch. necklace. chain. bracelet. earrings. ring. accessory.";
 
 function getSamPredictionsUrl(modelId = DEFAULT_REPLICATE_SAM_MODEL) {
   const configured = String(process.env.REPLICATE_SAM_MODEL_PREDICTIONS_URL || "").trim();
@@ -6063,6 +6214,9 @@ function buildDinoSegmentedRegions(detections = []) {
         label: detection?.label || mapping.label || "object",
         category: mapping.category || "piece",
         zone: mapping.zone,
+        display_zone_label: mapping.display_zone_label || null,
+        accessory_type: mapping.accessory_type || null,
+        object_type: mapping.object_type || null,
         confidence,
         source_type: "grounding_dino",
         bbox,
@@ -6221,9 +6375,32 @@ function decodeImageRgba(buffer, urlHint = "") {
 }
 
 function getMaskStrength(maskRgba, idx) {
-  const alpha = Number(maskRgba[idx + 3] || 0);
-  if (alpha > 0) return alpha;
-  return (Number(maskRgba[idx] || 0) + Number(maskRgba[idx + 1] || 0) + Number(maskRgba[idx + 2] || 0)) / 3;
+  return resolveMaskStrengthV1(
+    maskRgba[idx],
+    maskRgba[idx + 1],
+    maskRgba[idx + 2],
+    maskRgba[idx + 3]
+  );
+}
+
+function createMaskStrengthReader(maskImage = {}) {
+  const width = Number(maskImage?.width || 0);
+  const height = Number(maskImage?.height || 0);
+  const data = maskImage?.data;
+  if (!width || !height || !data) return () => 0;
+  const cornerIndexes = [
+    0,
+    (width - 1) * 4,
+    ((height - 1) * width) * 4,
+    ((height * width) - 1) * 4,
+  ];
+  const fullyOpaque = cornerIndexes.every((idx) => Number(data[idx + 3] || 0) >= 250);
+  if (!fullyOpaque) return (idx) => getMaskStrength(data, idx);
+  const cornerIntensities = cornerIndexes
+    .map((idx) => (Number(data[idx] || 0) + Number(data[idx + 1] || 0) + Number(data[idx + 2] || 0)) / 3)
+    .sort((a, b) => a - b);
+  const backgroundIntensity = (cornerIntensities[1] + cornerIntensities[2]) / 2;
+  return (idx) => resolveOpaqueMaskStrengthV1(data[idx], data[idx + 1], data[idx + 2], backgroundIntensity);
 }
 
 function extractMaskedRegionColors(baseImage, maskImage, limit = 6) {
@@ -6232,6 +6409,7 @@ function extractMaskedRegionColors(baseImage, maskImage, limit = 6) {
   const maskW = Number(maskImage?.width || 0);
   const maskH = Number(maskImage?.height || 0);
   if (!baseW || !baseH || !maskW || !maskH) return [];
+  const maskStrengthAt = createMaskStrengthReader(maskImage);
 
   const buckets = new Map();
   let pixelCount = 0;
@@ -6239,7 +6417,7 @@ function extractMaskedRegionColors(baseImage, maskImage, limit = 6) {
   for (let my = 0; my < maskH; my += 1) {
     for (let mx = 0; mx < maskW; mx += 1) {
       const mIdx = (my * maskW + mx) * 4;
-      if (getMaskStrength(maskImage.data, mIdx) < 25) continue;
+      if (maskStrengthAt(mIdx) < 25) continue;
 
       const bx = Math.max(0, Math.min(baseW - 1, Math.floor((mx / maskW) * baseW)));
       const by = Math.max(0, Math.min(baseH - 1, Math.floor((my / maskH) * baseH)));
@@ -6698,6 +6876,16 @@ function extractColorsFromDinoBboxes(imageBuffer, dinoRegions = []) {
     const { dominantHex, debug: dominantHexPreservation } = chooseDinoBboxDominantHex(region, regionColors);
     return {
       ...region,
+      image_dimensions: { width: baseImage.width, height: baseImage.height },
+      normalized_bbox: (() => {
+        const box = getPixelBboxFromDinoBbox(region.bbox, baseImage.width, baseImage.height);
+        return box ? {
+          x: box.x1 / baseImage.width,
+          y: box.y1 / baseImage.height,
+          w: box.width / baseImage.width,
+          h: box.height / baseImage.height,
+        } : null;
+      })(),
       dominant_hex: dominantHex || null,
       region_colors: regionColors,
       color_debug: {
@@ -6717,11 +6905,12 @@ function extractMaskGeometry(maskImage) {
   const maskW = Number(maskImage?.width || 0);
   const maskH = Number(maskImage?.height || 0);
   if (!maskW || !maskH) return null;
+  const maskStrengthAt = createMaskStrengthReader(maskImage);
 
   const isOn = (x, y) => {
     if (x < 0 || y < 0 || x >= maskW || y >= maskH) return false;
     const idx = (y * maskW + x) * 4;
-    return getMaskStrength(maskImage.data, idx) >= 25;
+    return maskStrengthAt(idx) >= 25;
   };
 
   let onCount = 0;
@@ -7544,8 +7733,13 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
 
     let v2;
     let outfitAnalysis;
+    let captureQuality;
     try {
       v2 = generatePalettesV2(analysis.dominantHex);
+      captureQuality = evaluateCaptureQualityV1({
+        decodedImage: analysis.decodedImage,
+        regions: segmentedRegions,
+      });
       outfitAnalysis = buildOutfitAnalysis({
         dominantHex: analysis.dominantHex,
         topColors: analysis.topColors,
@@ -7555,20 +7749,69 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         dinoGarmentRegions: analysis.dinoGarmentRegions,
         pipeline: analysis.pipeline,
       });
+      outfitAnalysis = {
+        ...outfitAnalysis,
+        capture_quality_v1: captureQuality,
+      };
+      outfitAnalysis.consumer_evidence_v1 = buildConsumerEvidenceV1({
+        outfitAnalysis,
+        captureQuality,
+      });
     } catch (error) {
       return sendStepError(res, 500, "palette_engine", error);
     }
 
+    const effectiveExternalIntelligenceMode = captureQuality?.disposition === "retake"
+      ? "off"
+      : EXTERNAL_INTELLIGENCE_MODE;
     const externalSemantic = await runOpenAISemanticObserverV1({
-      mode: EXTERNAL_INTELLIGENCE_MODE,
+      mode: effectiveExternalIntelligenceMode,
       imageUrl: publicUrl,
       visionCoreEvidence: buildExternalSemanticEvidence(outfitAnalysis),
       visionCoreDecision: buildExternalCompositeDecision(outfitAnalysis),
+      model: OPENAI_SEMANTIC_MODEL,
       cache: externalSemanticCache,
-      cacheKey: `${publicUrl}:visioncore_external_handoff_v1:${process.env.OPENAI_SEMANTIC_MODEL || "gpt-5.6-luna"}`,
+      cacheKey: `${publicUrl}:visioncore_external_handoff_v1:${OPENAI_SEMANTIC_MODEL}`,
     });
+    let semanticReconciliation = reconcileExternalSemanticsV1({
+      handoff: externalSemantic?.handoff,
+      outfitAnalysis,
+    });
+    const semanticPublicationConstraints = buildSemanticPublicationConstraintsV1({
+      reconciliation: semanticReconciliation,
+      outfitAnalysis,
+    });
+    if (
+      semanticPublicationConstraints.confirmed_pieces.length ||
+      semanticPublicationConstraints.suppressed_pieces.length
+    ) {
+      outfitAnalysis = buildOutfitAnalysis({
+        dominantHex: analysis.dominantHex,
+        topColors: analysis.topColors,
+        segmentedRegions,
+        decodedImage: analysis.decodedImage,
+        perception_v6_mode: MARKET_PERCEPTION_V6_MODE,
+        dinoGarmentRegions: analysis.dinoGarmentRegions,
+        pipeline: analysis.pipeline,
+        semanticConstraints: semanticPublicationConstraints,
+      });
+      outfitAnalysis = {
+        ...outfitAnalysis,
+        capture_quality_v1: captureQuality,
+      };
+      outfitAnalysis.consumer_evidence_v1 = buildConsumerEvidenceV1({
+        outfitAnalysis,
+        captureQuality,
+      });
+      semanticReconciliation = reconcileExternalSemanticsV1({
+        handoff: externalSemantic?.handoff,
+        outfitAnalysis,
+      });
+    }
     console.info("[EXTERNAL INTELLIGENCE] semantic observer", {
-      mode: EXTERNAL_INTELLIGENCE_MODE,
+      configured_mode: EXTERNAL_INTELLIGENCE_MODE,
+      effective_mode: effectiveExternalIntelligenceMode,
+      model: OPENAI_SEMANTIC_MODEL,
       ok: externalSemantic.ok,
       skipped: externalSemantic.skipped,
       cached: externalSemantic.cached,
@@ -7590,6 +7833,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       classification: v2.classification,
       topColors: analysis.topColors,
       palettes: v2.palettes,
+      captureQuality,
       outfit_analysis: outfitAnalysis,
       debug: {
         dino: analysis.dino_debug,
@@ -7609,18 +7853,28 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           lower_sampling_version: LOWER_SAMPLING_VERSION,
         },
         external_intelligence: {
-          mode: EXTERNAL_INTELLIGENCE_MODE,
+          configured_mode: EXTERNAL_INTELLIGENCE_MODE,
+          mode: effectiveExternalIntelligenceMode,
+          model: OPENAI_SEMANTIC_MODEL,
+          configured: !!process.env.OPENAI_API_KEY,
           ok: externalSemantic.ok,
           skipped: externalSemantic.skipped,
           cached: externalSemantic.cached || false,
           reason: externalSemantic.reason || null,
           disposition: externalSemantic?.handoff?.disposition || null,
-          publication_changed: false,
+          semantic_reconciliation: semanticReconciliation,
+          semantic_publication_policy: semanticPublicationConstraints,
+          publication_changed: Boolean(
+            semanticPublicationConstraints.confirmed_pieces.length ||
+            semanticPublicationConstraints.suppressed_pieces.length
+          ),
           authority_owner: "visioncore",
         },
+        capture_quality: captureQuality,
       },
-      summary:
-        "Primary color detected. Use Balance, Contrast, Cohesion, Natural, or Explore for structured mode-specific directions.",
+      summary: captureQuality?.disposition === "retake"
+        ? "The photograph cannot support a defensible intrinsic-color estimate. Retake it using the capture guidance."
+        : "Primary color detected. Use Balance, Contrast, Cohesion, Natural, or Explore for structured mode-specific directions.",
     });
   } catch (err) {
     console.error("transform error:", err?.message || err);
