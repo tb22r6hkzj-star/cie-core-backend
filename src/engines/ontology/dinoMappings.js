@@ -117,6 +117,12 @@ export const DINO_LABEL_MAPPINGS = [
     confidence_floor: 0,
   },
   {
+    label: 'shoes sneakers',
+    category: 'sneakers',
+    zone: 'footwear',
+    confidence_floor: 0.4,
+  },
+  {
     label: 'boots',
     category: 'boots',
     zone: 'footwear',
