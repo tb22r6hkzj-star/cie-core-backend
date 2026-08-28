@@ -11,10 +11,9 @@ export const OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1 = Object.freeze({
   required: ["schema_version", "overall_confidence", "claims"],
   properties: {
     schema_version: { type: "string", enum: ["1"] },
-    overall_confidence: { type: "number", minimum: 0, maximum: 1 },
+    overall_confidence: { type: "number" },
     claims: {
       type: "array",
-      maxItems: 24,
       items: {
         type: "object",
         additionalProperties: false,
@@ -24,14 +23,14 @@ export const OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1 = Object.freeze({
           piece: { type: ["string", "null"] },
           subtype: { type: ["string", "null"] },
           instance_key: { type: ["string", "null"] },
-          visible_count: { type: ["integer", "null"], minimum: 1, maximum: 12 },
+          visible_count: { type: ["integer", "null"] },
           component_of: { type: ["string", "null"] },
           zone: { type: ["string", "null"] },
           pattern: { type: ["string", "null"] },
           material_cue: { type: ["string", "null"] },
           ownership_hypothesis: { type: ["string", "null"] },
           reason: { type: ["string", "null"] },
-          confidence: { type: "number", minimum: 0, maximum: 1 },
+          confidence: { type: "number" },
         },
       },
     },
@@ -131,7 +130,19 @@ export async function runOpenAISemanticObserverV1({
       body: JSON.stringify(request),
       signal: controller.signal,
     });
-    if (!response?.ok) throw new Error(`OpenAI semantic observer failed with status ${response?.status || "unknown"}`);
+    if (!response?.ok) {
+      let providerError = null;
+      try {
+        providerError = await response.json();
+      } catch {
+        providerError = null;
+      }
+      const error = new Error(`OpenAI semantic observer failed with status ${response?.status || "unknown"}`);
+      error.providerStatus = Number(response?.status) || null;
+      error.providerErrorCode = String(providerError?.error?.code || "").slice(0, 80) || null;
+      error.providerErrorType = String(providerError?.error?.type || "").slice(0, 80) || null;
+      throw error;
+    }
     const payload = await response.json();
     const raw = JSON.parse(responseText(payload) || "{}");
     const observation = sanitizeExternalSemanticObservation({ provider: "openai", model, ...raw });
@@ -155,6 +166,9 @@ export async function runOpenAISemanticObserverV1({
       skipped: false,
       reason: error?.name === "AbortError" ? "external_timeout" : "external_provider_failure",
       error: error?.message || "external_provider_failure",
+      provider_status: error?.providerStatus || null,
+      provider_error_code: error?.providerErrorCode || null,
+      provider_error_type: error?.providerErrorType || null,
       latency_ms: Date.now() - startedAt,
       fail_open: true,
       handoff: evaluateExternalSemanticHandoffV1({ mode: "off", visionCoreDecision }),

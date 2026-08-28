@@ -72,6 +72,23 @@ test("provider failure fails open to VisionCore", async () => {
   assert.equal(result.handoff.authority_owner, "visioncore");
 });
 
+test("provider failure exposes only safe status and provider codes", async () => {
+  const result = await runOpenAISemanticObserverV1({
+    mode: "shadow",
+    apiKey: "must-never-appear",
+    imageUrl: "https://example.test/outfit.jpg",
+    fetchImpl: async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: { type: "invalid_request_error", code: "invalid_json_schema", message: "sensitive provider detail" } }),
+    }),
+  });
+  assert.equal(result.provider_status, 400);
+  assert.equal(result.provider_error_type, "invalid_request_error");
+  assert.equal(result.provider_error_code, "invalid_json_schema");
+  assert.doesNotMatch(JSON.stringify(result), /must-never-appear|sensitive provider detail/);
+});
+
 test("semantic timeout is bounded and still fails open", async () => {
   let aborted = false;
   const result = await runOpenAISemanticObserverV1({
