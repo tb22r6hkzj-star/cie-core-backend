@@ -54,6 +54,7 @@ import { buildSceneOwnershipV1 } from "./intelligence/sceneOwnershipV1.js";
 import { runOpenAISemanticObserverV1 } from "./intelligence/external/openaiSemanticObserverV1.js";
 import { reconcileExternalSemanticsV1 } from "./intelligence/external/semanticReconciliationV1.js";
 import { attachBeltLocalizationV1 } from "./intelligence/beltLocalizationV1.js";
+import { resolveMaskStrengthV1, resolveOpaqueMaskStrengthV1 } from "./intelligence/maskStrengthV1.js";
 import { normalizeExternalIntelligenceMode } from "./intelligence/visionCoreExternalIntelligencePolicyV1.js";
 import { evaluateCaptureQualityV1 } from "./intelligence/captureQualityGateV1.js";
 import { buildConsumerEvidenceV1 } from "./intelligence/consumerEvidenceV1.js";
@@ -5792,7 +5793,7 @@ const DEFAULT_REPLICATE_GROUNDING_DINO_VERSION =
   "efd10a8ddc57ea28773327e881ce95e20cc1d734c589f7dd01d2036921ed78aa";
 const DEFAULT_GROUNDING_DINO_QUERY =
   process.env.GROUNDING_DINO_QUERY ||
-  "person. hat. bag. shoes. boots. sneakers. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. belt. waist belt. belt buckle. accessory.";
+  "person. hat. bag. shoes. boots. sneakers. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. belt. waist belt. belt buckle. watch. necklace. chain. bracelet. earrings. ring. accessory.";
 
 function getSamPredictionsUrl(modelId = DEFAULT_REPLICATE_SAM_MODEL) {
   const configured = String(process.env.REPLICATE_SAM_MODEL_PREDICTIONS_URL || "").trim();
@@ -6254,9 +6255,32 @@ function decodeImageRgba(buffer, urlHint = "") {
 }
 
 function getMaskStrength(maskRgba, idx) {
-  const alpha = Number(maskRgba[idx + 3] || 0);
-  if (alpha > 0) return alpha;
-  return (Number(maskRgba[idx] || 0) + Number(maskRgba[idx + 1] || 0) + Number(maskRgba[idx + 2] || 0)) / 3;
+  return resolveMaskStrengthV1(
+    maskRgba[idx],
+    maskRgba[idx + 1],
+    maskRgba[idx + 2],
+    maskRgba[idx + 3]
+  );
+}
+
+function createMaskStrengthReader(maskImage = {}) {
+  const width = Number(maskImage?.width || 0);
+  const height = Number(maskImage?.height || 0);
+  const data = maskImage?.data;
+  if (!width || !height || !data) return () => 0;
+  const cornerIndexes = [
+    0,
+    (width - 1) * 4,
+    ((height - 1) * width) * 4,
+    ((height * width) - 1) * 4,
+  ];
+  const fullyOpaque = cornerIndexes.every((idx) => Number(data[idx + 3] || 0) >= 250);
+  if (!fullyOpaque) return (idx) => getMaskStrength(data, idx);
+  const cornerIntensities = cornerIndexes
+    .map((idx) => (Number(data[idx] || 0) + Number(data[idx + 1] || 0) + Number(data[idx + 2] || 0)) / 3)
+    .sort((a, b) => a - b);
+  const backgroundIntensity = (cornerIntensities[1] + cornerIntensities[2]) / 2;
+  return (idx) => resolveOpaqueMaskStrengthV1(data[idx], data[idx + 1], data[idx + 2], backgroundIntensity);
 }
 
 function extractMaskedRegionColors(baseImage, maskImage, limit = 6) {
@@ -6265,6 +6289,7 @@ function extractMaskedRegionColors(baseImage, maskImage, limit = 6) {
   const maskW = Number(maskImage?.width || 0);
   const maskH = Number(maskImage?.height || 0);
   if (!baseW || !baseH || !maskW || !maskH) return [];
+  const maskStrengthAt = createMaskStrengthReader(maskImage);
 
   const buckets = new Map();
   let pixelCount = 0;
@@ -6272,7 +6297,7 @@ function extractMaskedRegionColors(baseImage, maskImage, limit = 6) {
   for (let my = 0; my < maskH; my += 1) {
     for (let mx = 0; mx < maskW; mx += 1) {
       const mIdx = (my * maskW + mx) * 4;
-      if (getMaskStrength(maskImage.data, mIdx) < 25) continue;
+      if (maskStrengthAt(mIdx) < 25) continue;
 
       const bx = Math.max(0, Math.min(baseW - 1, Math.floor((mx / maskW) * baseW)));
       const by = Math.max(0, Math.min(baseH - 1, Math.floor((my / maskH) * baseH)));
@@ -6731,6 +6756,16 @@ function extractColorsFromDinoBboxes(imageBuffer, dinoRegions = []) {
     const { dominantHex, debug: dominantHexPreservation } = chooseDinoBboxDominantHex(region, regionColors);
     return {
       ...region,
+      image_dimensions: { width: baseImage.width, height: baseImage.height },
+      normalized_bbox: (() => {
+        const box = getPixelBboxFromDinoBbox(region.bbox, baseImage.width, baseImage.height);
+        return box ? {
+          x: box.x1 / baseImage.width,
+          y: box.y1 / baseImage.height,
+          w: box.width / baseImage.width,
+          h: box.height / baseImage.height,
+        } : null;
+      })(),
       dominant_hex: dominantHex || null,
       region_colors: regionColors,
       color_debug: {
@@ -6750,11 +6785,12 @@ function extractMaskGeometry(maskImage) {
   const maskW = Number(maskImage?.width || 0);
   const maskH = Number(maskImage?.height || 0);
   if (!maskW || !maskH) return null;
+  const maskStrengthAt = createMaskStrengthReader(maskImage);
 
   const isOn = (x, y) => {
     if (x < 0 || y < 0 || x >= maskW || y >= maskH) return false;
     const idx = (y * maskW + x) * 4;
-    return getMaskStrength(maskImage.data, idx) >= 25;
+    return maskStrengthAt(idx) >= 25;
   };
 
   let onCount = 0;
