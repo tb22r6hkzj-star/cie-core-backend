@@ -183,16 +183,26 @@ function validateObject(entry, pixels) {
     );
     const tinyIdentity = /earring|ear stud|\bring\b|brooch|\bpin\b/.test(label);
     const confidenceFloor = tinyIdentity ? .52 : .44;
+    // A jewelry box often contains substantially more skin or garment than
+    // metal. Keep the detector-backed identity, but do not publish a color
+    // unless the crop is sufficiently isolated from those surrounding pixels.
+    const surroundingMaterialDominant = r.skin >= .30;
+    if (surroundingMaterialDominant) contamination.push("skin_or_garment_dominance");
     const supported =
       pixels.sample_count >= 6 &&
+      !surroundingMaterialDominant &&
       r.highlight < .78 &&
       usableColors.length > 0 &&
       (pixels.contrast >= .018 || usableColors.some((color) => Number(color.pct || 0) >= .08));
     return {
       supported,
-      accepted: supported && entry.confidence >= confidenceFloor,
+      // Identity and color have separate authority. A localized DINO identity
+      // may publish even when its color is conservatively withheld.
+      accepted: entry.confidence >= confidenceFloor,
       reason: !supported
-        ? r.highlight >= .78
+        ? surroundingMaterialDominant
+          ? "jewelry_color_not_isolated_from_skin_or_garment"
+          : r.highlight >= .78
           ? "jewelry_glare_dominance"
           : usableColors.length === 0
             ? "jewelry_color_not_isolated_from_surroundings"
