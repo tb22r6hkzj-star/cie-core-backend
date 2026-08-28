@@ -5012,7 +5012,10 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
         object_type: "belt",
         hex: dominantColor.hex,
         dominant_color: dominantColor,
-        support_colors: (confirmedBeltRegion.region_colors || []).slice(1, 3),
+        // A detector box around a narrow belt inevitably includes nearby shirt,
+        // trousers, skin, and buckle pixels. Until an independent object mask
+        // validates a secondary color, publish only the belt's dominant color.
+        support_colors: [],
         confidence: Number(confirmedBeltRegion.confidence || 0),
         score: Number(confirmedBeltRegion.confidence || 0),
         cluster_count: Number(confirmedBeltRegion.region_colors?.length || 1),
