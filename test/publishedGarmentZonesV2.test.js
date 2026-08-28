@@ -2,6 +2,20 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { buildPublishedGarmentZonesV2 } from "../src/intelligence/publishedGarmentZonesV2.js";
 
+test("published garment color name follows the authoritative enriched primary", () => {
+  const result = buildPublishedGarmentZonesV2({
+    zones: { upper_garment: { name: "Muted Forest Green", hex: "#526354" } },
+  }, {
+    upper_garment: {
+      name: "Muted Forest Green",
+      hex: "#9B5839",
+      primary_color: { hex: "#9B5839", name: "Rich Brown", pct: 1 },
+    },
+  });
+  assert.equal(result.zones.upper_garment.name, "Rich Brown");
+  assert.equal(result.zones.upper_garment.hex, "#9B5839");
+});
+
 test("published garment zones use enriched lower-garment authority over stale raw black", () => {
   const legacy = {
     version: "garment_zone_v3",

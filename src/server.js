@@ -2038,7 +2038,13 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     mode = "washed_fabric";
     interpretation = "denim";
   } else if ((multicolorDetected || rawDinoMulticolorDetected) && zoneKey === "footwear") {
-    displayLabel = "Multicolor Sneaker";
+    const preciseFootwearText = String([
+      context?.dinoPrimaryRegionSelection?.selected_label,
+      context?.dinoPrimaryRegionSelection?.selected_display_zone_label,
+      context?.dinoPrimaryRegionSelection?.selected_accessory_type,
+    ].filter(Boolean).join(" ")).toLowerCase();
+    const explicitlySneaker = /(^|\s)sneakers?(\s|$)/.test(preciseFootwearText) && preciseFootwearText.trim() !== "shoes sneakers";
+    displayLabel = explicitlySneaker ? "Multicolor Sneaker" : "Multicolor Footwear";
     mode = "multicolor";
     interpretation = "multi_material";
   } else if (multicolorDetected && ["accessory_jewelry", "bag", "eyewear"].includes(zoneKey)) {
@@ -3065,7 +3071,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     if (zoneKey === "accessory_jewelry") {
       dinoLifecycleTrace.push(summarizeDinoStageForTrace("zoneRegions", zoneRegions));
     }
-    const regionColors = zoneRegions
+    let regionColors = zoneRegions
       .flatMap((r) => {
         const local = Array.isArray(r?.region_colors) ? r.region_colors : [];
         if (local.length) return local;
@@ -3242,7 +3248,7 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
     const refinedRegionColors = zoneRegions
       .filter((region) => !isDinoSourceType(region?.source_type))
       .flatMap((region) => Array.isArray(region?.region_colors) ? region.region_colors : []);
-    const rawDinoRegionColors = zoneRegions
+    let rawDinoRegionColors = zoneRegions
       .filter((region) => isDinoSourceType(region?.source_type))
       .flatMap((region) => Array.isArray(region?.region_colors) ? region.region_colors : []);
     const dinoOnlyZone =
@@ -3250,6 +3256,14 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       zoneRegions.every((region) => isDinoSourceType(region?.source_type));
     const dinoPrimarySelection = dinoOnlyZone ? selectBestDinoPrimaryRegion(zoneKey, zoneRegions) : { region: null, debug: null };
     const dinoPrimaryRegion = dinoPrimarySelection.region;
+    // Large generic footwear boxes often include the trouser hem. Once the
+    // best object-local box is selected, neighboring boxes are diagnostic only.
+    if (zoneKey === "footwear" && dinoPrimaryRegion) {
+      rawDinoRegionColors = Array.isArray(dinoPrimaryRegion?.region_colors)
+        ? dinoPrimaryRegion.region_colors
+        : [];
+      regionColors = rawDinoRegionColors;
+    }
     const dinoPrimaryHex = dinoOnlyZone
       ? safeHex(dinoPrimaryRegion?.dominant_hex || dinoPrimaryRegion?.region_colors?.[0]?.hex || "")
       : null;
@@ -3271,7 +3285,9 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
       : consensusCluster?.base
         ? { ...fallbackColor, hex: consensusCluster.base, pct: consensusCluster.pct }
         : fallbackColor;
-    const computedScore = Math.max(45, Math.round((chosenColor?.pct || 0.25) * 100));
+    const chosenPct = Number(chosenColor?.pct || 0.25);
+    const normalizedChosenPct = chosenPct > 1 ? chosenPct / 100 : chosenPct;
+    const computedScore = Math.min(100, Math.max(45, Math.round(normalizedChosenPct * 100)));
     const promoteFallback = shouldPromoteFallbackZone(zoneKey, evidence, computedScore);
     const hasExplicitEvidence = hasExplicitZoneRegionEvidence(zoneKey, zoneRegions, evidence);
     const strongEyewearSignal = zoneKey === "eyewear" ? hasStrongEyewearRegionSignal(zoneRegions, evidence) : false;
@@ -3771,7 +3787,18 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       material = "denim";
       materialConfidence = 84;
       displayLabel = "Light Wash Denim";
-    } else if (isMultiColor(clusters) && type === "footwear" && Number(clusters[0]?.pct || 0) < 0.7) {
+    } else if (
+      isMultiColor(clusters) &&
+      type === "footwear" &&
+      Number(clusters[0]?.pct || 0) < 0.7 &&
+      /sneaker/.test(String([
+        zoneData?.display_label,
+        zoneData?.name,
+        zoneData?.label,
+        zoneData?.garment_type,
+        zoneData?.category,
+      ].filter(Boolean).join(" ")).toLowerCase())
+    ) {
       material = "mixed_material";
       materialConfidence = 76;
       displayLabel = "Multicolor Sneaker";
@@ -5956,7 +5983,11 @@ const DEFAULT_REPLICATE_GROUNDING_DINO_VERSION =
   "efd10a8ddc57ea28773327e881ce95e20cc1d734c589f7dd01d2036921ed78aa";
 const DEFAULT_GROUNDING_DINO_QUERY =
   process.env.GROUNDING_DINO_QUERY ||
-  "person. hat. bag. shoes. boots. sneakers. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. belt. waist belt. belt buckle. watch. necklace. chain. pendant. bracelet. earring. earrings. ring. brooch. pin. accessory.";
+  "person. hat. bag. shoes. boots. sneakers. loafer. horsebit loafer. penny loafer. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. belt. waist belt. belt buckle. watch. necklace. chain necklace. pendant. cross pendant. bracelet. earring. stud earring. earrings. ring. brooch. pin. shoe hardware. horsebit shoe hardware. accessory.";
+const DEFAULT_GROUNDING_DINO_GARMENT_QUERY =
+  "shirt. collared shirt. sweater. hoodie. jacket. coat. pants. trousers. shorts. skirt. dress. shoes. boots. loafer.";
+const DEFAULT_GROUNDING_DINO_ACCESSORY_QUERY =
+  "belt. belt buckle. watch. bracelet. ring. necklace. chain necklace. pendant. cross pendant. earring. stud earring. bag. glasses. hat. horsebit shoe hardware. shoe hardware.";
 
 function getSamPredictionsUrl(modelId = DEFAULT_REPLICATE_SAM_MODEL) {
   const configured = String(process.env.REPLICATE_SAM_MODEL_PREDICTIONS_URL || "").trim();
@@ -7650,8 +7681,23 @@ async function analyzeGhostColors(ghostUrl) {
     })
     .filter((x) => !!x.hex);
 
-  const groundingDino = await runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_QUERY);
-  const dinoDetections = Array.isArray(groundingDino?.detections) ? groundingDino.detections : [];
+  const configuredSingleQuery = String(process.env.GROUNDING_DINO_QUERY || "").trim();
+  const groundingPasses = configuredSingleQuery
+    ? [await runGroundingDinoDetection(ghostUrl, configuredSingleQuery)]
+    : await Promise.all([
+      runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_GARMENT_QUERY),
+      runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_ACCESSORY_QUERY),
+    ]);
+  const dinoDetections = groundingPasses.flatMap((pass) => Array.isArray(pass?.detections) ? pass.detections : []);
+  const groundingDino = {
+    enabled: groundingPasses.some((pass) => pass?.enabled),
+    ok: groundingPasses.some((pass) => pass?.ok),
+    reason: groundingPasses.every((pass) => !pass?.ok)
+      ? groundingPasses.map((pass) => pass?.reason).filter(Boolean).join("; ") || "all_grounding_dino_passes_failed"
+      : null,
+    detections: dinoDetections,
+    pass_count: groundingPasses.length,
+  };
   let dinoGarmentRegions = buildDinoSegmentedRegions(dinoDetections);
   let decodedImage = null;
   let dinoColorEnrichmentReason = dinoGarmentRegions.length ? "no_bbox_color_enrichment" : "no_dino_garment_regions";
@@ -7681,6 +7727,7 @@ async function analyzeGhostColors(ghostUrl) {
     ok: !!groundingDino?.ok,
     reason: groundingDino?.reason || null,
     detection_count: dinoDetections.length,
+    pass_count: groundingPasses.length,
     garment_region_count: dinoGarmentRegions.length,
     dino_color_enrichment_count: dinoColorEnrichmentCount,
     dino_color_enrichment_ok: dinoColorEnrichmentOk,
@@ -7878,6 +7925,11 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       publication_changed: externalSemantic?.handoff?.publication_changed || false,
       latency_ms: externalSemantic.latency_ms || 0,
       estimated_cost_usd: externalSemantic.estimated_cost_usd || 0,
+      provider_status: externalSemantic.provider_status || null,
+      provider_error_code: externalSemantic.provider_error_code || null,
+      provider_error_type: externalSemantic.provider_error_type || null,
+      provider_error_name: externalSemantic.provider_error_name || null,
+      failure_stage: externalSemantic.failure_stage || null,
     });
 
     return res.json({
@@ -7919,6 +7971,11 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           skipped: externalSemantic.skipped,
           cached: externalSemantic.cached || false,
           reason: externalSemantic.reason || null,
+          provider_status: externalSemantic.provider_status || null,
+          provider_error_code: externalSemantic.provider_error_code || null,
+          provider_error_type: externalSemantic.provider_error_type || null,
+          provider_error_name: externalSemantic.provider_error_name || null,
+          failure_stage: externalSemantic.failure_stage || null,
           disposition: externalSemantic?.handoff?.disposition || null,
           semantic_reconciliation: semanticReconciliation,
           semantic_publication_policy: semanticPublicationConstraints,

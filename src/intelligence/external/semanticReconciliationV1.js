@@ -112,6 +112,12 @@ export function reconcileExternalSemanticsV1({ handoff = {}, outfitAnalysis = {}
     }
     return {
       piece,
+      semantic_label: claim?.piece || null,
+      semantic_subtype: claim?.subtype || null,
+      instance_key: claim?.instance_key || null,
+      visible_count: Number.isInteger(claim?.visible_count) ? claim.visible_count : null,
+      component_of: claim?.component_of || null,
+      material_cue: claim?.material_cue || null,
       proposed_zone: claim?.zone || null,
       action: claim?.action || "abstain",
       semantic_confidence: Number(claim?.confidence || 0),

@@ -88,3 +88,25 @@ test("WP-03 lifecycle trace retains stage-level dominant-color diagnostics", () 
   assert.ok(Object.hasOwn(trace.change_summary, "changed_between"));
   assert.ok(Object.hasOwn(trace.change_summary, "same_object_ref"));
 });
+
+test("footwear authority excludes a larger trouser-contaminated detection", () => {
+  const result = run([
+    {
+      id: "shoe-local", source_type: "grounding_dino", zone: "footwear",
+      label: "shoes sneakers", segment_label: "shoes sneakers", confidence: 0.4,
+      coverage: 0.02, normalized_bbox: { x: 0.31, y: 0.89, w: 0.21, h: 0.09 },
+      dominant_hex: "#201F1E", region_colors: [{ hex: "#201F1E", pct: 0.8 }, { hex: "#7F736D", pct: 0.15 }],
+    },
+    {
+      id: "shoe-plus-trousers", source_type: "grounding_dino", zone: "footwear",
+      label: "shoes", segment_label: "shoes", confidence: 0.36,
+      coverage: 0.06, normalized_bbox: { x: 0.31, y: 0.81, w: 0.33, h: 0.18 },
+      dominant_hex: "#2E3F33", region_colors: [{ hex: "#2E3F33", pct: 0.79 }, { hex: "#111113", pct: 0.12 }],
+    },
+  ]);
+  const footwear = result.garment_zones.zones.footwear;
+  assert.equal(footwear?._debug?.dino_primary_region_selection?.selected_id, "shoe-local");
+  assert.equal(footwear?.dominant_color?.hex?.toLowerCase(), "#201f1e");
+  assert.notEqual(footwear?.display_label, "Multicolor Sneaker");
+  assert.ok(!footwear.detected_colors.some((color) => color.hex?.toLowerCase() === "#2e3f33"));
+});

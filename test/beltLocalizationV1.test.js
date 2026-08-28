@@ -25,7 +25,22 @@ test("belt aliases retain canonical belt identity", () => {
 test("combined footwear label remains spatial footwear evidence", () => {
   const mapping = mapDinoLabel("shoes sneakers");
   assert.equal(mapping.zone, "footwear");
-  assert.equal(mapping.category, "sneakers");
+  assert.equal(mapping.category, "footwear");
+});
+
+test("precise loafer and shoe-hardware labels retain their identities", () => {
+  assert.equal(mapDinoLabel("horsebit loafer").category, "horsebit_loafer");
+  assert.equal(mapDinoLabel("horsebit loafer").zone, "footwear");
+  assert.equal(mapDinoLabel("horsebit shoe hardware").accessory_type, "shoe_hardware");
+  assert.equal(mapDinoLabel("horsebit shoe hardware").display_zone_label, "Shoe Hardware");
+});
+
+test("joined Grounding DINO labels recover the most specific whole-token mapping", () => {
+  assert.equal(mapDinoLabel("pants trousers").zone, "lower_garment");
+  assert.equal(mapDinoLabel("shoes loafer").category, "loafer");
+  assert.equal(mapDinoLabel("necklace chain necklace").accessory_type, "necklace");
+  assert.equal(mapDinoLabel("earring stud").accessory_type, "earrings");
+  assert.equal(mapDinoLabel("horsebit shoe hardware shoe hardware").accessory_type, "shoe_hardware");
 });
 
 test("combined pants/skirt label remains lower-garment evidence", () => {
