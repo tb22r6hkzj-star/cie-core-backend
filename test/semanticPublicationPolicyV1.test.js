@@ -28,3 +28,15 @@ test("confirms only high-confidence semantic support with VisionCore spatial evi
   assert.deepEqual(result.confirmed_pieces, ["belt"]);
   assert.equal(result.external_color_authority, false);
 });
+
+test("suppresses a high-confidence inventory omission without direct DINO evidence", () => {
+  const result = buildSemanticPublicationConstraintsV1({
+    reconciliation: { candidates: [{
+      piece: "fur_trim",
+      action: "inventory_omission",
+      semantic_confidence: 0.98,
+    }] },
+    outfitAnalysis: { segmented_regions: [] },
+  });
+  assert.deepEqual(result.suppressed_pieces, ["fur_trim"]);
+});
