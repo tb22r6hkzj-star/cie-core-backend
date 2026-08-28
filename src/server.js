@@ -3721,10 +3721,12 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
   }
 
   function buildItem(type, zoneData) {
-    if (!zoneData?.hex) return null;
+    const zoneHex = zoneData?.hex || zoneData?.primary_color?.hex || zoneData?.dominant_color?.hex || null;
+    if (!zoneHex) return null;
     if (
       ["lower_garment", "footwear"].includes(type) &&
-      Number(zoneData?.confidence || 0) < 56
+      Number(zoneData?.confidence || 0) < 56 &&
+      zoneData?.semantic_confirmed !== true
     ) {
       return null;
     }
@@ -3736,14 +3738,14 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       return null;
     }
 
-    const zoneColors = getZoneColors(zoneData.hex);
+    const zoneColors = getZoneColors(zoneHex);
     const clusterInput = Array.isArray(zoneData?.support_colors) && zoneData.support_colors.length
-      ? [{ hex: zoneData.hex, pct: zoneData.pct || 0.5 }, ...zoneData.support_colors]
+      ? [{ hex: zoneHex, pct: zoneData.pct || 0.5 }, ...zoneData.support_colors]
       : zoneColors.length
         ? zoneColors
-        : [zoneData];
+        : [{ ...zoneData, hex: zoneHex }];
     const clusters = buildColorClusters(clusterInput);
-    const rawDominant = clusters[0] || { base: zoneData.hex, pct: 1 };
+    const rawDominant = clusters[0] || { base: zoneHex, pct: 1 };
     const consumerColorResolution = resolveConsumerZonePrimary(type, zoneData, clusters, colorEvidenceByZone?.[type] || null);
     const dominant = { ...rawDominant, base: consumerColorResolution.hex || rawDominant.base };
 
@@ -3774,6 +3776,9 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
     } else if (type === "eyewear" && getLight(dominant.base) < 0.32) {
       material = "nylon";
       materialConfidence = 62;
+    } else if (type === "accessory_jewelry" && zoneData?.accessory_type === "belt") {
+      material = "mixed_material";
+      materialConfidence = 50;
     } else if (type === "accessory_jewelry" && dominantTraits.chroma_magnitude < 20 && getLight(dominant.base) > 0.45) {
       material = "metallic";
       materialConfidence = 64;
@@ -3809,7 +3814,7 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       if (/tan|camel|beige|luxury/i.test(displayLabel) && (!tanLike || tanCoverage < 0.42)) {
         displayLabel = getColorName(dominant.base);
       }
-      if (Number(zoneData?.confidence || 0) < 58 && clusters.length < 2) {
+      if (Number(zoneData?.confidence || 0) < 58 && clusters.length < 2 && zoneData?.semantic_confirmed !== true) {
         return null;
       }
     }
@@ -4924,6 +4929,11 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
   for (const piece of suppressedSemanticPieces) {
     delete legacyGarmentZones.zones?.[piece];
   }
+  for (const piece of confirmedSemanticPieces) {
+    if (legacyGarmentZones.zones?.[piece]) {
+      legacyGarmentZones.zones[piece].semantic_confirmed = true;
+    }
+  }
   if (confirmedSemanticPieces.has("belt")) {
     const confirmedBeltRegion = dinoRegions.find((region) =>
       region?.object_type === "belt" &&
@@ -4933,11 +4943,23 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
       region?.dominant_hex
     );
     if (confirmedBeltRegion) {
-      const dominantColor = withColorIdentity({
+      let dominantColor = withColorIdentity({
         hex: confirmedBeltRegion.dominant_hex,
         name: getColorName(confirmedBeltRegion.dominant_hex),
         pct: Number(confirmedBeltRegion?.region_colors?.[0]?.pct || 1),
       });
+      if (getLight(dominantColor.hex) < 0.12) {
+        dominantColor = {
+          ...dominantColor,
+          name: "Jet Black",
+          color_identity: {
+            name: "Jet Black",
+            translation: "Black",
+            family: "black",
+            tone: "deep",
+          },
+        };
+      }
       legacyGarmentZones.zones.accessory_jewelry = {
         name: "Belt",
         label: "Belt",
@@ -4957,6 +4979,7 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
         validation_decision: "accepted",
         validation_reason: "visioncore_waist_geometry_plus_external_semantic_confirmation",
         external_color_authority: false,
+        semantic_confirmed: true,
       };
     }
   }
