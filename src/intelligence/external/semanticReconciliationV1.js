@@ -70,10 +70,13 @@ function evidenceSupportsPiece(piece, value = {}) {
 
 function spatialEvidenceFor(piece, outfitAnalysis = {}) {
   if (piece === "belt") {
-    const belt = (outfitAnalysis?.belt_localization_v1?.candidates || []).find((candidate) => candidate?.validated === true);
+    const belt = (outfitAnalysis?.belt_localization_v1?.candidates || []).find((candidate) =>
+      candidate?.validated === true ||
+      (candidate?.semantic_match === true && candidate?.confidence_valid === true && candidate?.geometry_valid === true)
+    );
     return {
       supported: Boolean(belt),
-      source: belt ? "dino_sam_belt_localization_v1" : null,
+      source: belt ? (belt?.validated ? "dino_sam_belt_localization_v1" : "dino_waist_geometry_v1") : null,
       confidence: Number(belt?.confidence || 0),
     };
   }
