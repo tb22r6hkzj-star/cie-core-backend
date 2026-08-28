@@ -12,13 +12,14 @@ export function normalizeBoundingBox(region = {}, image = {}) {
     [x, y, width, height] = value.map(Number);
     if (region.bbox_format === "xyxy" || region.box_format === "xyxy") { width -= x; height -= y; }
   } else if (value && typeof value === "object") {
-    x = Number(value.x ?? value.left ?? value.x1); y = Number(value.y ?? value.top ?? value.y1);
-    width = Number(value.width ?? value.w ?? (Number(value.right ?? value.x2) - x));
-    height = Number(value.height ?? value.h ?? (Number(value.bottom ?? value.y2) - y));
+    x = Number(value.x ?? value.left ?? value.x1 ?? value.x_min);
+    y = Number(value.y ?? value.top ?? value.y1 ?? value.y_min);
+    width = Number(value.width ?? value.w ?? (Number(value.right ?? value.x2 ?? value.x_max) - x));
+    height = Number(value.height ?? value.h ?? (Number(value.bottom ?? value.y2 ?? value.y_max) - y));
   } else return null;
   if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
-  const iw = Number(image.width ?? region.image_width ?? region.imageWidth);
-  const ih = Number(image.height ?? region.image_height ?? region.imageHeight);
+  const iw = Number(image.width ?? region.image_width ?? region.imageWidth ?? region.image_dimensions?.width);
+  const ih = Number(image.height ?? region.image_height ?? region.imageHeight ?? region.image_dimensions?.height);
   const unit = x >= 0 && y >= 0 && width <= 1 && height <= 1 && x + width <= 1.000001 && y + height <= 1.000001;
   if (!unit && (!(iw > 0) || !(ih > 0))) return null;
   const nx = clamp(unit ? x : x / iw), ny = clamp(unit ? y : y / ih);
