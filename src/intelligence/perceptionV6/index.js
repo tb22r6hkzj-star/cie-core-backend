@@ -17,15 +17,21 @@ const validImage = (image) => {
 
 const rgbHex = ([r, g, b]) => `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
 const distance = (a, b) => Math.sqrt(a.reduce((sum, value, i) => sum + (value - b[i]) ** 2, 0)) / 441.67;
-const isJewelryLabel = (value) => /necklace|chain|pendant|earring|ear stud|bracelet|watch|\bring\b|brooch|\bpin\b/.test(String(value || "").toLowerCase());
-const pixelKind = ([r, g, b], label = "") => {
+const isJewelryLabel = (value) => /necklace|chain|pendant|earring|ear stud|bracelet|watch|\bring\b|brooch|\bpin\b|shoe hardware|horsebit shoe hardware|metal shoe bit/.test(String(value || "").toLowerCase());
+const pixelKind = ([r, g, b], label = "", surroundingMean = null) => {
   const max = Math.max(r, g, b), min = Math.min(r, g, b), light = (max + min) / 510;
   if (light > .88 && max - min < 35) return "highlight";
-  // Warm metallic jewelry can otherwise be misclassified as skin. This only
-  // applies inside a detector-localized jewelry crop; it never changes global
-  // garment color classification.
-  if (isJewelryLabel(label) && light >= .24 && light <= .86 && r >= g * 1.03 && g >= b * 1.16 && r - b >= 34) return "object";
-  if (r > 55 && r > b * 1.12 && r >= g * .9 && r - b > 18) return "skin";
+  const skinLike = r > 55 && r > b * 1.12 && r >= g * .9 && r - b > 18;
+  if (skinLike) {
+    // Warm metal and skin overlap in RGB. Reclassify a warm pixel as object
+    // only when it is inside a localized accessory and measurably separated
+    // from the crop surroundings. This prevents a jewelry box from turning
+    // nearby skin into a false gold palette.
+    const separatedWarmMetal = isJewelryLabel(label) && surroundingMean &&
+      light >= .24 && light <= .86 && r >= g * 1.02 && g >= b * 1.12 &&
+      distance([r, g, b], surroundingMean) >= .052;
+    return separatedWarmMetal ? "object" : "skin";
+  }
   if (light < .18) return "dark";
   return "object";
 };
@@ -55,23 +61,23 @@ function inspectPixels(region, decodedImage) {
   for (let y = Math.max(0, y1 - padY); y < Math.min(image.height, y2 + padY); y += stride) for (let x = Math.max(0, x1 - padX); x < Math.min(image.width, x2 + padX); x += stride) if (x < x1 || x >= x2 || y < y1 || y >= y2) take(x, y, surrounding);
   if (!samples.length) return { available: false, valid: true, reason: "empty_crop", crop: { x: x1, y: y1, width: x2 - x1, height: y2 - y1 } };
   const counts = { skin: 0, highlight: 0, dark: 0, object: 0 }, buckets = new Map();
+  const mean = (values) => values.length ? values.reduce((a,p) => a.map((v,i) => v + p[i]), [0,0,0]).map(v => v / values.length) : null;
+  const surroundingMean = mean(surrounding);
   for (const p of samples) {
-    const kind = pixelKind(p, label);
+    const kind = pixelKind(p, label, surroundingMean);
     counts[kind] += 1;
     if (kind !== "object" && kind !== "dark") continue;
     const key = p.map(v => Math.round(v / 32) * 32).join(",");
     const item = buckets.get(key) || { sum: [0,0,0], count: 0 };
     p.forEach((v,i) => item.sum[i] += v); item.count++; buckets.set(key,item);
   }
-  const mean = (values) => values.length ? values.reduce((a,p) => a.map((v,i) => v + p[i]), [0,0,0]).map(v => v / values.length) : null;
-  const surroundingMean = mean(surrounding);
   const localColors = [...buckets.values()].sort((a,b) => b.count-a.count).slice(0,4).map(v => {
     const rgb = v.sum.map(n => n/v.count);
     return {
       hex: rgbHex(rgb),
       pct: v.count/samples.length,
       pixel_count: v.count,
-      source_class: pixelKind(rgb, label),
+      source_class: pixelKind(rgb, label, surroundingMean),
       surrounding_distance: surroundingMean ? distance(rgb, surroundingMean) : 0,
     };
   });
@@ -196,8 +202,8 @@ function validateObject(entry, pixels) {
       (pixels.contrast >= .018 || usableColors.some((color) => Number(color.pct || 0) >= .08));
     return {
       supported,
-      // Identity and color have separate authority. A localized DINO identity
-      // may publish even when its color is conservatively withheld.
+    // Identity and color have separate authority. A localized DINO identity
+    // may publish even when its color is conservatively withheld.
       accepted: entry.confidence >= confidenceFloor,
       reason: !supported
         ? surroundingMaterialDominant

@@ -18,10 +18,14 @@ export const OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1 = Object.freeze({
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["action", "piece", "zone", "pattern", "material_cue", "ownership_hypothesis", "reason", "confidence"],
+        required: ["action", "piece", "subtype", "instance_key", "visible_count", "component_of", "zone", "pattern", "material_cue", "ownership_hypothesis", "reason", "confidence"],
         properties: {
           action: { type: "string", enum: ["support", "contradict", "request_targeted_reanalysis", "abstain"] },
           piece: { type: ["string", "null"] },
+          subtype: { type: ["string", "null"] },
+          instance_key: { type: ["string", "null"] },
+          visible_count: { type: ["integer", "null"], minimum: 1, maximum: 12 },
+          component_of: { type: ["string", "null"] },
           zone: { type: ["string", "null"] },
           pattern: { type: ["string", "null"] },
           material_cue: { type: ["string", "null"] },
@@ -37,10 +41,13 @@ export const OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1 = Object.freeze({
 function semanticPrompt(visionCoreEvidence = {}) {
   return [
     "You are a semantic observer inside VisionCore, not the final authority.",
-    "Create a comprehensive inventory with one claim for every clearly visible garment and accessory, including tops, bottoms, outerwear, belts, footwear, eyewear, bags, watches, necklaces, and other jewelry.",
+    "Create a comprehensive inventory with one claim for every clearly visible garment and every distinct accessory instance.",
+    "Do not collapse layered chains, a pendant, earrings, a watch, bracelets, rings, belt hardware, or shoe hardware into one generic jewelry claim. Give each visibly separate item its own stable instance_key and visible_count.",
+    "Use precise subtypes when visible, such as horsebit loafer, penny loafer, sneaker, chain necklace, cross pendant, stud earring, bracelet, watch, or horsebit shoe hardware.",
     "Use action=support when you independently observe an item, even when VisionCore did not list it. Use contradict only when VisionCore appears to list an item that is not visibly present.",
     "Identify garment/accessory types, body zones, patterns, material cues, and possible ownership conflicts.",
     "Do not identify the person or infer protected, demographic, medical, religious, or socioeconomic traits.",
+    "Material cues may describe metal, leather, textile, or reflective hardware, but do not name colors.",
     "Do not calculate or override hex, RGB, LAB, percentages, outfit scores, or publication decisions.",
     "If evidence is ambiguous, abstain or request targeted reanalysis.",
     `VisionCore evidence: ${JSON.stringify(visionCoreEvidence)}`,

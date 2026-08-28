@@ -126,10 +126,19 @@ export const DINO_LABEL_MAPPINGS = [
   },
   {
     label: 'shoes sneakers',
-    category: 'sneakers',
+    // A joined open-vocabulary label is evidence for footwear, not proof that
+    // the object is a sneaker. Preserve the generic identity until a precise
+    // detector or semantic corroboration supplies the subtype.
+    category: 'footwear',
     zone: 'footwear',
     confidence_floor: 0.4,
   },
+  ...['loafer', 'loafers', 'horsebit loafer', 'horsebit loafers', 'penny loafer', 'penny loafers'].map((label) => ({
+    label,
+    category: label.includes('horsebit') ? 'horsebit_loafer' : label.includes('penny') ? 'penny_loafer' : 'loafer',
+    zone: 'footwear',
+    confidence_floor: 0.4,
+  })),
   {
     label: 'boots',
     category: 'boots',
@@ -228,6 +237,15 @@ export const DINO_LABEL_MAPPINGS = [
     object_type: 'watch',
     confidence_floor: 0,
   },
+  ...['shoe hardware', 'horsebit shoe hardware', 'metal shoe bit'].map((label) => ({
+    label,
+    category: 'accessory',
+    zone: 'accessory_jewelry',
+    display_zone_label: 'Shoe Hardware',
+    accessory_type: 'shoe_hardware',
+    object_type: 'shoe_hardware',
+    confidence_floor: 0.52,
+  })),
   ...['belt', 'waist belt', 'belt buckle', 'waistband belt'].map((label) => ({
     label,
     category: 'accessory',

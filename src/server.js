@@ -3771,7 +3771,18 @@ function inferGarmentAndMaterial({ zones, normalizedColors = [], colorEvidenceBy
       material = "denim";
       materialConfidence = 84;
       displayLabel = "Light Wash Denim";
-    } else if (isMultiColor(clusters) && type === "footwear" && Number(clusters[0]?.pct || 0) < 0.7) {
+    } else if (
+      isMultiColor(clusters) &&
+      type === "footwear" &&
+      Number(clusters[0]?.pct || 0) < 0.7 &&
+      /sneaker/.test(String([
+        zoneData?.display_label,
+        zoneData?.name,
+        zoneData?.label,
+        zoneData?.garment_type,
+        zoneData?.category,
+      ].filter(Boolean).join(" ")).toLowerCase())
+    ) {
       material = "mixed_material";
       materialConfidence = 76;
       displayLabel = "Multicolor Sneaker";
@@ -5956,7 +5967,7 @@ const DEFAULT_REPLICATE_GROUNDING_DINO_VERSION =
   "efd10a8ddc57ea28773327e881ce95e20cc1d734c589f7dd01d2036921ed78aa";
 const DEFAULT_GROUNDING_DINO_QUERY =
   process.env.GROUNDING_DINO_QUERY ||
-  "person. hat. bag. shoes. boots. sneakers. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. belt. waist belt. belt buckle. watch. necklace. chain. pendant. bracelet. earring. earrings. ring. brooch. pin. accessory.";
+  "person. hat. bag. shoes. boots. sneakers. loafer. horsebit loafer. penny loafer. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. belt. waist belt. belt buckle. watch. necklace. chain necklace. pendant. cross pendant. bracelet. earring. stud earring. earrings. ring. brooch. pin. shoe hardware. horsebit shoe hardware. accessory.";
 
 function getSamPredictionsUrl(modelId = DEFAULT_REPLICATE_SAM_MODEL) {
   const configured = String(process.env.REPLICATE_SAM_MODEL_PREDICTIONS_URL || "").trim();

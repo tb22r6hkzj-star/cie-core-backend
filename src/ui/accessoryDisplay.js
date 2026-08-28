@@ -1,5 +1,10 @@
 const ACCESSORY_TYPE_RULES = [
   {
+    tokens: ["shoe hardware", "horsebit shoe hardware", "metal shoe bit"],
+    display_zone_label: "Shoe Hardware",
+    accessory_type: "shoe_hardware",
+  },
+  {
     tokens: ["hat"],
     display_zone_label: "Headwear",
     accessory_type: "hat",

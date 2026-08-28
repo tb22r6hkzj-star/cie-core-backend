@@ -57,6 +57,10 @@ function sanitizeClaim(claim = {}) {
   return {
     action,
     piece: cleanText(claim?.piece, 80),
+    subtype: cleanText(claim?.subtype, 80),
+    instance_key: cleanText(claim?.instance_key, 80),
+    visible_count: Number.isInteger(claim?.visible_count) ? Math.max(1, Math.min(12, claim.visible_count)) : null,
+    component_of: cleanText(claim?.component_of, 80),
     zone: cleanText(claim?.zone, 80),
     pattern: cleanText(claim?.pattern, 80),
     material_cue: cleanText(claim?.material_cue, 120),

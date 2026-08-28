@@ -52,6 +52,25 @@ test("publishes simultaneous jewelry types as independent UI-ready zones", () =>
   assert.equal(result.color_published_count, 3);
 });
 
+test("labels validated reflective warm jewelry pixels as measured gold tone", () => {
+  const result = buildAccessoryInstancesV1({
+    perceptionV6: {
+      evidence_ledger: [evidence({
+        id: "watch-gold",
+        label: "watch",
+        colors: [
+          { hex: "#7D5D43", pct: .34, pixel_count: 22, source_class: "object", surrounding_distance: .16 },
+          { hex: "#BEA082", pct: .31, pixel_count: 20, source_class: "object", surrounding_distance: .14 },
+          { hex: "#DDC3A1", pct: .25, pixel_count: 16, source_class: "object", surrounding_distance: .12 },
+        ],
+      })],
+    },
+  });
+  assert.equal(result.instances[0].material_family, "gold_tone_metal");
+  assert.equal(result.instances[0].material_display_name, "Gold Tone");
+  assert.equal(result.instances[0].external_color_authority, false);
+});
+
 test("normalizes Grounding DINO x_min geometry using embedded image dimensions", () => {
   const box = normalizeBoundingBox({
       bbox: { x_min: 383, y_min: 868, x_max: 406, y_max: 883, width: 23, height: 15 },

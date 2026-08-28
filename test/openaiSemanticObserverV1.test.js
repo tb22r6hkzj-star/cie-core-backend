@@ -7,11 +7,23 @@ test("request grants OpenAI semantic observation but no color authority", () => 
   const prompt = request.input[0].content[0].text;
   assert.match(prompt, /not the final authority/i);
   assert.match(prompt, /Do not calculate or override hex/i);
-  assert.match(prompt, /one claim for every clearly visible garment and accessory/i);
+  assert.match(prompt, /one claim for every clearly visible garment and every distinct accessory instance/i);
+  assert.match(prompt, /Do not collapse layered chains/i);
+  assert.match(prompt, /horsebit loafer/i);
+  assert.match(prompt, /do not name colors/i);
   assert.match(prompt, /Do not identify the person/i);
   assert.equal(request.input[0].content[1].detail, "high");
   assert.equal(request.text.format.strict, true);
   assert.equal(request.store, false);
+});
+
+test("request schema preserves distinct accessory instances and precise subtypes", () => {
+  const request = buildOpenAISemanticRequestV1({ imageUrl: "https://example.test/outfit.jpg" });
+  const claim = request.text.format.schema.properties.claims.items;
+  for (const field of ["subtype", "instance_key", "visible_count", "component_of"]) {
+    assert.ok(claim.required.includes(field));
+    assert.ok(claim.properties[field]);
+  }
 });
 
 test("off mode makes no provider call", async () => {

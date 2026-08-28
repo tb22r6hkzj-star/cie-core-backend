@@ -1,4 +1,5 @@
 import { inferAccessoryDisplayMetadata } from "../ui/accessoryDisplay.js";
+import { classifyMeasuredMetallicPaletteV1 } from "./metallicColorIdentityV1.js";
 
 const JEWELRY_TYPES = new Set([
   "necklace",
@@ -10,6 +11,7 @@ const JEWELRY_TYPES = new Set([
   "watch",
   "brooch",
   "pin",
+  "shoe_hardware",
 ]);
 
 const CONFIDENCE_FLOORS = Object.freeze({
@@ -22,6 +24,7 @@ const CONFIDENCE_FLOORS = Object.freeze({
   pendant: 0.46,
   chain: 0.46,
   necklace: 0.44,
+  shoe_hardware: 0.52,
 });
 
 function clamp01(value) {
@@ -42,6 +45,7 @@ function normalizeType(value) {
   if (/watch/.test(token)) return "watch";
   if (/(^|_)ring(s)?($|_)/.test(token)) return "ring";
   if (/brooch/.test(token)) return "brooch";
+  if (/shoe_hardware|horsebit_shoe_hardware|metal_shoe_bit/.test(token)) return "shoe_hardware";
   if (/(^|_)pin($|_)/.test(token)) return "pin";
   return token;
 }
@@ -107,6 +111,7 @@ function evaluateEntry(entry = {}) {
     geometry: entry?.geometry || null,
     validationReason: validation?.reason || null,
     pixelSampleCount: Number(pixels?.sample_count || 0),
+    highlightRatio: clamp01(pixels?.ratios?.highlight),
   };
 }
 
@@ -123,6 +128,11 @@ function mergeSameType(entries = []) {
 function buildInstance(entry, index) {
   const display = inferAccessoryDisplayMetadata([entry.type]);
   const primary = entry.colors[0] || null;
+  const metallicIdentity = classifyMeasuredMetallicPaletteV1({
+    colors: entry.colors,
+    highlightRatio: entry.highlightRatio,
+    validationSupported: entry.colorAccepted,
+  });
   return {
     instance_id: `${entry.type}_${index + 1}`,
     zone_key: `accessory_${entry.type}${index ? `_${index + 1}` : ""}`,
@@ -144,6 +154,9 @@ function buildInstance(entry, index) {
     hex: entry.colorAccepted ? primary?.hex || null : null,
     dominant_color: entry.colorAccepted ? primary : null,
     support_colors: entry.colorAccepted ? entry.colors.slice(1) : [],
+    material_family: metallicIdentity.publishable ? metallicIdentity.family : null,
+    material_display_name: metallicIdentity.publishable ? metallicIdentity.display_name : null,
+    metallic_color_evidence_v1: metallicIdentity,
     source_type: "visioncore_accessory_instances_v1",
     external_color_authority: false,
     pixel_sample_count: entry.pixelSampleCount,
