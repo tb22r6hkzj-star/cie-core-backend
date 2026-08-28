@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { buildAccessoryInstancesV1 } from "../src/intelligence/accessoryInstancesV1.js";
+import { normalizeBoundingBox } from "../src/intelligence/perceptionV5/index.js";
 
 function evidence({
   id,
@@ -49,6 +50,31 @@ test("publishes simultaneous jewelry types as independent UI-ready zones", () =>
   assert.equal(result.zones.accessory_earrings.display_zone_label, "Earrings");
   assert.equal(result.zones.accessory_watch.display_zone_label, "Watch");
   assert.equal(result.color_published_count, 3);
+});
+
+test("normalizes Grounding DINO x_min geometry using embedded image dimensions", () => {
+  const box = normalizeBoundingBox({
+      bbox: { x_min: 383, y_min: 868, x_max: 406, y_max: 883, width: 23, height: 15 },
+      image_dimensions: { width: 1187, height: 1600 },
+    });
+  assert.ok(Math.abs(box.x - 383 / 1187) < 1e-12);
+  assert.ok(Math.abs(box.y - 868 / 1600) < 1e-12);
+  assert.ok(Math.abs(box.width - 23 / 1187) < 1e-12);
+  assert.ok(Math.abs(box.height - 15 / 1600) < 1e-12);
+  assert.ok(Math.abs(box.x2 - 406 / 1187) < 1e-12);
+  assert.ok(Math.abs(box.y2 - 883 / 1600) < 1e-12);
+  assert.equal(box.normalized, true);
+});
+
+test("normalizes Grounding DINO x_min geometry when width and height are omitted", () => {
+  const box = normalizeBoundingBox({
+    bbox: { x_min: 530, y_min: 321, x_max: 629, y_max: 510 },
+    image_dimensions: { width: 1187, height: 1600 },
+  });
+  assert.ok(Math.abs(box.width - 99 / 1187) < 1e-12);
+  assert.ok(Math.abs(box.height - 189 / 1600) < 1e-12);
+  assert.ok(Math.abs(box.x2 - 629 / 1187) < 1e-12);
+  assert.ok(Math.abs(box.y2 - 510 / 1600) < 1e-12);
 });
 
 test("keeps spatially separate matching jewelry instances and removes overlapping duplicates", () => {
