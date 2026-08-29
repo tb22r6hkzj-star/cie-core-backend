@@ -55,6 +55,12 @@ import { buildSceneOwnershipV1 } from "./intelligence/sceneOwnershipV1.js";
 import { runOpenAISemanticObserverV1 } from "./intelligence/external/openaiSemanticObserverV1.js";
 import { reconcileExternalSemanticsV1 } from "./intelligence/external/semanticReconciliationV1.js";
 import { buildSemanticPublicationConstraintsV1 } from "./intelligence/external/semanticPublicationPolicyV1.js";
+import {
+  buildTargetedAccessoryReanalysisPlanV1,
+  filterTargetedAccessoryDetectionsV1,
+  normalizeTargetedAccessoryReanalysisModeV1,
+  resolveTargetedAccessoryReanalysisModeV1,
+} from "./intelligence/targetedAccessoryReanalysisV1.js";
 import { attachBeltLocalizationV1 } from "./intelligence/beltLocalizationV1.js";
 import { resolveMaskStrengthV1, resolveOpaqueMaskStrengthV1 } from "./intelligence/maskStrengthV1.js";
 import { normalizeExternalIntelligenceMode } from "./intelligence/visionCoreExternalIntelligencePolicyV1.js";
@@ -122,6 +128,10 @@ const MARKET_HEADWEAR_PUBLICATION_ENABLED = marketHeadwearPublicationEnabled(pro
 // still skip cleanly and preserve the VisionCore result.
 const EXTERNAL_INTELLIGENCE_MODE = normalizeExternalIntelligenceMode(process.env.VISIONCORE_EXTERNAL_INTELLIGENCE_MODE, "shadow");
 const OPENAI_SEMANTIC_MODEL = process.env.OPENAI_SEMANTIC_MODEL || "gpt-5.6-luna";
+const TARGETED_ACCESSORY_REANALYSIS_MODE = normalizeTargetedAccessoryReanalysisModeV1(
+  process.env.VISIONCORE_TARGETED_ACCESSORY_REANALYSIS_MODE,
+  "off"
+);
 const externalSemanticCache = new Map();
 
 function buildExternalSemanticEvidence(outfitAnalysis = {}) {
@@ -204,6 +214,7 @@ app.get("/api/debug/status", (_req, res) => {
       AMAZON_PARTNER_TAG: !!process.env.AMAZON_PARTNER_TAG,
       OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
       VISIONCORE_EXTERNAL_INTELLIGENCE_MODE: EXTERNAL_INTELLIGENCE_MODE,
+      VISIONCORE_TARGETED_ACCESSORY_REANALYSIS_MODE: TARGETED_ACCESSORY_REANALYSIS_MODE,
       OPENAI_SEMANTIC_MODEL,
     },
   });
@@ -7882,6 +7893,98 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       handoff: externalSemantic?.handoff,
       outfitAnalysis,
     });
+    let targetedAccessoryReanalysis = buildTargetedAccessoryReanalysisPlanV1({
+      mode: resolveTargetedAccessoryReanalysisModeV1({
+        externalMode: effectiveExternalIntelligenceMode,
+        configuredMode: TARGETED_ACCESSORY_REANALYSIS_MODE,
+      }),
+      reconciliation: semanticReconciliation,
+      outfitAnalysis,
+    });
+    if (targetedAccessoryReanalysis.execution_allowed && targetedAccessoryReanalysis.query) {
+      const targetedDetector = await runGroundingDinoDetection(ghostUrl, targetedAccessoryReanalysis.query);
+      const targetedFilter = filterTargetedAccessoryDetectionsV1({
+        plan: targetedAccessoryReanalysis,
+        detections: targetedDetector?.detections || [],
+      });
+      let targetedRegions = buildDinoSegmentedRegions(targetedFilter.accepted)
+        .map((region, index) => ({
+          ...region,
+          id: `targeted_dino_${index + 1}`,
+          targeted_reanalysis_v1: true,
+        }));
+      if (targetedRegions.length) {
+        try {
+          const ghostBuffer = await fetchImageBuffer(ghostUrl);
+          targetedRegions = extractColorsFromDinoBboxes(ghostBuffer, targetedRegions);
+        } catch (error) {
+          console.warn("[TARGETED REANALYSIS] Object-local color extraction unavailable", {
+            message: error?.message || String(error),
+          });
+        }
+      }
+      targetedAccessoryReanalysis = {
+        ...targetedAccessoryReanalysis,
+        executed_detector_passes: 1,
+        detector_ok: Boolean(targetedDetector?.ok),
+        detector_reason: targetedDetector?.reason || null,
+        accepted_detection_count: targetedFilter.accepted.length,
+        rejected_detection_count: targetedFilter.rejected.length,
+        accepted_detections: targetedFilter.accepted,
+        rejected_detections: targetedFilter.rejected,
+        measured_regions: targetedRegions,
+        publication_changed: false,
+        color_changed: false,
+      };
+
+      if (targetedAccessoryReanalysis.publication_allowed && targetedRegions.length) {
+        const previousAccessoryInstances = outfitAnalysis?.accessory_instances_v1?.instances || [];
+        const previousPublishedColorCount = previousAccessoryInstances.filter((instance) =>
+          instance?.color_publication_decision === "publish_object_local_color"
+        ).length;
+        analysis.dinoGarmentRegions = [
+          ...(Array.isArray(analysis?.dinoGarmentRegions) ? analysis.dinoGarmentRegions : []),
+          ...targetedRegions,
+        ];
+        outfitAnalysis = buildOutfitAnalysis({
+          dominantHex: analysis.dominantHex,
+          topColors: analysis.topColors,
+          segmentedRegions,
+          decodedImage: analysis.decodedImage,
+          perception_v6_mode: MARKET_PERCEPTION_V6_MODE,
+          dinoGarmentRegions: analysis.dinoGarmentRegions,
+          pipeline: analysis.pipeline,
+        });
+        outfitAnalysis = {
+          ...outfitAnalysis,
+          capture_quality_v1: captureQuality,
+        };
+        outfitAnalysis.consumer_evidence_v1 = buildConsumerEvidenceV1({
+          outfitAnalysis,
+          captureQuality,
+        });
+        semanticReconciliation = reconcileExternalSemanticsV1({
+          handoff: externalSemantic?.handoff,
+          outfitAnalysis,
+        });
+        const nextAccessoryInstances = outfitAnalysis?.accessory_instances_v1?.instances || [];
+        const nextPublishedColorCount = nextAccessoryInstances.filter((instance) =>
+          instance?.color_publication_decision === "publish_object_local_color"
+        ).length;
+        targetedAccessoryReanalysis.measurement_augmented = true;
+        targetedAccessoryReanalysis.publication_changed = nextAccessoryInstances.length > previousAccessoryInstances.length;
+        targetedAccessoryReanalysis.color_changed = nextPublishedColorCount > previousPublishedColorCount;
+      }
+    } else {
+      targetedAccessoryReanalysis = {
+        ...targetedAccessoryReanalysis,
+        executed_detector_passes: 0,
+        accepted_detection_count: 0,
+        rejected_detection_count: 0,
+        publication_changed: false,
+        color_changed: false,
+      };
+    }
     const semanticPublicationConstraints = buildSemanticPublicationConstraintsV1({
       reconciliation: semanticReconciliation,
       outfitAnalysis,
@@ -7978,6 +8081,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           failure_stage: externalSemantic.failure_stage || null,
           disposition: externalSemantic?.handoff?.disposition || null,
           semantic_reconciliation: semanticReconciliation,
+          targeted_accessory_reanalysis: targetedAccessoryReanalysis,
           semantic_publication_policy: semanticPublicationConstraints,
           publication_changed: Boolean(
             semanticPublicationConstraints.confirmed_pieces.length ||
