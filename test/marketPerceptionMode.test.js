@@ -27,5 +27,7 @@ test("library buildOutfitAnalysis default remains shadow for compatibility", () 
 test("all market-facing analysis routes explicitly use the market perception mode", () => {
   const source = fs.readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
   const matches = source.match(/perception_v6_mode:\s*MARKET_PERCEPTION_V6_MODE/g) || [];
-  assert.equal(matches.length, 4);
+  // The transform route has an additional guarded rebuild after targeted
+  // accessory measurement; it must use the same market mode as the first pass.
+  assert.equal(matches.length, 5);
 });
