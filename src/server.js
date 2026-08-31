@@ -123,14 +123,15 @@ const MARKET_PERCEPTION_V6_MODE = normalizePerceptionV6Mode(
 // Market safety: headwear perception remains available internally, but customer-facing
 // assist publication stays off until hair-vs-headwear discrimination is validated.
 const MARKET_HEADWEAR_PUBLICATION_ENABLED = marketHeadwearPublicationEnabled(process.env);
-// Market default is shadow: OpenAI may observe semantics when a protected key is
-// present, but it can never change color math or publication. Missing credentials
-// still skip cleanly and preserve the VisionCore result.
-const EXTERNAL_INTELLIGENCE_MODE = normalizeExternalIntelligenceMode(process.env.VISIONCORE_EXTERNAL_INTELLIGENCE_MODE, "shadow");
+// Market default is guarded assist: OpenAI may corroborate object identity and
+// request bounded VisionCore reanalysis, but it can never supply color math,
+// geometry, scores, or publication decisions. Missing credentials still skip
+// cleanly and preserve the VisionCore result.
+export const EXTERNAL_INTELLIGENCE_MODE = normalizeExternalIntelligenceMode(process.env.VISIONCORE_EXTERNAL_INTELLIGENCE_MODE, "assist");
 const OPENAI_SEMANTIC_MODEL = process.env.OPENAI_SEMANTIC_MODEL || "gpt-5.6-luna";
-const TARGETED_ACCESSORY_REANALYSIS_MODE = normalizeTargetedAccessoryReanalysisModeV1(
+export const TARGETED_ACCESSORY_REANALYSIS_MODE = normalizeTargetedAccessoryReanalysisModeV1(
   process.env.VISIONCORE_TARGETED_ACCESSORY_REANALYSIS_MODE,
-  "off"
+  "assist"
 );
 const externalSemanticCache = new Map();
 
