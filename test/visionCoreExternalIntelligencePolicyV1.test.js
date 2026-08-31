@@ -17,6 +17,10 @@ test("external semantic input cannot inject color math or publication authority"
       action: "support",
       piece: "shirt",
       pattern: "solid",
+      perceived_color_family: "blue",
+      color_appearance_cue: "deep cool blue under neutral light",
+      lighting_cue: "soft shadow",
+      color_confidence: 0.93,
       confidence: 0.96,
       hex: "#FF0000",
       percentage: 100,
@@ -30,6 +34,18 @@ test("external semantic input cannot inject color math or publication authority"
   assert.equal(sanitized.claims[0].hex, undefined);
   assert.equal(sanitized.claims[0].percentage, undefined);
   assert.equal(sanitized.claims[0].primary_color, undefined);
+  assert.equal(sanitized.claims[0].perceived_color_family, "blue");
+  assert.equal(sanitized.claims[0].color_confidence, 0.93);
+  assert.equal(sanitized.claims[0].color_appearance_cue, "deep cool blue under neutral light");
+});
+
+test("unknown semantic color labels are discarded instead of becoming measurements", () => {
+  const sanitized = sanitizeExternalSemanticObservation({
+    claims: [{ perceived_color_family: "#112233", color_confidence: 98, confidence: 1 }],
+  });
+  assert.equal(sanitized.claims[0].perceived_color_family, null);
+  assert.equal(sanitized.claims[0].color_confidence, 0.98);
+  assert.equal(sanitized.claims[0].hex, undefined);
 });
 
 test("confirmed VisionCore publication wins an external disagreement", () => {

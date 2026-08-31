@@ -117,3 +117,72 @@ test("lower garment support cannot replace VisionCore color evidence", () => {
   assert.equal(result.candidates[0].hex, undefined);
   assert.equal(outfitAnalysis.garment_zones.zones.lower_garment.primary_color.hex, "#3F5041");
 });
+
+test("matching OpenAI color family independently corroborates VisionCore HEX measurement", () => {
+  const measured = structuredClone(outfitAnalysis);
+  measured.garment_zones.zones.lower_garment = {
+    confidence: 72,
+    primary_color: { hex: "#173A63", color_identity: { family: "blue" } },
+  };
+  const result = reconcileExternalSemanticsV1({
+    handoff: { mode: "assist", semantic_observation: { claims: [{
+      action: "support",
+      piece: "pants",
+      confidence: 0.96,
+      perceived_color_family: "blue",
+      color_confidence: 0.94,
+      color_appearance_cue: "deep blue",
+      lighting_cue: "neutral",
+    }] } },
+    outfitAnalysis: measured,
+  });
+  const crosscheck = result.candidates[0].color_crosscheck;
+  assert.equal(crosscheck.disposition, "independent_color_family_corroboration");
+  assert.equal(crosscheck.visioncore_measurement.hex, "#173A63");
+  assert.equal(crosscheck.openai_hypothesis.numeric_color_supplied, false);
+  assert.equal(crosscheck.measured_hex_changed, false);
+  assert.equal(result.color_corroboration_count, 1);
+});
+
+test("high-confidence disagreement requests VisionCore remeasurement when its evidence is weak", () => {
+  const measured = structuredClone(outfitAnalysis);
+  measured.garment_zones.zones.lower_garment = {
+    confidence: 61,
+    primary_color: { hex: "#4C5646", color_identity: { family: "green" } },
+  };
+  const result = reconcileExternalSemanticsV1({
+    handoff: { mode: "assist", semantic_observation: { claims: [{
+      action: "support", piece: "pants", confidence: 0.97,
+      perceived_color_family: "brown", color_confidence: 0.95,
+    }] } },
+    outfitAnalysis: measured,
+  });
+  const crosscheck = result.candidates[0].color_crosscheck;
+  assert.equal(crosscheck.disposition, "targeted_visioncore_remeasurement_requested");
+  assert.equal(crosscheck.remeasurement_requested, true);
+  assert.equal(crosscheck.visioncore_measurement.hex, "#4C5646");
+  assert.equal(result.targeted_color_remeasurement_requested, true);
+  assert.equal(result.color_changed, false);
+});
+
+test("strong VisionCore measurement wins semantic color disagreement without mutation", () => {
+  const measured = structuredClone(outfitAnalysis);
+  measured.garment_zones.zones.lower_garment = {
+    confidence: 91,
+    primary_color: { hex: "#4C5646", color_identity: { family: "green" } },
+  };
+  const result = reconcileExternalSemanticsV1({
+    handoff: { mode: "assist", semantic_observation: { claims: [{
+      action: "support", piece: "pants", confidence: 0.98,
+      perceived_color_family: "brown", color_confidence: 0.99,
+      hex: "#7B3F00",
+    }] } },
+    outfitAnalysis: measured,
+  });
+  const crosscheck = result.candidates[0].color_crosscheck;
+  assert.equal(crosscheck.disposition, "visioncore_strong_measurement_preserved");
+  assert.equal(crosscheck.visioncore_measurement.hex, "#4C5646");
+  assert.equal(result.candidates[0].hex, undefined);
+  assert.equal(crosscheck.remeasurement_requested, false);
+  assert.equal(crosscheck.measured_hex_changed, false);
+});

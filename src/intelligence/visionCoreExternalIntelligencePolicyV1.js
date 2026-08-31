@@ -1,5 +1,10 @@
 const MODES = new Set(["off", "shadow", "assist"]);
 const SEMANTIC_ACTIONS = new Set(["support", "contradict", "request_targeted_reanalysis", "abstain"]);
+const PERCEIVED_COLOR_FAMILIES = new Set([
+  "black", "white", "gray", "brown", "beige", "red", "orange", "yellow",
+  "green", "blue", "purple", "pink", "metallic_gold", "metallic_silver",
+  "multicolor", "unclear",
+]);
 
 export const VISIONCORE_EXTERNAL_INTELLIGENCE_POLICY_V1 = Object.freeze({
   version: "1.0.0",
@@ -54,6 +59,7 @@ function cleanText(value, maxLength = 240) {
 
 function sanitizeClaim(claim = {}) {
   const action = SEMANTIC_ACTIONS.has(claim?.action) ? claim.action : "abstain";
+  const perceivedColorFamily = cleanText(claim?.perceived_color_family, 40)?.toLowerCase() || null;
   return {
     action,
     piece: cleanText(claim?.piece, 80),
@@ -63,6 +69,10 @@ function sanitizeClaim(claim = {}) {
     component_of: cleanText(claim?.component_of, 80),
     zone: cleanText(claim?.zone, 80),
     pattern: cleanText(claim?.pattern, 80),
+    perceived_color_family: PERCEIVED_COLOR_FAMILIES.has(perceivedColorFamily) ? perceivedColorFamily : null,
+    color_appearance_cue: cleanText(claim?.color_appearance_cue, 120),
+    lighting_cue: cleanText(claim?.lighting_cue, 120),
+    color_confidence: clampConfidence(claim?.color_confidence),
     material_cue: cleanText(claim?.material_cue, 120),
     ownership_hypothesis: cleanText(claim?.ownership_hypothesis),
     reason: cleanText(claim?.reason),
