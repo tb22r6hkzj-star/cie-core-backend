@@ -4,7 +4,14 @@ import fs from "node:fs";
 
 process.env.NODE_ENV = "test";
 delete process.env.PERCEPTION_V6_MODE;
-const { buildOutfitAnalysis, MARKET_PERCEPTION_V6_MODE } = await import("../src/server.js");
+delete process.env.VISIONCORE_EXTERNAL_INTELLIGENCE_MODE;
+delete process.env.VISIONCORE_TARGETED_ACCESSORY_REANALYSIS_MODE;
+const {
+  buildOutfitAnalysis,
+  EXTERNAL_INTELLIGENCE_MODE,
+  MARKET_PERCEPTION_V6_MODE,
+  TARGETED_ACCESSORY_REANALYSIS_MODE,
+} = await import("../src/server.js");
 
 const base = {
   dominantHex: "#334455",
@@ -17,6 +24,11 @@ const base = {
 
 test("market API perception mode defaults to assist", () => {
   assert.equal(MARKET_PERCEPTION_V6_MODE, "assist");
+});
+
+test("production external intelligence defaults to guarded assist", () => {
+  assert.equal(EXTERNAL_INTELLIGENCE_MODE, "assist");
+  assert.equal(TARGETED_ACCESSORY_REANALYSIS_MODE, "assist");
 });
 
 test("library buildOutfitAnalysis default remains shadow for compatibility", () => {
