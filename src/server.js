@@ -124,8 +124,9 @@ const MARKET_PERCEPTION_V6_MODE = normalizePerceptionV6Mode(
 // assist publication stays off until hair-vs-headwear discrimination is validated.
 const MARKET_HEADWEAR_PUBLICATION_ENABLED = marketHeadwearPublicationEnabled(process.env);
 // Market default is guarded assist: OpenAI may corroborate object identity and
-// request bounded VisionCore reanalysis, but it can never supply color math,
-// geometry, scores, or publication decisions. Missing credentials still skip
+// request bounded VisionCore reanalysis, and offer a blinded categorical color
+// hypothesis for comparison with VisionCore's object-local HEX/LAB measurement.
+// It can never supply color math, geometry, scores, or publication decisions. Missing credentials still skip
 // cleanly and preserve the VisionCore result.
 export const EXTERNAL_INTELLIGENCE_MODE = normalizeExternalIntelligenceMode(process.env.VISIONCORE_EXTERNAL_INTELLIGENCE_MODE, "assist");
 const OPENAI_SEMANTIC_MODEL = process.env.OPENAI_SEMANTIC_MODEL || "gpt-5.6-luna";
@@ -138,7 +139,7 @@ const externalSemanticCache = new Map();
 function buildExternalSemanticEvidence(outfitAnalysis = {}) {
   const zones = outfitAnalysis?.garment_zones?.zones || {};
   return {
-    pipeline_version: "visioncore_external_handoff_v1",
+      pipeline_version: "visioncore_external_handoff_v1",
     zones: Object.fromEntries(Object.entries(zones).map(([zoneKey, zone]) => [zoneKey, {
       publication_state: zone?.publication_state || null,
       garment_type: zone?.garment_type || zone?.label || null,

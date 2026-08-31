@@ -32,6 +32,85 @@ function cleanToken(value) {
   return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 }
 
+function normalizedConfidence(value) {
+  const confidence = Number(value || 0);
+  if (!Number.isFinite(confidence)) return 0;
+  return Math.max(0, Math.min(1, confidence > 1 ? confidence / 100 : confidence));
+}
+
+const COLOR_FAMILY_ALIASES = Object.freeze({
+  charcoal: "gray",
+  grey: "gray",
+  silver: "metallic_silver",
+  gold: "metallic_gold",
+  navy: "blue",
+  olive: "green",
+  cream: "beige",
+  ivory: "white",
+  tan: "beige",
+  burgundy: "red",
+  maroon: "red",
+  teal: "blue",
+  violet: "purple",
+});
+
+export function normalizeSemanticColorFamilyV1(value) {
+  const color = cleanToken(value);
+  if (!color) return null;
+  if (COLOR_FAMILY_ALIASES[color]) return COLOR_FAMILY_ALIASES[color];
+  for (const [alias, family] of Object.entries(COLOR_FAMILY_ALIASES)) {
+    if (color.includes(alias)) return family;
+  }
+  return [
+    "black", "white", "gray", "brown", "beige", "red", "orange", "yellow",
+    "green", "blue", "purple", "pink", "metallic_gold", "metallic_silver", "multicolor", "unclear",
+  ].find((family) => color === family || color.includes(family)) || color;
+}
+
+function measuredColorEvidence(value = {}) {
+  const color = value?.primary_color || value?.dominant_color || value?.selected_color || null;
+  const family = normalizeSemanticColorFamilyV1(
+    color?.color_identity?.family || color?.family || value?.color_identity?.family || value?.color_family
+  );
+  const hex = color?.hex || value?.dominant_hex || null;
+  return {
+    available: Boolean(family || hex),
+    family,
+    hex,
+    confidence: normalizedConfidence(value?.unified_confidence ?? value?.calibrated_confidence ?? value?.confidence ?? value?.score),
+    source: family || hex ? "visioncore_object_local_measurement" : null,
+  };
+}
+
+function buildColorCrosscheck(claim = {}, spatial = {}, mode = "off") {
+  const perceivedFamily = normalizeSemanticColorFamilyV1(claim?.perceived_color_family);
+  const semanticConfidence = normalizedConfidence(claim?.color_confidence);
+  const measurement = spatial?.color_measurement || measuredColorEvidence();
+  const base = {
+    version: "semantic_color_crosscheck_v1",
+    openai_hypothesis: {
+      family: perceivedFamily,
+      appearance_cue: claim?.color_appearance_cue || null,
+      lighting_cue: claim?.lighting_cue || null,
+      confidence: semanticConfidence,
+      numeric_color_supplied: false,
+    },
+    visioncore_measurement: measurement,
+    authority_owner: "visioncore",
+    external_color_authority: false,
+    measured_hex_changed: false,
+    remeasurement_requested: false,
+  };
+  if (!perceivedFamily || perceivedFamily === "unclear") return { ...base, disposition: "semantic_color_abstained" };
+  if (!measurement?.available || !measurement?.family) return { ...base, disposition: "visioncore_measurement_unavailable" };
+  if (perceivedFamily === measurement.family) return { ...base, disposition: "independent_color_family_corroboration" };
+  if (measurement.confidence >= 0.8) return { ...base, disposition: "visioncore_strong_measurement_preserved" };
+  if (semanticConfidence >= 0.9 && mode === "assist") {
+    return { ...base, disposition: "targeted_visioncore_remeasurement_requested", remeasurement_requested: true };
+  }
+  return { ...base, disposition: "color_disagreement_recorded" };
+}
+
 export function normalizeSemanticPieceV1(value) {
   const token = cleanToken(value);
   if (PIECE_ALIASES[token]) return PIECE_ALIASES[token];
@@ -78,6 +157,7 @@ function spatialEvidenceFor(piece, outfitAnalysis = {}) {
       supported: Boolean(belt),
       source: belt ? (belt?.validated ? "dino_sam_belt_localization_v1" : "dino_waist_geometry_v1") : null,
       confidence: Number(belt?.confidence || 0),
+      color_measurement: measuredColorEvidence(belt),
     };
   }
   const items = outfitAnalysis?.garment_analysis?.detected_items || [];
@@ -86,12 +166,21 @@ function spatialEvidenceFor(piece, outfitAnalysis = {}) {
   const item = items.find((value) => evidenceSupportsPiece(piece, value));
   const zone = zones.find((value) => evidenceSupportsPiece(piece, value));
   const region = regions.find((value) => evidenceSupportsPiece(piece, value));
-  const source = item ? "published_item" : zone ? "visioncore_zone" : region ? "segmented_region" : null;
-  const value = item || zone || region;
+  const matches = [
+    { value: item, source: "published_item" },
+    { value: zone, source: "visioncore_zone" },
+    { value: region, source: "segmented_region" },
+  ].filter((match) => match.value);
+  // Prefer the matching VisionCore record that actually carries a measured
+  // color family. Identity corroboration still uses the first spatial match.
+  const selected = matches.find((match) => measuredColorEvidence(match.value).family) || matches[0] || {};
+  const source = selected.source || null;
+  const value = selected.value;
   return {
     supported: Boolean(source),
     source,
     confidence: Number(value?.confidence ?? value?.score ?? value?.unified_confidence ?? 0),
+    color_measurement: measuredColorEvidence(value),
   };
 }
 
@@ -103,7 +192,8 @@ export function reconcileExternalSemanticsV1({ handoff = {}, outfitAnalysis = {}
   const claims = Array.isArray(handoff?.semantic_observation?.claims) ? handoff.semantic_observation.claims : [];
   const candidates = claims.slice(0, 24).map((claim) => {
     const piece = normalizeSemanticPieceV1(claim?.piece);
-    const spatial = piece ? spatialEvidenceFor(piece, outfitAnalysis) : { supported: false, source: null, confidence: 0 };
+    const spatial = piece ? spatialEvidenceFor(piece, outfitAnalysis) : { supported: false, source: null, confidence: 0, color_measurement: measuredColorEvidence() };
+    const colorCrosscheck = buildColorCrosscheck(claim, spatial, handoff?.mode || "off");
     let status = "abstained";
     if (claim?.action === "contradict") status = spatial.supported ? "conflict_review_candidate" : "unsupported_contradiction";
     else if (claim?.action === "request_targeted_reanalysis") status = "targeted_reanalysis_candidate";
@@ -118,6 +208,7 @@ export function reconcileExternalSemanticsV1({ handoff = {}, outfitAnalysis = {}
       visible_count: Number.isInteger(claim?.visible_count) ? claim.visible_count : null,
       component_of: claim?.component_of || null,
       material_cue: claim?.material_cue || null,
+      color_crosscheck: colorCrosscheck,
       proposed_zone: claim?.zone || null,
       action: claim?.action || "abstain",
       semantic_confidence: Number(claim?.confidence || 0),
@@ -149,6 +240,9 @@ export function reconcileExternalSemanticsV1({ handoff = {}, outfitAnalysis = {}
     spatial_confirmation_required_count: candidates.filter((candidate) => candidate.status === "semantic_only_requires_spatial_confirmation").length,
     conflict_count: candidates.filter((candidate) => candidate.status === "conflict_review_candidate").length,
     inventory_omission_review_count: candidates.filter((candidate) => candidate.status === "semantic_inventory_omission_review").length,
+    color_corroboration_count: candidates.filter((candidate) => candidate?.color_crosscheck?.disposition === "independent_color_family_corroboration").length,
+    color_disagreement_count: candidates.filter((candidate) => ["visioncore_strong_measurement_preserved", "targeted_visioncore_remeasurement_requested", "color_disagreement_recorded"].includes(candidate?.color_crosscheck?.disposition)).length,
+    targeted_color_remeasurement_requested: candidates.some((candidate) => candidate?.color_crosscheck?.remeasurement_requested === true),
     publication_changed: false,
     color_changed: false,
   };

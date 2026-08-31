@@ -17,7 +17,7 @@ export const OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1 = Object.freeze({
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["action", "piece", "subtype", "instance_key", "visible_count", "component_of", "zone", "pattern", "material_cue", "ownership_hypothesis", "reason", "confidence"],
+        required: ["action", "piece", "subtype", "instance_key", "visible_count", "component_of", "zone", "pattern", "perceived_color_family", "color_appearance_cue", "lighting_cue", "color_confidence", "material_cue", "ownership_hypothesis", "reason", "confidence"],
         properties: {
           action: { type: "string", enum: ["support", "contradict", "request_targeted_reanalysis", "abstain"] },
           piece: { type: ["string", "null"] },
@@ -27,6 +27,13 @@ export const OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1 = Object.freeze({
           component_of: { type: ["string", "null"] },
           zone: { type: ["string", "null"] },
           pattern: { type: ["string", "null"] },
+          perceived_color_family: {
+            type: ["string", "null"],
+            enum: ["black", "white", "gray", "brown", "beige", "red", "orange", "yellow", "green", "blue", "purple", "pink", "metallic_gold", "metallic_silver", "multicolor", "unclear", null],
+          },
+          color_appearance_cue: { type: ["string", "null"] },
+          lighting_cue: { type: ["string", "null"] },
+          color_confidence: { type: "number" },
           material_cue: { type: ["string", "null"] },
           ownership_hypothesis: { type: ["string", "null"] },
           reason: { type: ["string", "null"] },
@@ -44,10 +51,11 @@ function semanticPrompt(visionCoreEvidence = {}) {
     "Do not collapse layered chains, a pendant, earrings, a watch, bracelets, rings, belt hardware, or shoe hardware into one generic jewelry claim. Give each visibly separate item its own stable instance_key and visible_count.",
     "Use precise subtypes when visible, such as horsebit loafer, penny loafer, sneaker, chain necklace, cross pendant, stud earring, bracelet, watch, or horsebit shoe hardware.",
     "Use action=support when you independently observe an item, even when VisionCore did not list it. Use contradict only when VisionCore appears to list an item that is not visibly present.",
-    "Identify garment/accessory types, body zones, patterns, material cues, and possible ownership conflicts.",
+    "Identify garment/accessory types, body zones, patterns, material cues, perceived color families, lighting cues, and possible ownership conflicts.",
     "Do not identify the person or infer protected, demographic, medical, religious, or socioeconomic traits.",
-    "Material cues may describe metal, leather, textile, or reflective hardware, but do not name colors.",
-    "Do not calculate or override hex, RGB, LAB, percentages, outfit scores, or publication decisions.",
+    "For each visible piece, independently suggest only one broad perceived_color_family from the schema and a short color_appearance_cue. Use unclear when lighting, reflection, transparency, or occlusion makes the family unreliable.",
+    "Do not use VisionCore's color conclusion to form the suggestion. VisionCore will independently measure object-local pixels and reconcile your categorical hypothesis afterward.",
+    "Never calculate, invent, request, or override hex, RGB, LAB, delta-E, percentages, outfit scores, or publication decisions.",
     "If evidence is ambiguous, abstain or request targeted reanalysis.",
     `VisionCore evidence: ${JSON.stringify(visionCoreEvidence)}`,
   ].join("\n");
