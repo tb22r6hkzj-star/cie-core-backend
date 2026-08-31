@@ -1,3 +1,5 @@
+import { evaluateSemanticColorChallengeV1 } from "./semanticColorChallengeV1.js";
+
 const PIECE_ALIASES = Object.freeze({
   shirt: "upper_garment",
   top: "upper_garment",
@@ -86,6 +88,16 @@ function buildColorCrosscheck(claim = {}, spatial = {}, mode = "off") {
   const perceivedFamily = normalizeSemanticColorFamilyV1(claim?.perceived_color_family);
   const semanticConfidence = normalizedConfidence(claim?.color_confidence);
   const measurement = spatial?.color_measurement || measuredColorEvidence();
+  const challenge = evaluateSemanticColorChallengeV1({
+    mode,
+    semantic: {
+      family: perceivedFamily,
+      confidence: semanticConfidence,
+      appearance_cue: claim?.color_appearance_cue || null,
+      lighting_cue: claim?.lighting_cue || null,
+    },
+    measurement,
+  });
   const base = {
     version: "semantic_color_crosscheck_v1",
     openai_hypothesis: {
@@ -100,13 +112,31 @@ function buildColorCrosscheck(claim = {}, spatial = {}, mode = "off") {
     external_color_authority: false,
     measured_hex_changed: false,
     remeasurement_requested: false,
+    semantic_reassessment_requested: challenge?.semantic_reassessment_requested === true,
+    bidirectional_challenge: challenge,
   };
   if (!perceivedFamily || perceivedFamily === "unclear") return { ...base, disposition: "semantic_color_abstained" };
-  if (!measurement?.available || !measurement?.family) return { ...base, disposition: "visioncore_measurement_unavailable" };
+  if (!measurement?.available || !measurement?.family) {
+    return {
+      ...base,
+      disposition: "visioncore_measurement_unavailable",
+      remeasurement_requested: challenge?.targeted_remeasurement_requested === true,
+    };
+  }
   if (perceivedFamily === measurement.family) return { ...base, disposition: "independent_color_family_corroboration" };
-  if (measurement.confidence >= 0.8) return { ...base, disposition: "visioncore_strong_measurement_preserved" };
+  if (measurement.confidence >= 0.8) {
+    return {
+      ...base,
+      disposition: "visioncore_strong_measurement_preserved",
+      remeasurement_requested: challenge?.targeted_remeasurement_requested === true,
+    };
+  }
   if (semanticConfidence >= 0.9 && mode === "assist") {
-    return { ...base, disposition: "targeted_visioncore_remeasurement_requested", remeasurement_requested: true };
+    return {
+      ...base,
+      disposition: "targeted_visioncore_remeasurement_requested",
+      remeasurement_requested: true,
+    };
   }
   return { ...base, disposition: "color_disagreement_recorded" };
 }
@@ -171,8 +201,6 @@ function spatialEvidenceFor(piece, outfitAnalysis = {}) {
     { value: zone, source: "visioncore_zone" },
     { value: region, source: "segmented_region" },
   ].filter((match) => match.value);
-  // Prefer the matching VisionCore record that actually carries a measured
-  // color family. Identity corroboration still uses the first spatial match.
   const selected = matches.find((match) => measuredColorEvidence(match.value).family) || matches[0] || {};
   const source = selected.source || null;
   const value = selected.value;
@@ -243,6 +271,8 @@ export function reconcileExternalSemanticsV1({ handoff = {}, outfitAnalysis = {}
     color_corroboration_count: candidates.filter((candidate) => candidate?.color_crosscheck?.disposition === "independent_color_family_corroboration").length,
     color_disagreement_count: candidates.filter((candidate) => ["visioncore_strong_measurement_preserved", "targeted_visioncore_remeasurement_requested", "color_disagreement_recorded"].includes(candidate?.color_crosscheck?.disposition)).length,
     targeted_color_remeasurement_requested: candidates.some((candidate) => candidate?.color_crosscheck?.remeasurement_requested === true),
+    semantic_color_reassessment_requested: candidates.some((candidate) => candidate?.color_crosscheck?.semantic_reassessment_requested === true),
+    two_way_color_challenge_count: candidates.filter((candidate) => candidate?.color_crosscheck?.bidirectional_challenge?.disposition === "two_way_challenge_remeasure_and_reassess" || candidate?.color_crosscheck?.bidirectional_challenge?.disposition === "two_way_disagreement_recorded").length,
     publication_changed: false,
     color_changed: false,
   };
