@@ -1,0 +1,42 @@
+name: Live Reasoning Cards V1
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/intelligence/liveReasoningCardsV1.js"
+      - "src/intelligence/liveServerTelemetryPreloadV1.js"
+      - "test/liveServerTelemetryPreloadV1.test.js"
+      - "docs/live-reasoning-cards-v1.md"
+      - ".github/workflows/live-reasoning-cards-v1.yml"
+  workflow_dispatch:
+
+jobs:
+  live-reasoning-cards-v1:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Focused live reasoning card tests
+        run: NODE_ENV=test node --test test/liveServerTelemetryPreloadV1.test.js
+
+      - name: Module syntax
+        run: node --check src/intelligence/liveReasoningCardsV1.js && node --check src/intelligence/liveServerTelemetryPreloadV1.js
+
+      - name: Full suite serial
+        run: NODE_ENV=test node --test --test-concurrency=1
+
+      - name: Full suite normal
+        run: NODE_ENV=test npm test
