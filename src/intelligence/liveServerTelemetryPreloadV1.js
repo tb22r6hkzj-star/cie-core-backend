@@ -1,6 +1,7 @@
 import express from "express";
 import { createAnalysisLatencyRuntimeV1 } from "./analysisLatencyRuntimeV1.js";
 import { buildRecommendationRuntimeTelemetryV1 } from "./recommendationRuntimeTelemetryV1.js";
+import { buildLiveReasoningCardsV1 } from "./liveReasoningCardsV1.js";
 
 const runtime = createAnalysisLatencyRuntimeV1({ maxRecords: 500 });
 const originalGet = express.application.get;
@@ -27,6 +28,59 @@ function externalIntelligenceFromPayload(payload = {}) {
     || payload?.outfitAnalysis?.external_intelligence
     || payload?.external_intelligence
     || null;
+}
+
+function attachReasoningCards(payload = {}) {
+  if (!payload || typeof payload !== "object") return payload;
+  const external = externalIntelligenceFromPayload(payload) || {};
+  const reconciliation = external?.semantic_reconciliation || null;
+  if (!reconciliation) return payload;
+
+  const reasoning = buildLiveReasoningCardsV1(reconciliation);
+  if (!reasoning?.cards?.length) return payload;
+
+  if (payload?.outfit_analysis && typeof payload.outfit_analysis === "object") {
+    return {
+      ...payload,
+      outfit_analysis: {
+        ...payload.outfit_analysis,
+        reasoning_cards_v1: {
+          version: reasoning.version,
+          authority_owner: reasoning.authority_owner,
+          cards: reasoning.cards,
+          publication_changed: false,
+          measured_hex_changed: false,
+        },
+      },
+    };
+  }
+
+  if (payload?.outfitAnalysis && typeof payload.outfitAnalysis === "object") {
+    return {
+      ...payload,
+      outfitAnalysis: {
+        ...payload.outfitAnalysis,
+        reasoning_cards_v1: {
+          version: reasoning.version,
+          authority_owner: reasoning.authority_owner,
+          cards: reasoning.cards,
+          publication_changed: false,
+          measured_hex_changed: false,
+        },
+      },
+    };
+  }
+
+  return {
+    ...payload,
+    reasoning_cards_v1: {
+      version: reasoning.version,
+      authority_owner: reasoning.authority_owner,
+      cards: reasoning.cards,
+      publication_changed: false,
+      measured_hex_changed: false,
+    },
+  };
 }
 
 function recommendationTelemetryRecord({ payload, startedAtMs, finishedAtMs }) {
@@ -80,7 +134,13 @@ express.application.post = function patchedPost(path, ...handlers) {
         } catch {
           // Telemetry is observational only and must never fail analysis.
         }
-        return payload;
+
+        try {
+          return attachReasoningCards(payload);
+        } catch {
+          // Card synthesis must fail open to the original analysis payload.
+          return payload;
+        }
       });
       return handler.call(this, req, res, next);
     };
@@ -91,3 +151,5 @@ express.application.post = function patchedPost(path, ...handlers) {
 export function getLiveServerTelemetryStatusV1() {
   return runtime.status();
 }
+
+export { attachReasoningCards };
