@@ -1,0 +1,42 @@
+name: Appearance Measurement Synthesis V1
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/intelligence/appearanceMeasurementSynthesisV1.js"
+      - "src/intelligence/consumerEvidenceV1.js"
+      - "test/appearanceMeasurementSynthesisV1.test.js"
+      - "test/consumerEvidenceV1.test.js"
+      - ".github/workflows/appearance-measurement-synthesis-v1.yml"
+  workflow_dispatch:
+
+jobs:
+  appearance-measurement-synthesis-v1:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Focused synthesis tests
+        run: NODE_ENV=test node --test test/appearanceMeasurementSynthesisV1.test.js test/consumerEvidenceV1.test.js
+
+      - name: Module syntax
+        run: node --check src/intelligence/appearanceMeasurementSynthesisV1.js && node --check src/intelligence/consumerEvidenceV1.js
+
+      - name: Full suite serial
+        run: NODE_ENV=test node --test --test-concurrency=1
+
+      - name: Full suite normal
+        run: NODE_ENV=test npm test
