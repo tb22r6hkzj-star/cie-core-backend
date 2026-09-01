@@ -134,11 +134,12 @@ export function evaluateSemanticColorChallengeV1({
     return {
       ...base,
       disposition: resolvedMode === "assist"
-        ? "two_way_challenge_remeasure_and_reassess"
+        ? "two_way_challenge_preserve_measurement_reassess_semantic"
         : "two_way_disagreement_recorded",
       disagreement: true,
-      targeted_remeasurement_requested: resolvedMode === "assist",
+      targeted_remeasurement_requested: false,
       semantic_reassessment_requested: true,
+      nuance_synthesis_required: true,
     };
   }
 
