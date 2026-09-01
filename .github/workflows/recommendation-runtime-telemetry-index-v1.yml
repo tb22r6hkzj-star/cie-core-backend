@@ -1,0 +1,25 @@
+name: Recommendation Runtime Telemetry Bundle V1
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/intelligence/recommendationRuntimeTelemetryIndexV1.js"
+      - "test/recommendationRuntimeTelemetryIndexV1.test.js"
+      - ".github/workflows/recommendation-runtime-telemetry-index-v1.yml"
+  workflow_dispatch:
+
+jobs:
+  telemetry-runtime-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: NODE_ENV=test node --test test/recommendationRuntimeTelemetryIndexV1.test.js
+      - run: node --check src/intelligence/recommendationRuntimeTelemetryIndexV1.js
