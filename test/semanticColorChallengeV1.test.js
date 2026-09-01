@@ -49,15 +49,16 @@ test("strong semantic disagreement challenges weak VisionCore measurement only i
   assert.equal(result.publication_changed, false);
 });
 
-test("two strong conflicting lanes trigger a two-way challenge in assist mode", () => {
+test("two strong conflicting lanes preserve strong measurement and require nuance synthesis", () => {
   const result = evaluateSemanticColorChallengeV1({
     mode: "assist",
     semantic: { family: "red", confidence: 0.98 },
     measurement: { family: "brown", hex: "#73452D", confidence: 0.92 },
   });
-  assert.equal(result.disposition, "two_way_challenge_remeasure_and_reassess");
-  assert.equal(result.targeted_remeasurement_requested, true);
+  assert.equal(result.disposition, "two_way_challenge_preserve_measurement_reassess_semantic");
+  assert.equal(result.targeted_remeasurement_requested, false);
   assert.equal(result.semantic_reassessment_requested, true);
+  assert.equal(result.nuance_synthesis_required, true);
   assert.equal(result.disagreement, true);
   assert.equal(result.authority_owner, "visioncore");
 });
