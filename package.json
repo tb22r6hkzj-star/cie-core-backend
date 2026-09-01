@@ -5,7 +5,7 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js",
+    "start": "node --import ./src/intelligence/liveServerTelemetryPreloadV1.js src/server.js",
     "test": "NODE_ENV=test node --test",
     "benchmark:readiness": "node scripts/benchmark-readiness.mjs"
   },
