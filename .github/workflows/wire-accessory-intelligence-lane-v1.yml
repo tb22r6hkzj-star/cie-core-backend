@@ -1,0 +1,47 @@
+name: Wire Accessory Intelligence Lane V1
+
+on:
+  push:
+    branches: [visioncore-accessory-intelligence-lane-v1]
+    paths:
+      - "scripts/wire_accessory_intelligence_lane_v1.py"
+      - ".github/workflows/wire-accessory-intelligence-lane-v1.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  wire-accessory-intelligence-lane-v1:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: visioncore-accessory-intelligence-lane-v1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply live lane wiring
+        run: python3 scripts/wire_accessory_intelligence_lane_v1.py
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Focused lane tests
+        run: NODE_ENV=test node --test test/accessoryIntelligenceLaneV1.test.js test/accessoryIntelligenceLaneProductionWiringV1.test.js test/accessoryMicroCropRuntimeV1.test.js test/accessoryPublicationBridgeV1.test.js
+      - name: Syntax
+        run: |
+          node --check src/intelligence/accessoryIntelligenceLaneV1.js
+          node --check src/server.js
+      - name: Full suite serial
+        run: NODE_ENV=test node --test --test-concurrency=1
+      - name: Full suite normal
+        run: NODE_ENV=test npm test
+      - name: Commit wired server
+        run: |
+          if git diff --quiet -- src/server.js; then
+            echo "server already wired"
+            exit 0
+          fi
+          git config user.name "visioncore-ci"
+          git config user.email "visioncore-ci@users.noreply.github.com"
+          git add src/server.js
+          git commit -m "Wire Accessory Intelligence Lane V1 into live transform"
+          git push origin HEAD:visioncore-accessory-intelligence-lane-v1
