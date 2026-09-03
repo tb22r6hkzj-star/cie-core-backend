@@ -4,6 +4,7 @@ import { createAnalysisLatencyRuntimeV1 } from "./analysisLatencyRuntimeV1.js";
 import { buildRecommendationRuntimeTelemetryV1 } from "./recommendationRuntimeTelemetryV1.js";
 import { buildLiveReasoningCardsV1 } from "./liveReasoningCardsV1.js";
 import { classifyExternalStageV2, summarizeExternalStageEventsV2 } from "./externalStageTimingV2.js";
+import { reconcileAccessoryPublicationPayloadV1 } from "./accessoryPublicationBridgeV1.js";
 
 const runtime = createAnalysisLatencyRuntimeV1({ maxRecords: 500 });
 const originalGet = express.application.get;
@@ -115,6 +116,11 @@ function runtimeStages(record, scope) {
   };
 }
 
+function applyLivePublicationGuards(payload = {}) {
+  const bridged = reconcileAccessoryPublicationPayloadV1(payload);
+  return attachReasoningCards(bridged);
+}
+
 express.application.get = function patchedGet(path, ...handlers) {
   if (path !== "/api/debug/status") return originalGet.call(this, path, ...handlers);
   const wrapped = handlers.map((handler) => {
@@ -155,9 +161,9 @@ express.application.post = function patchedPost(path, ...handlers) {
         }
 
         try {
-          return attachReasoningCards(payload);
+          return applyLivePublicationGuards(payload);
         } catch {
-          // Card synthesis must fail open to the original analysis payload.
+          // Publication guards must fail open to the original analysis payload.
           return payload;
         }
       });
@@ -171,4 +177,4 @@ export function getLiveServerTelemetryStatusV1() {
   return runtime.status();
 }
 
-export { attachReasoningCards };
+export { attachReasoningCards, applyLivePublicationGuards };
