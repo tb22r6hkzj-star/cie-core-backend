@@ -26,3 +26,5 @@ test("optional external intelligence and accessory escalation obey remaining bud
 test("response debug exposes transform latency budget snapshot", () => {
   assert.match(source, /transform_latency_budget_v1: transformLatencyBudget\.snapshot\("response"\)/);
 });
+
+// This file is intentionally part of the wiring workflow trigger set.
