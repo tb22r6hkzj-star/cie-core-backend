@@ -45,15 +45,24 @@ function representativeMetalRow(rows = []) {
   const warmRows = rows.filter(isWarmMetalRow);
   if (!warmRows.length) return null;
 
-  const sortedLuminance = warmRows.map((row) => row.traits.luminance).sort((a, b) => a - b);
-  const medianLuminance = sortedLuminance[Math.floor(sortedLuminance.length / 2)] ?? 0.5;
+  const byLuminance = [...warmRows].sort((a, b) => a.traits.luminance - b.traits.luminance);
+  const medianLuminance = byLuminance[Math.floor((byLuminance.length - 1) / 2)]?.traits?.luminance ?? 0.5;
+  const brightest = byLuminance[byLuminance.length - 1] || null;
+  const brightestLooksSpecular =
+    warmRows.length >= 3 &&
+    brightest &&
+    brightest.traits.lightness >= 0.70 &&
+    brightest.traits.luminance - medianLuminance >= 0.10;
 
-  return [...warmRows].sort((a, b) => {
+  const candidates = brightestLooksSpecular
+    ? warmRows.filter((row) => row !== brightest)
+    : warmRows;
+
+  return [...candidates].sort((a, b) => {
     const score = (row) => {
       const luminanceDistance = Math.abs(row.traits.luminance - medianLuminance);
-      const highlightPenalty = Math.max(0, row.traits.lightness - 0.76) * 2.5;
       const shadowPenalty = Math.max(0, 0.28 - row.traits.lightness) * 1.8;
-      return row.weight * 1.4 + row.traits.saturation * 0.35 - luminanceDistance - highlightPenalty - shadowPenalty;
+      return row.weight * 1.1 + row.traits.saturation * 0.35 - luminanceDistance - shadowPenalty;
     };
     return score(b) - score(a);
   })[0] || null;
@@ -89,6 +98,10 @@ export function classifyMeasuredMetallicPaletteV1({ colors = [], highlightRatio 
       luminance_spread: luminanceSpread,
       highlight_ratio: clamp01(highlightRatio),
       representative_source: representative ? "measured_mid_tone_metallic_pixel_cluster" : null,
+      specular_highlight_excluded_from_representative: Boolean(
+        rows.length >= 3 &&
+        rows.some((row) => row !== representative && row.traits.lightness >= 0.70)
+      ),
     },
   };
 }
