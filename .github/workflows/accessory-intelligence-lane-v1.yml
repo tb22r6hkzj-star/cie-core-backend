@@ -1,0 +1,31 @@
+name: Accessory Intelligence Lane V1
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/intelligence/accessoryIntelligenceLaneV1.js"
+      - "src/server.js"
+      - "test/accessoryIntelligenceLaneV1.test.js"
+      - "test/accessoryIntelligenceLaneProductionWiringV1.test.js"
+      - ".github/workflows/accessory-intelligence-lane-v1.yml"
+
+jobs:
+  accessory-intelligence-lane-v1:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - name: Focused accessory lane tests
+        run: NODE_ENV=test node --test test/accessoryIntelligenceLaneV1.test.js test/accessoryIntelligenceLaneProductionWiringV1.test.js test/accessoryMicroCropRuntimeV1.test.js test/accessoryPublicationBridgeV1.test.js
+      - name: Module and server syntax
+        run: |
+          node --check src/intelligence/accessoryIntelligenceLaneV1.js
+          node --check src/server.js
+      - name: Full suite serial
+        run: NODE_ENV=test node --test --test-concurrency=1
+      - name: Full suite normal
+        run: NODE_ENV=test npm test
