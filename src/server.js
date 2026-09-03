@@ -5265,7 +5265,40 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
     visual_intelligence_layer: visualIntelligence,
     garment_zones: authoritativeGarmentZones,
     scene_ownership_v1: sceneOwnership,
-    piece_color_ownership_v1: pieceColorOwnership.summary,
+    piece_color_ownership_v1: {
+      ...pieceColorOwnership.summary,
+      accessory_color_authorities: (Array.isArray(pieceColorOwnership?.regions) ? pieceColorOwnership.regions : [])
+        .filter((region) => region?.color_debug?.piece_color_ownership_v1?.target_type === "accessory")
+        .map((region) => {
+          const ownership = region?.color_debug?.piece_color_ownership_v1 || {};
+          const applied = ownership?.applied === true;
+          return {
+            id: region?.id || region?.region_id || region?.detection_id || null,
+            region_id: region?.region_id || null,
+            detection_id: region?.detection_id || null,
+            zone: region?.zone || null,
+            label: region?.label || region?.segment_label || region?.object_type || region?.accessory_type || null,
+            type: region?.accessory_type || region?.object_type || region?.label || region?.segment_label || region?.zone || null,
+            confidence: Number(region?.confidence || 0),
+            applied,
+            reason: ownership?.reason || null,
+            dominant_hex: applied ? (region?.dominant_hex || null) : null,
+            region_colors: applied && Array.isArray(region?.region_colors)
+              ? region.region_colors.map((color) => ({
+                  hex: color?.hex || null,
+                  pct: Number(color?.pct || color?.percentage || 0),
+                  percentage: Number(color?.percentage || color?.pct || 0),
+                  pixel_count: Number(color?.pixel_count || color?.sample_count || 0),
+                  source: color?.source || color?.measurement_source || null,
+                  measurement_source: color?.measurement_source || color?.source || null,
+                  ownership_validated: color?.ownership_validated === true,
+                }))
+              : [],
+            doctrine: ownership?.doctrine || null,
+            color_authority_source: "piece_color_ownership_v1",
+          };
+        }),
+    },
     lower_garment_purity_v2: lowerGarmentPurity.summary,
     upper_garment_purity_v1: upperGarmentPurity.summary,
     belt_localization_v1: {
