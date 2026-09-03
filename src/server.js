@@ -68,6 +68,7 @@ import { resolveMaskStrengthV1, resolveOpaqueMaskStrengthV1 } from "./intelligen
 import { normalizeExternalIntelligenceMode } from "./intelligence/visionCoreExternalIntelligencePolicyV1.js";
 import { evaluateCaptureQualityV1 } from "./intelligence/captureQualityGateV1.js";
 import { buildConsumerEvidenceV1 } from "./intelligence/consumerEvidenceV1.js";
+import { createTransformLatencyBudgetV1, shouldRunAccessoryEscalationV1 } from "./intelligence/transformLatencyBudgetV1.js";
 import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
 import { mapDinoLabel } from "./engines/ontology/dinoMappings.js";
 import {
@@ -107,7 +108,7 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 10000;
-const PIXELCUT_TIMEOUT_MS = 45000;
+const PIXELCUT_TIMEOUT_MS = 18000;
 const LOWER_SAMPLING_VERSION = "multi_window_v1";
 const PERCEPTION_V6_MODES = new Set(["shadow", "assist", "authoritative"]);
 
@@ -7643,7 +7644,7 @@ async function uploadToCloudinary(file) {
   return result.secure_url;
 }
 
-async function callPixelcutRemoveBg(imageUrl) {
+async function callPixelcutRemoveBg(imageUrl, timeoutMs = PIXELCUT_TIMEOUT_MS) {
   const apiKey = process.env.PIXELCUT_API_KEY;
   const endpoint = process.env.PIXELCUT_ENDPOINT;
 
@@ -7652,7 +7653,7 @@ async function callPixelcutRemoveBg(imageUrl) {
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PIXELCUT_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), Math.max(3000, Math.min(PIXELCUT_TIMEOUT_MS, Number(timeoutMs) || PIXELCUT_TIMEOUT_MS)));
 
   try {
     const resp = await fetch(endpoint, {
@@ -7729,6 +7730,7 @@ async function analyzeGhostColors(ghostUrl) {
     })
     .filter((x) => !!x.hex);
 
+  const samPromise = runSamSegmentation(ghostUrl);
   const configuredSingleQuery = String(process.env.GROUNDING_DINO_QUERY || "").trim();
   const groundingPasses = configuredSingleQuery
     ? [await runGroundingDinoDetection(ghostUrl, configuredSingleQuery)]
@@ -7790,7 +7792,7 @@ async function analyzeGhostColors(ghostUrl) {
     detectionCount: dinoDetections.length,
   });
 
-  const sam = await runSamSegmentation(ghostUrl);
+  const sam = await samPromise;
   const samRegions = Array.isArray(sam?.regions) ? sam.regions : [];
   const samOk = !!sam?.ok && samRegions.length > 0;
   const dinoOk = !!groundingDino?.ok && dinoDetections.length > 0;
@@ -7838,6 +7840,10 @@ async function analyzeGhostColors(ghostUrl) {
    ROUTES
 ========================= */
 app.post("/api/images/transform", upload.any(), async (req, res) => {
+  const transformLatencyBudget = createTransformLatencyBudgetV1({
+    totalMs: Number(process.env.VISIONCORE_TRANSFORM_BUDGET_MS) || 50000,
+    reserveMs: Number(process.env.VISIONCORE_TRANSFORM_RESPONSE_RESERVE_MS) || 5000,
+  });
   try {
     const files = Array.isArray(req.files) ? req.files : [];
     const file = files[0];
@@ -7859,7 +7865,10 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
 
     let ghostUrl;
     try {
-      ghostUrl = await callPixelcutRemoveBg(publicUrl);
+      ghostUrl = await callPixelcutRemoveBg(
+        publicUrl,
+        transformLatencyBudget.providerTimeoutMs({ requestedMs: PIXELCUT_TIMEOUT_MS, maximumMs: 18000 })
+      );
     } catch (error) {
       return sendStepError(res, 502, "pixelcut_remove_bg", error);
     }
@@ -7914,7 +7923,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       return sendStepError(res, 500, "palette_engine", error);
     }
 
-    const effectiveExternalIntelligenceMode = captureQuality?.disposition === "retake"
+    const effectiveExternalIntelligenceMode = captureQuality?.disposition === "retake" || !transformLatencyBudget.canRun(8000)
       ? "off"
       : EXTERNAL_INTELLIGENCE_MODE;
     const externalSemantic = await runOpenAISemanticObserverV1({
@@ -7923,6 +7932,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       visionCoreEvidence: buildExternalSemanticEvidence(outfitAnalysis),
       visionCoreDecision: buildExternalCompositeDecision(outfitAnalysis),
       model: OPENAI_SEMANTIC_MODEL,
+      timeoutMs: transformLatencyBudget.providerTimeoutMs({ requestedMs: 8000, maximumMs: 8000 }),
       cache: externalSemanticCache,
       cacheKey: `${publicUrl}:visioncore_external_handoff_v1:${OPENAI_SEMANTIC_MODEL}`,
     });
@@ -7968,6 +7978,18 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         query: [existingQuery, forcedQuery].filter(Boolean).join(" "),
         reason: "accessory_color_challenge_requires_remeasurement",
         accessory_intelligence_lane_trigger_v1: accessoryIntelligenceLane,
+      };
+    }
+    if (
+      targetedAccessoryReanalysis.execution_allowed &&
+      targetedAccessoryReanalysis.query &&
+      !shouldRunAccessoryEscalationV1(transformLatencyBudget, 10000)
+    ) {
+      targetedAccessoryReanalysis = {
+        ...targetedAccessoryReanalysis,
+        execution_allowed: false,
+        latency_budget_skipped: true,
+        reason: "transform_latency_budget_insufficient_for_optional_accessory_reanalysis",
       };
     }
     if (targetedAccessoryReanalysis.execution_allowed && targetedAccessoryReanalysis.query) {
@@ -8205,6 +8227,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         pipeline: {
           ...analysis.pipeline,
           lower_sampling_version: LOWER_SAMPLING_VERSION,
+          transform_latency_budget_v1: transformLatencyBudget.snapshot("response"),
         },
         external_intelligence: {
           configured_mode: EXTERNAL_INTELLIGENCE_MODE,
