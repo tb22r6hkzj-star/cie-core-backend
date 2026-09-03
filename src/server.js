@@ -61,6 +61,7 @@ import {
   normalizeTargetedAccessoryReanalysisModeV1,
   resolveTargetedAccessoryReanalysisModeV1,
 } from "./intelligence/targetedAccessoryReanalysisV1.js";
+import { buildAccessoryIntelligenceLaneV1 } from "./intelligence/accessoryIntelligenceLaneV1.js";
 import { executeAccessoryMicroCropRuntimeV1 } from "./intelligence/accessoryMicroCropRuntimeV1.js";
 import { attachBeltLocalizationV1 } from "./intelligence/beltLocalizationV1.js";
 import { resolveMaskStrengthV1, resolveOpaqueMaskStrengthV1 } from "./intelligence/maskStrengthV1.js";
@@ -7929,6 +7930,10 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       handoff: externalSemantic?.handoff,
       outfitAnalysis,
     });
+    let accessoryIntelligenceLane = buildAccessoryIntelligenceLaneV1({
+      outfitAnalysis,
+      reconciliation: semanticReconciliation,
+    });
     let targetedAccessoryReanalysis = buildTargetedAccessoryReanalysisPlanV1({
       mode: resolveTargetedAccessoryReanalysisModeV1({
         externalMode: effectiveExternalIntelligenceMode,
@@ -7937,6 +7942,34 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       reconciliation: semanticReconciliation,
       outfitAnalysis,
     });
+    const forcedAccessoryTargets = (accessoryIntelligenceLane?.forced_micro_crop_targets || [])
+      .filter((type) => ["watch", "earrings"].includes(type));
+    if (forcedAccessoryTargets.length && targetedAccessoryReanalysis?.mode === "assist") {
+      const existingTargetTypes = new Set((targetedAccessoryReanalysis?.targets || []).map((target) => target?.type));
+      const forcedTargets = forcedAccessoryTargets
+        .filter((type) => !existingTargetTypes.has(type))
+        .map((type) => ({
+          type,
+          semantic_instance_count: 1,
+          measured_instance_count: 1,
+          missing_instance_count: 0,
+          forced_by_accessory_intelligence_lane: true,
+        }));
+      const forcedQueries = forcedAccessoryTargets.flatMap((type) =>
+        type === "watch" ? ["watch"] : ["earring", "stud earring", "earrings"]
+      );
+      const existingQuery = String(targetedAccessoryReanalysis?.query || "").trim();
+      const forcedQuery = forcedQueries.length ? `${forcedQueries.join(". ")}.` : "";
+      targetedAccessoryReanalysis = {
+        ...targetedAccessoryReanalysis,
+        execution_allowed: true,
+        publication_allowed: true,
+        targets: [...(targetedAccessoryReanalysis?.targets || []), ...forcedTargets],
+        query: [existingQuery, forcedQuery].filter(Boolean).join(" "),
+        reason: "accessory_color_challenge_requires_remeasurement",
+        accessory_intelligence_lane_trigger_v1: accessoryIntelligenceLane,
+      };
+    }
     if (targetedAccessoryReanalysis.execution_allowed && targetedAccessoryReanalysis.query) {
       const targetedDetector = await runGroundingDinoDetection(ghostUrl, targetedAccessoryReanalysis.query);
       const targetedFilter = filterTargetedAccessoryDetectionsV1({
@@ -8071,6 +8104,10 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           handoff: externalSemantic?.handoff,
           outfitAnalysis,
         });
+        accessoryIntelligenceLane = buildAccessoryIntelligenceLaneV1({
+          outfitAnalysis,
+          reconciliation: semanticReconciliation,
+        });
         const nextAccessoryInstances = outfitAnalysis?.accessory_instances_v1?.instances || [];
         const nextPublishedColorCount = nextAccessoryInstances.filter((instance) =>
           instance?.color_publication_decision === "publish_object_local_color"
@@ -8185,6 +8222,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           failure_stage: externalSemantic.failure_stage || null,
           disposition: externalSemantic?.handoff?.disposition || null,
           semantic_reconciliation: semanticReconciliation,
+          accessory_intelligence_lane: accessoryIntelligenceLane,
           targeted_accessory_reanalysis: targetedAccessoryReanalysis,
           semantic_publication_policy: semanticPublicationConstraints,
           publication_changed: Boolean(
