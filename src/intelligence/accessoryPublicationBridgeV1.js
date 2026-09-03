@@ -1,3 +1,5 @@
+import { classifyMeasuredMetallicPaletteV1 } from "./metallicColorIdentityV1.js";
+
 function token(value) {
   return String(value || "")
     .trim()
@@ -49,6 +51,12 @@ function instanceType(instance = {}) {
   );
 }
 
+function zoneType(zoneKey, zone = {}) {
+  return normalizeAccessoryType(
+    zone?.accessory_type || zone?.object_type || zone?.label || zone?.type || zone?.display_zone_label || zoneKey
+  );
+}
+
 function summaryAuthorityRegions(analysis = {}) {
   const authorities = Array.isArray(analysis?.piece_color_ownership_v1?.accessory_color_authorities)
     ? analysis.piece_color_ownership_v1.accessory_color_authorities
@@ -78,9 +86,6 @@ function summaryAuthorityRegions(analysis = {}) {
 }
 
 function ownershipRegions(analysis = {}) {
-  // Summary authority is intentionally first. The live response may still carry
-  // a legacy pre-ownership segmented-region container, so an id collision must
-  // resolve in favor of the post-ownership authority record.
   const sources = [
     ...summaryAuthorityRegions(analysis),
     ...(Array.isArray(analysis?.segmented_regions) ? analysis.segmented_regions : []),
@@ -135,14 +140,28 @@ function chooseRegion(instance, regions = []) {
   })[0];
 }
 
+function metallicRepresentative(instance, colors = []) {
+  const type = instanceType(instance);
+  const metallicTypes = new Set(["watch", "necklace", "chain", "pendant", "earrings", "ring", "bracelet", "shoe_hardware"]);
+  if (!metallicTypes.has(type) || colors.length < 2) return null;
+
+  const metallic = classifyMeasuredMetallicPaletteV1({
+    colors,
+    highlightRatio: Number(instance?.metallic_color_evidence_v1?.evidence?.highlight_ratio || instance?.highlight_ratio || 0.08),
+    validationSupported: true,
+  });
+  if (!metallic.publishable || !metallic.representative_hex) return null;
+  const representative = colors.find((color) => safeHex(color?.hex) === metallic.representative_hex) || null;
+  return representative ? { metallic, representative } : null;
+}
+
 function bridgeInstance(instance, region) {
   if (!region) return instance;
   const debug = ownershipDebug(region) || {};
   const applied = debug?.applied === true;
   const colors = applied ? ownedColors(region) : [];
-  const primary = colors[0] || null;
 
-  if (!applied || !primary?.hex) {
+  if (!applied || !colors[0]?.hex) {
     return {
       ...instance,
       object_local_colors: [],
@@ -160,28 +179,45 @@ function bridgeInstance(instance, region) {
     };
   }
 
+  const metal = metallicRepresentative(instance, colors);
+  const primary = metal?.representative || colors[0];
+  const orderedColors = [primary, ...colors.filter((color) => color !== primary)];
+
   return {
     ...instance,
-    object_local_colors: colors,
-    region_colors: colors,
-    support_colors: colors.slice(1),
-    secondary_colors: colors.slice(1),
+    object_local_colors: orderedColors,
+    region_colors: orderedColors,
+    support_colors: orderedColors.slice(1),
+    secondary_colors: orderedColors.slice(1),
     hex: primary.hex,
     dominant_color: primary,
     primary_color: primary,
+    material_family: metal?.metallic?.family || instance?.material_family || null,
+    material_display_name: metal?.metallic?.display_name || instance?.material_display_name || null,
+    metallic_color_evidence_v1: metal?.metallic || instance?.metallic_color_evidence_v1 || null,
+    metallic_representative_applied: Boolean(metal),
+    metallic_representative_version: metal ? "metallic_representative_v1" : null,
     color_publication_decision: "publish_owned_color",
     validation_decision: "accepted",
-    validation_reason: "validated_accessory_color_ownership",
+    validation_reason: metal ? "validated_accessory_metallic_representative" : "validated_accessory_color_ownership",
     color_authority_source: "piece_color_ownership_v1",
     stale_accessory_palette_suppressed: false,
   };
 }
 
-/**
- * Makes accessory publication obey the newest pixel-ownership verdict.
- * A stale Perception V6 accessory palette can never override an ownership
- * result that was validated later in the pipeline.
- */
+function updateVisibleAccessoryZones(originalZones = {}, instances = []) {
+  const zones = { ...originalZones };
+  for (const [zoneKey, zone] of Object.entries(originalZones)) {
+    const type = zoneType(zoneKey, zone);
+    const instance = instances.find((candidate) => instanceType(candidate) === type);
+    if (instance) zones[zoneKey] = instance;
+  }
+  for (const instance of instances) {
+    if (instance?.zone_key && Object.hasOwn(zones, instance.zone_key)) zones[instance.zone_key] = instance;
+  }
+  return zones;
+}
+
 export function reconcileAccessoryPublicationV1(analysis = {}) {
   if (!analysis || typeof analysis !== "object") return analysis;
   const bundle = analysis?.accessory_instances_v1;
@@ -193,10 +229,7 @@ export function reconcileAccessoryPublicationV1(analysis = {}) {
   const instances = bundle.instances.map((instance) => bridgeInstance(instance, chooseRegion(instance, regions)));
   const byZoneKey = Object.fromEntries(instances.map((instance) => [instance.zone_key, instance]));
   const originalZones = analysis?.garment_zones?.zones || {};
-  const zones = { ...originalZones };
-  for (const instance of instances) {
-    if (instance?.zone_key && Object.hasOwn(zones, instance.zone_key)) zones[instance.zone_key] = instance;
-  }
+  const zones = updateVisibleAccessoryZones(originalZones, instances);
 
   return {
     ...analysis,
@@ -208,6 +241,7 @@ export function reconcileAccessoryPublicationV1(analysis = {}) {
       color_withheld_count: instances.filter((instance) => !/publish/.test(String(instance?.color_publication_decision || ""))).length,
       publication_bridge_version: "accessory_publication_bridge_v1",
       publication_lineage_version: "post_ownership_summary_v1",
+      metallic_representative_version: "metallic_representative_v1",
     },
     garment_zones: analysis?.garment_zones ? {
       ...analysis.garment_zones,
@@ -218,6 +252,7 @@ export function reconcileAccessoryPublicationV1(analysis = {}) {
         authority_owner: "visioncore",
         source: "piece_color_ownership_v1",
         lineage_source: "post_ownership_summary_v1",
+        visible_zone_matching: "normalized_accessory_identity",
       },
     } : analysis?.garment_zones,
   };
