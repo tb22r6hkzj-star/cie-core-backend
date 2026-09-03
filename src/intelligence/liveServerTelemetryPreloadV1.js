@@ -1,11 +1,32 @@
 import express from "express";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createAnalysisLatencyRuntimeV1 } from "./analysisLatencyRuntimeV1.js";
 import { buildRecommendationRuntimeTelemetryV1 } from "./recommendationRuntimeTelemetryV1.js";
 import { buildLiveReasoningCardsV1 } from "./liveReasoningCardsV1.js";
+import { classifyExternalStageV2, summarizeExternalStageEventsV2 } from "./externalStageTimingV2.js";
 
 const runtime = createAnalysisLatencyRuntimeV1({ maxRecords: 500 });
 const originalGet = express.application.get;
 const originalPost = express.application.post;
+const requestTimingScope = new AsyncLocalStorage();
+const originalFetch = typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : null;
+
+if (originalFetch) {
+  globalThis.fetch = async function visionCoreTimedFetch(input, init) {
+    const scope = requestTimingScope.getStore();
+    if (!scope) return originalFetch(input, init);
+    const stage = classifyExternalStageV2(input);
+    const startedAtMs = Date.now();
+    try {
+      return await originalFetch(input, init);
+    } finally {
+      scope.external_events.push({
+        stage,
+        latency_ms: Date.now() - startedAtMs,
+      });
+    }
+  };
+}
 
 function wrapJson(res, transform) {
   const originalJson = res.json.bind(res);
@@ -39,18 +60,20 @@ function attachReasoningCards(payload = {}) {
   const reasoning = buildLiveReasoningCardsV1(reconciliation);
   if (!reasoning?.cards?.length) return payload;
 
+  const field = {
+    version: reasoning.version,
+    authority_owner: reasoning.authority_owner,
+    cards: reasoning.cards,
+    publication_changed: false,
+    measured_hex_changed: false,
+  };
+
   if (payload?.outfit_analysis && typeof payload.outfit_analysis === "object") {
     return {
       ...payload,
       outfit_analysis: {
         ...payload.outfit_analysis,
-        reasoning_cards_v1: {
-          version: reasoning.version,
-          authority_owner: reasoning.authority_owner,
-          cards: reasoning.cards,
-          publication_changed: false,
-          measured_hex_changed: false,
-        },
+        reasoning_cards_v1: field,
       },
     };
   }
@@ -60,27 +83,12 @@ function attachReasoningCards(payload = {}) {
       ...payload,
       outfitAnalysis: {
         ...payload.outfitAnalysis,
-        reasoning_cards_v1: {
-          version: reasoning.version,
-          authority_owner: reasoning.authority_owner,
-          cards: reasoning.cards,
-          publication_changed: false,
-          measured_hex_changed: false,
-        },
+        reasoning_cards_v1: field,
       },
     };
   }
 
-  return {
-    ...payload,
-    reasoning_cards_v1: {
-      version: reasoning.version,
-      authority_owner: reasoning.authority_owner,
-      cards: reasoning.cards,
-      publication_changed: false,
-      measured_hex_changed: false,
-    },
-  };
+  return { ...payload, reasoning_cards_v1: field };
 }
 
 function recommendationTelemetryRecord({ payload, startedAtMs, finishedAtMs }) {
@@ -95,6 +103,16 @@ function recommendationTelemetryRecord({ payload, startedAtMs, finishedAtMs }) {
     openAIResult,
     secondPassResult: secondPass,
   });
+}
+
+function runtimeStages(record, scope) {
+  const externalTiming = summarizeExternalStageEventsV2(scope?.external_events || []);
+  return {
+    ...(record?.stages_ms || {}),
+    ...externalTiming.stages_ms,
+    external_http_total: externalTiming.external_http_total,
+    external_http_request_count: externalTiming.request_count,
+  };
 }
 
 express.application.get = function patchedGet(path, ...handlers) {
@@ -118,6 +136,7 @@ express.application.post = function patchedPost(path, ...handlers) {
     if (typeof handler !== "function") return handler;
     return function liveRecommendationTelemetry(req, res, next) {
       const startedAtMs = Date.now();
+      const scope = { external_events: [] };
       wrapJson(res, (payload) => {
         try {
           const record = recommendationTelemetryRecord({
@@ -128,7 +147,7 @@ express.application.post = function patchedPost(path, ...handlers) {
           runtime.recordAnalysis({
             startedAtMs,
             finishedAtMs: startedAtMs + Number(record?.total_ms || 0),
-            stages: record?.stages_ms || {},
+            stages: runtimeStages(record, scope),
             secondPass: record?.second_pass || {},
           });
         } catch {
@@ -142,7 +161,7 @@ express.application.post = function patchedPost(path, ...handlers) {
           return payload;
         }
       });
-      return handler.call(this, req, res, next);
+      return requestTimingScope.run(scope, () => handler.call(this, req, res, next));
     };
   });
   return originalPost.call(this, path, ...wrapped);
