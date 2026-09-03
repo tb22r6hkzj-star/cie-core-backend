@@ -1,0 +1,50 @@
+name: Wire Transform Latency Budget V1
+
+on:
+  push:
+    branches: [visioncore-transform-latency-budget-v1]
+    paths:
+      - "scripts/wire_transform_latency_budget_v1.py"
+      - "test/transformLatencyBudgetProductionWiringV1.test.js"
+      - "src/intelligence/transformLatencyBudgetV1.js"
+      - "test/transformLatencyBudgetV1.test.js"
+      - ".github/workflows/wire-transform-latency-budget-v1.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  wire-transform-latency-budget-v1:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: visioncore-transform-latency-budget-v1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply live latency wiring
+        run: python3 scripts/wire_transform_latency_budget_v1.py
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Focused latency tests
+        run: NODE_ENV=test node --test test/transformLatencyBudgetV1.test.js test/transformLatencyBudgetProductionWiringV1.test.js
+      - name: Syntax
+        run: |
+          node --check src/intelligence/transformLatencyBudgetV1.js
+          node --check src/server.js
+      - name: Full suite serial
+        run: NODE_ENV=test node --test --test-concurrency=1
+      - name: Full suite normal
+        run: NODE_ENV=test npm test
+      - name: Commit wired server
+        run: |
+          if git diff --quiet -- src/server.js; then
+            echo "server already wired"
+            exit 0
+          fi
+          git config user.name "visioncore-ci"
+          git config user.email "visioncore-ci@users.noreply.github.com"
+          git add src/server.js
+          git commit -m "Wire Transform Latency Budget V1 into live transform"
+          git push origin HEAD:visioncore-transform-latency-budget-v1
