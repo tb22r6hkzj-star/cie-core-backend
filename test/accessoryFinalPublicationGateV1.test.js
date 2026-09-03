@@ -38,3 +38,5 @@ test('withheld authoritative watch instance replaces stale legacy watch palette 
   assert.equal(next.garment_zones.zones.watch.hex, null);
   assert.equal(next.garment_zones.zones.watch.color_publication_decision, 'withhold_unisolated_color');
 });
+
+// workflow trigger
