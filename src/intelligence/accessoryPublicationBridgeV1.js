@@ -205,12 +205,38 @@ function bridgeInstance(instance, region) {
   };
 }
 
+function suppressLegacyJewelryColor(zone = {}, type = null) {
+  const jewelry = new Set(["watch", "earrings", "ring", "bracelet", "necklace", "chain", "pendant", "shoe_hardware"]);
+  if (!jewelry.has(type)) return zone;
+  return {
+    ...zone,
+    hex: null,
+    dominant_hex: null,
+    primary_color: null,
+    dominant_color: null,
+    region_colors: [],
+    detected_colors: [],
+    secondary_colors: [],
+    support_colors: [],
+    signature_color: null,
+    color_publication_decision: "withhold_unvalidated_color",
+    validation_decision: "identity_only",
+    validation_reason: "authoritative_accessory_instance_missing_or_withheld",
+    stale_accessory_palette_suppressed: true,
+    accessory_final_publication_gate_v1: true,
+  };
+}
+
 function updateVisibleAccessoryZones(originalZones = {}, instances = []) {
   const zones = { ...originalZones };
   for (const [zoneKey, zone] of Object.entries(originalZones)) {
     const type = zoneType(zoneKey, zone);
     const instance = instances.find((candidate) => instanceType(candidate) === type);
-    if (instance) zones[zoneKey] = instance;
+    if (instance) {
+      zones[zoneKey] = instance;
+    } else {
+      zones[zoneKey] = suppressLegacyJewelryColor(zone, type);
+    }
   }
   for (const instance of instances) {
     if (instance?.zone_key && Object.hasOwn(zones, instance.zone_key)) zones[instance.zone_key] = instance;
@@ -224,8 +250,6 @@ export function reconcileAccessoryPublicationV1(analysis = {}) {
   if (!bundle || !Array.isArray(bundle?.instances)) return analysis;
 
   const regions = ownershipRegions(analysis);
-  if (!regions.length) return analysis;
-
   const instances = bundle.instances.map((instance) => bridgeInstance(instance, chooseRegion(instance, regions)));
   const byZoneKey = Object.fromEntries(instances.map((instance) => [instance.zone_key, instance]));
   const originalZones = analysis?.garment_zones?.zones || {};
@@ -253,6 +277,7 @@ export function reconcileAccessoryPublicationV1(analysis = {}) {
         source: "piece_color_ownership_v1",
         lineage_source: "post_ownership_summary_v1",
         visible_zone_matching: "normalized_accessory_identity",
+        final_publication_gate_version: "accessory_final_publication_gate_v1",
       },
     } : analysis?.garment_zones,
   };
