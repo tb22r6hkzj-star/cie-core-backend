@@ -1,0 +1,33 @@
+name: Accessory Color Ownership V1
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/intelligence/pieceColorOwnershipV1.js'
+      - 'test/pieceColorOwnershipV1.test.js'
+      - 'test/accessoryColorOwnershipV1.test.js'
+      - '.github/workflows/accessory-color-ownership-v1.yml'
+
+jobs:
+  accessory-color-ownership-v1:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Focused ownership tests
+        run: NODE_ENV=test node --test test/pieceColorOwnershipV1.test.js test/accessoryColorOwnershipV1.test.js
+      - name: Module syntax
+        run: node --check src/intelligence/pieceColorOwnershipV1.js
+      - name: Full suite serial
+        run: NODE_ENV=test node --test --test-concurrency=1
+      - name: Full suite normal
+        run: NODE_ENV=test npm test
