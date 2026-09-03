@@ -5,6 +5,7 @@ import { buildRecommendationRuntimeTelemetryV1 } from "./recommendationRuntimeTe
 import { buildLiveReasoningCardsV1 } from "./liveReasoningCardsV1.js";
 import { classifyExternalStageV2, summarizeExternalStageEventsV2 } from "./externalStageTimingV2.js";
 import { reconcileAccessoryPublicationPayloadV1 } from "./accessoryPublicationBridgeV1.js";
+import { applyTransformGarmentColorAuthorityV1 } from "./transformGarmentColorAuthorityV1.js";
 
 const runtime = createAnalysisLatencyRuntimeV1({ maxRecords: 500 });
 const originalGet = express.application.get;
@@ -118,9 +119,12 @@ function runtimeStages(record, scope) {
   };
 }
 
-function applyLivePublicationGuards(payload = {}) {
+function applyLivePublicationGuards(payload = {}, route = null) {
   const bridged = reconcileAccessoryPublicationPayloadV1(payload);
-  return attachReasoningCards(bridged);
+  const reasoned = attachReasoningCards(bridged);
+  return route === "/api/images/transform"
+    ? applyTransformGarmentColorAuthorityV1(reasoned)
+    : reasoned;
 }
 
 function buildInstrumentationMiddleware(path) {
@@ -150,7 +154,7 @@ function buildInstrumentationMiddleware(path) {
       }
 
       try {
-        return applyLivePublicationGuards(payload);
+        return applyLivePublicationGuards(payload, path);
       } catch {
         // Publication guards must fail open to the original analysis payload.
         return payload;
