@@ -58,6 +58,65 @@ test("live preload records recommendation latency and exposes debug status", asy
   assert.ok(getLiveServerTelemetryStatusV1().aggregate.sample_count >= 1);
 });
 
+test("images transform route is timed and receives accessory publication guard", async () => {
+  const app = express();
+  app.get("/api/debug/status", (_req, res) => res.json({ ok: true }));
+  app.post("/api/images/transform", (_req, res) => {
+    const staleWatch = {
+      instance_id: "watch_1",
+      zone_key: "accessory_watch",
+      accessory_type: "watch",
+      label: "watch",
+      hex: "#DDC4A0",
+      dominant_color: { hex: "#DDC4A0", pct: 0.09 },
+      object_local_colors: [{ hex: "#DDC4A0", pct: 0.09 }],
+      color_publication_decision: "publish_object_local_color",
+    };
+    res.json({
+      success: true,
+      outfit_analysis: {
+        segmented_regions: [{
+          id: "watch_detection",
+          zone: "accessory_jewelry",
+          label: "watch",
+          accessory_type: "watch",
+          confidence: 0.92,
+          dominant_hex: "#C69B43",
+          region_colors: [{ hex: "#C69B43", pct: 0.88, pixel_count: 44 }],
+          color_debug: { piece_color_ownership_v1: { applied: true } },
+        }],
+        accessory_instances_v1: {
+          instances: [staleWatch],
+          zones: { accessory_watch: staleWatch },
+        },
+        garment_zones: {
+          zones: { accessory_watch: staleWatch },
+          accessory_instances: [staleWatch],
+        },
+      },
+      debug: {
+        external_intelligence: {
+          latency_ms: 4,
+          semantic_reconciliation: { candidates: [] },
+        },
+      },
+    });
+  });
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/images/transform`, { method: "POST" });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.outfit_analysis.garment_zones.zones.accessory_watch.hex, "#C69B43");
+    assert.equal(body.outfit_analysis.accessory_instances_v1.instances[0].hex, "#C69B43");
+
+    const statusResponse = await fetch(`${baseUrl}/api/debug/status`);
+    const statusBody = await statusResponse.json();
+    assert.ok(statusBody.analysis_latency.aggregate.sample_count >= 1);
+    assert.ok(statusBody.analysis_latency.latest.stages_ms.route_images_transform >= 0);
+  });
+});
+
 test("live reasoning cards explain appearance without changing VisionCore measured color", () => {
   const payload = {
     success: true,
