@@ -1,0 +1,30 @@
+name: Accessory Micro Crop V1
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/intelligence/accessoryMicroCropV1.js'
+      - 'src/intelligence/external/openAIAccessoryMicroLocatorV1.js'
+      - 'test/accessoryMicroCropV1.test.js'
+      - '.github/workflows/accessory-micro-crop-v1.yml'
+
+jobs:
+  accessory-micro-crop-v1:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - name: Focused micro crop tests
+        run: NODE_ENV=test node --test test/accessoryMicroCropV1.test.js
+      - name: Module syntax
+        run: |
+          node --check src/intelligence/accessoryMicroCropV1.js
+          node --check src/intelligence/external/openAIAccessoryMicroLocatorV1.js
+      - name: Full suite serial
+        run: NODE_ENV=test node --test --test-concurrency=1
+      - name: Full suite normal
+        run: NODE_ENV=test npm test
