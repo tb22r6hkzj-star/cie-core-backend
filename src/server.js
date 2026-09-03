@@ -61,6 +61,7 @@ import {
   normalizeTargetedAccessoryReanalysisModeV1,
   resolveTargetedAccessoryReanalysisModeV1,
 } from "./intelligence/targetedAccessoryReanalysisV1.js";
+import { executeAccessoryMicroCropRuntimeV1 } from "./intelligence/accessoryMicroCropRuntimeV1.js";
 import { attachBeltLocalizationV1 } from "./intelligence/beltLocalizationV1.js";
 import { resolveMaskStrengthV1, resolveOpaqueMaskStrengthV1 } from "./intelligence/maskStrengthV1.js";
 import { normalizeExternalIntelligenceMode } from "./intelligence/visionCoreExternalIntelligencePolicyV1.js";
@@ -7942,7 +7943,68 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         plan: targetedAccessoryReanalysis,
         detections: targetedDetector?.detections || [],
       });
-      let targetedRegions = buildDinoSegmentedRegions(targetedFilter.accepted)
+      let targetedAcceptedDetections = targetedFilter.accepted;
+      let accessoryMicroCropRuntime = null;
+      let accessoryMicroCropTarget = null;
+      const plannedMicroCropTypes = (targetedAccessoryReanalysis?.targets || [])
+        .map((target) => String(target?.type || "").trim().toLowerCase());
+      accessoryMicroCropTarget = plannedMicroCropTypes.includes("watch")
+        ? "watch"
+        : plannedMicroCropTypes.includes("earrings")
+          ? "earrings"
+          : null;
+
+      const microCropLabelMatches = (detection, targetType) => {
+        const label = String(detection?.label || detection?.category || "").trim().toLowerCase();
+        if (targetType === "watch") return /watch/.test(label);
+        if (targetType === "earrings") return /earring|ear stud|stud earring/.test(label);
+        return false;
+      };
+
+      if (accessoryMicroCropTarget && targetedAccessoryReanalysis.publication_allowed) {
+        const detectorCandidate = targetedAcceptedDetections.find((detection) =>
+          microCropLabelMatches(detection, accessoryMicroCropTarget)
+        );
+        const rawDetectorBox = detectorCandidate?.bbox || null;
+        let detectorBox = null;
+        if (rawDetectorBox) {
+          const x = Number(rawDetectorBox?.x ?? rawDetectorBox?.x_min ?? rawDetectorBox?.left);
+          const y = Number(rawDetectorBox?.y ?? rawDetectorBox?.y_min ?? rawDetectorBox?.top);
+          const right = Number(rawDetectorBox?.right ?? rawDetectorBox?.x_max ?? (x + Number(rawDetectorBox?.width ?? rawDetectorBox?.w)));
+          const bottom = Number(rawDetectorBox?.bottom ?? rawDetectorBox?.y_max ?? (y + Number(rawDetectorBox?.height ?? rawDetectorBox?.h)));
+          if ([x, y, right, bottom].every(Number.isFinite) && x >= 0 && y >= 0 && right <= 1 && bottom <= 1 && right > x && bottom > y) {
+            detectorBox = { x, y, width: right - x, height: bottom - y };
+          }
+        }
+        const microQuery = accessoryMicroCropTarget === "watch"
+          ? "watch."
+          : "earring. stud earring. earrings.";
+        accessoryMicroCropRuntime = await executeAccessoryMicroCropRuntimeV1({
+          imageUrl: publicUrl,
+          targetType: accessoryMicroCropTarget,
+          detectorBox,
+          runDetector: async () => runGroundingDinoDetection(ghostUrl, microQuery),
+        });
+        const microCropSucceeded = Boolean(
+          accessoryMicroCropRuntime?.ok &&
+          !accessoryMicroCropRuntime?.skipped &&
+          accessoryMicroCropRuntime?.clipped_detections?.length
+        );
+        if (microCropSucceeded) {
+          targetedAcceptedDetections = [
+            ...targetedAcceptedDetections.filter((detection) =>
+              !microCropLabelMatches(detection, accessoryMicroCropTarget)
+            ),
+            ...accessoryMicroCropRuntime.clipped_detections,
+          ];
+        } else if (accessoryMicroCropRuntime?.locator?.skipped !== true) {
+          targetedAcceptedDetections = targetedAcceptedDetections.filter((detection) =>
+            !microCropLabelMatches(detection, accessoryMicroCropTarget)
+          );
+        }
+      }
+
+      let targetedRegions = buildDinoSegmentedRegions(targetedAcceptedDetections)
         .map((region, index) => ({
           ...region,
           id: `targeted_dino_${index + 1}`,
@@ -7963,10 +8025,17 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         executed_detector_passes: 1,
         detector_ok: Boolean(targetedDetector?.ok),
         detector_reason: targetedDetector?.reason || null,
-        accepted_detection_count: targetedFilter.accepted.length,
+        accepted_detection_count: targetedAcceptedDetections.length,
         rejected_detection_count: targetedFilter.rejected.length,
-        accepted_detections: targetedFilter.accepted,
+        accepted_detections: targetedAcceptedDetections,
         rejected_detections: targetedFilter.rejected,
+        accessory_micro_crop_runtime_v1: accessoryMicroCropRuntime,
+        accessory_micro_crop_target: accessoryMicroCropTarget,
+        accessory_micro_crop_applied: Boolean(
+          accessoryMicroCropRuntime?.ok &&
+          !accessoryMicroCropRuntime?.skipped &&
+          accessoryMicroCropRuntime?.clipped_detections?.length
+        ),
         measured_regions: targetedRegions,
         publication_changed: false,
         color_changed: false,
