@@ -195,10 +195,12 @@ function bridgeInstance(instance, region) {
     material_family: metal?.metallic?.family || instance?.material_family || null,
     material_display_name: metal?.metallic?.display_name || instance?.material_display_name || null,
     metallic_color_evidence_v1: metal?.metallic || instance?.metallic_color_evidence_v1 || null,
+    metallic_representative_applied: Boolean(metal),
+    metallic_representative_version: metal ? "metallic_representative_v1" : null,
     color_publication_decision: "publish_owned_color",
     validation_decision: "accepted",
     validation_reason: metal ? "validated_accessory_metallic_representative" : "validated_accessory_color_ownership",
-    color_authority_source: metal ? "piece_color_ownership_v1+metallic_representative_v1" : "piece_color_ownership_v1",
+    color_authority_source: "piece_color_ownership_v1",
     stale_accessory_palette_suppressed: false,
   };
 }
