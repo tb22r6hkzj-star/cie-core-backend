@@ -2,12 +2,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { clipDetectionToMicroCropV1, executeAccessoryMicroCropRuntimeV1 } from "../src/intelligence/accessoryMicroCropRuntimeV1.js";
 
+function close(actual, expected, tolerance = 1e-9) {
+  assert.ok(Math.abs(Number(actual) - Number(expected)) <= tolerance, `${actual} != ${expected}`);
+}
+
 test("clips a broad watch detection to the validated watch-only micro crop", () => {
   const clipped = clipDetectionToMicroCropV1(
     { label: "watch", bbox: { x: 0.55, y: 0.48, width: 0.20, height: 0.18 } },
     { x: 0.61, y: 0.53, width: 0.08, height: 0.07 }
   );
-  assert.deepEqual(clipped.bbox, { x: 0.61, y: 0.53, width: 0.08, height: 0.07 });
+  close(clipped.bbox.x, 0.61);
+  close(clipped.bbox.y, 0.53);
+  close(clipped.bbox.width, 0.08);
+  close(clipped.bbox.height, 0.07);
   assert.equal(clipped.micro_crop_applied, true);
 });
 
