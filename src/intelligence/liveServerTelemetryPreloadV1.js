@@ -4,12 +4,14 @@ import { createAnalysisLatencyRuntimeV1 } from "./analysisLatencyRuntimeV1.js";
 import { buildRecommendationRuntimeTelemetryV1 } from "./recommendationRuntimeTelemetryV1.js";
 import { buildLiveReasoningCardsV1 } from "./liveReasoningCardsV1.js";
 import { classifyExternalStageV2, summarizeExternalStageEventsV2 } from "./externalStageTimingV2.js";
+import { reconcileAccessoryPublicationPayloadV1 } from "./accessoryPublicationBridgeV1.js";
 
 const runtime = createAnalysisLatencyRuntimeV1({ maxRecords: 500 });
 const originalGet = express.application.get;
 const originalPost = express.application.post;
 const requestTimingScope = new AsyncLocalStorage();
 const originalFetch = typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : null;
+const INSTRUMENTED_POST_ROUTES = new Set(["/api/recommendations", "/api/images/transform"]);
 
 if (originalFetch) {
   globalThis.fetch = async function visionCoreTimedFetch(input, init) {
@@ -48,6 +50,7 @@ function externalIntelligenceFromPayload(payload = {}) {
   return payload?.outfit_analysis?.external_intelligence
     || payload?.outfitAnalysis?.external_intelligence
     || payload?.external_intelligence
+    || payload?.debug?.external_intelligence
     || null;
 }
 
@@ -115,6 +118,49 @@ function runtimeStages(record, scope) {
   };
 }
 
+function applyLivePublicationGuards(payload = {}) {
+  const bridged = reconcileAccessoryPublicationPayloadV1(payload);
+  return attachReasoningCards(bridged);
+}
+
+function buildInstrumentationMiddleware(path) {
+  return function liveAnalysisInstrumentation(req, res, next) {
+    const startedAtMs = Date.now();
+    const scope = { external_events: [], route: path };
+
+    wrapJson(res, (payload) => {
+      try {
+        const record = recommendationTelemetryRecord({
+          payload,
+          startedAtMs,
+          finishedAtMs: Date.now(),
+        });
+        runtime.recordAnalysis({
+          startedAtMs,
+          finishedAtMs: startedAtMs + Number(record?.total_ms || 0),
+          stages: {
+            ...runtimeStages(record, scope),
+            route_images_transform: path === "/api/images/transform" ? Number(record?.total_ms || 0) : null,
+            route_recommendations: path === "/api/recommendations" ? Number(record?.total_ms || 0) : null,
+          },
+          secondPass: record?.second_pass || {},
+        });
+      } catch {
+        // Telemetry is observational only and must never fail analysis.
+      }
+
+      try {
+        return applyLivePublicationGuards(payload);
+      } catch {
+        // Publication guards must fail open to the original analysis payload.
+        return payload;
+      }
+    });
+
+    return requestTimingScope.run(scope, () => next());
+  };
+}
+
 express.application.get = function patchedGet(path, ...handlers) {
   if (path !== "/api/debug/status") return originalGet.call(this, path, ...handlers);
   const wrapped = handlers.map((handler) => {
@@ -131,44 +177,12 @@ express.application.get = function patchedGet(path, ...handlers) {
 };
 
 express.application.post = function patchedPost(path, ...handlers) {
-  if (path !== "/api/recommendations") return originalPost.call(this, path, ...handlers);
-  const wrapped = handlers.map((handler) => {
-    if (typeof handler !== "function") return handler;
-    return function liveRecommendationTelemetry(req, res, next) {
-      const startedAtMs = Date.now();
-      const scope = { external_events: [] };
-      wrapJson(res, (payload) => {
-        try {
-          const record = recommendationTelemetryRecord({
-            payload,
-            startedAtMs,
-            finishedAtMs: Date.now(),
-          });
-          runtime.recordAnalysis({
-            startedAtMs,
-            finishedAtMs: startedAtMs + Number(record?.total_ms || 0),
-            stages: runtimeStages(record, scope),
-            secondPass: record?.second_pass || {},
-          });
-        } catch {
-          // Telemetry is observational only and must never fail analysis.
-        }
-
-        try {
-          return attachReasoningCards(payload);
-        } catch {
-          // Card synthesis must fail open to the original analysis payload.
-          return payload;
-        }
-      });
-      return requestTimingScope.run(scope, () => handler.call(this, req, res, next));
-    };
-  });
-  return originalPost.call(this, path, ...wrapped);
+  if (!INSTRUMENTED_POST_ROUTES.has(path)) return originalPost.call(this, path, ...handlers);
+  return originalPost.call(this, path, buildInstrumentationMiddleware(path), ...handlers);
 };
 
 export function getLiveServerTelemetryStatusV1() {
   return runtime.status();
 }
 
-export { attachReasoningCards };
+export { attachReasoningCards, applyLivePublicationGuards };

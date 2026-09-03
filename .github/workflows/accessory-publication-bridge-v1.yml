@@ -1,0 +1,33 @@
+name: Accessory Publication Bridge V1
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/intelligence/accessoryPublicationBridgeV1.js'
+      - 'src/intelligence/liveServerTelemetryPreloadV1.js'
+      - 'test/accessoryPublicationBridgeV1.test.js'
+      - '.github/workflows/accessory-publication-bridge-v1.yml'
+
+jobs:
+  accessory-publication-bridge-v1:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Focused publication tests
+        run: NODE_ENV=test node --test test/accessoryPublicationBridgeV1.test.js test/accessoryColorOwnershipV1.test.js test/liveServerTelemetryPreloadV1.test.js
+      - name: Module syntax
+        run: |
+          node --check src/intelligence/accessoryPublicationBridgeV1.js
+          node --check src/intelligence/liveServerTelemetryPreloadV1.js
+      - name: Full suite serial
+        run: NODE_ENV=test node --test --test-concurrency=1
+      - name: Full suite normal
+        run: NODE_ENV=test npm test
