@@ -49,8 +49,40 @@ function instanceType(instance = {}) {
   );
 }
 
+function summaryAuthorityRegions(analysis = {}) {
+  const authorities = Array.isArray(analysis?.piece_color_ownership_v1?.accessory_color_authorities)
+    ? analysis.piece_color_ownership_v1.accessory_color_authorities
+    : [];
+  return authorities.map((authority) => ({
+    id: authority?.id || null,
+    region_id: authority?.region_id || null,
+    detection_id: authority?.detection_id || null,
+    zone: authority?.zone || null,
+    label: authority?.label || authority?.type || null,
+    accessory_type: authority?.type || null,
+    object_type: authority?.type || null,
+    confidence: authority?.confidence ?? null,
+    dominant_hex: authority?.dominant_hex || null,
+    region_colors: Array.isArray(authority?.region_colors) ? authority.region_colors : [],
+    color_debug: {
+      piece_color_ownership_v1: {
+        applied: authority?.applied === true,
+        target_type: "accessory",
+        reason: authority?.reason || null,
+        authority: "post_ownership_summary_lineage",
+        doctrine: authority?.doctrine || null,
+      },
+    },
+    post_ownership_summary_authority: true,
+  }));
+}
+
 function ownershipRegions(analysis = {}) {
+  // Summary authority is intentionally first. The live response may still carry
+  // a legacy pre-ownership segmented-region container, so an id collision must
+  // resolve in favor of the post-ownership authority record.
   const sources = [
+    ...summaryAuthorityRegions(analysis),
     ...(Array.isArray(analysis?.segmented_regions) ? analysis.segmented_regions : []),
     ...(Array.isArray(analysis?.garment_zones?.segmented_regions) ? analysis.garment_zones.segmented_regions : []),
   ];
@@ -95,7 +127,12 @@ function chooseRegion(instance, regions = []) {
   if (!wanted) return null;
   const matches = regions.filter((region) => regionType(region) === wanted);
   if (!matches.length) return null;
-  return matches.sort((a, b) => Number(b?.confidence || 0) - Number(a?.confidence || 0))[0];
+  return matches.sort((a, b) => {
+    if (Boolean(b?.post_ownership_summary_authority) !== Boolean(a?.post_ownership_summary_authority)) {
+      return b?.post_ownership_summary_authority ? 1 : -1;
+    }
+    return Number(b?.confidence || 0) - Number(a?.confidence || 0);
+  })[0];
 }
 
 function bridgeInstance(instance, region) {
@@ -170,6 +207,7 @@ export function reconcileAccessoryPublicationV1(analysis = {}) {
       color_published_count: instances.filter((instance) => /publish/.test(String(instance?.color_publication_decision || ""))).length,
       color_withheld_count: instances.filter((instance) => !/publish/.test(String(instance?.color_publication_decision || ""))).length,
       publication_bridge_version: "accessory_publication_bridge_v1",
+      publication_lineage_version: "post_ownership_summary_v1",
     },
     garment_zones: analysis?.garment_zones ? {
       ...analysis.garment_zones,
@@ -179,6 +217,7 @@ export function reconcileAccessoryPublicationV1(analysis = {}) {
         applied: true,
         authority_owner: "visioncore",
         source: "piece_color_ownership_v1",
+        lineage_source: "post_ownership_summary_v1",
       },
     } : analysis?.garment_zones,
   };
