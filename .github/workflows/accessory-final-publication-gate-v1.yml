@@ -1,0 +1,33 @@
+name: Accessory Final Publication Gate V1
+
+on:
+  push:
+    branches: [visioncore-accessory-final-publication-gate-v1]
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/intelligence/accessoryPublicationBridgeV1.js"
+      - "test/accessoryFinalPublicationGateV1.test.js"
+      - ".github/workflows/accessory-final-publication-gate-v1.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  accessory-final-publication-gate-v1:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Focused gate tests
+        run: NODE_ENV=test node --test test/accessoryFinalPublicationGateV1.test.js test/accessoryPublicationBridgeV1.test.js
+      - name: Syntax
+        run: node --check src/intelligence/accessoryPublicationBridgeV1.js
+      - name: Full suite serial
+        run: NODE_ENV=test node --test --test-concurrency=1
+      - name: Full suite normal
+        run: NODE_ENV=test npm test

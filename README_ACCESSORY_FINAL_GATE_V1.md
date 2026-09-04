@@ -1,0 +1,1 @@
+Accessory Final Publication Gate V1 prevents legacy jewelry zones from publishing color unless an authoritative accessory instance supports publication. Temporary implementation note for PR validation; remove after merge if desired.
