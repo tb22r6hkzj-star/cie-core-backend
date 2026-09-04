@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { reconcileAccessoryPublicationV1 } from '../src/intelligence/accessoryPublicationBridgeV1.js';
 
+// Live regression: stale watch palette must not survive without ownership authority.
 test('stale watch instance cannot publish color without validated ownership region', () => {
   const staleWatch = {
     zone_key: 'accessory_watch',
