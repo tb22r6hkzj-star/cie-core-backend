@@ -156,7 +156,49 @@ function metallicRepresentative(instance, colors = []) {
 }
 
 function bridgeInstance(instance, region) {
-  if (!region) return instance;
+  if (!region) {
+    const type = instanceType(instance);
+    const jewelry = new Set(["watch", "earrings", "ring", "bracelet", "necklace", "chain", "pendant", "shoe_hardware"]);
+    if (!jewelry.has(type)) return instance;
+
+    const decision = String(instance?.color_publication_decision || "");
+    const existingWithhold = /withhold|identity_only/.test(decision) || instance?.validation_decision === "identity_only";
+    const primaryHex = safeHex(instance?.hex || instance?.dominant_hex || instance?.primary_color?.hex || instance?.dominant_color?.hex);
+    const rows = [
+      ...(Array.isArray(instance?.object_local_colors) ? instance.object_local_colors : []),
+      ...(Array.isArray(instance?.region_colors) ? instance.region_colors : []),
+      ...(Array.isArray(instance?.detected_colors) ? instance.detected_colors : []),
+    ];
+    const uniqueHexes = [...new Set(rows.map((row) => safeHex(row?.hex)).filter(Boolean))];
+    let suspiciousWarmPrimary = false;
+    if (primaryHex) {
+      const [r, g, b] = [1, 3, 5].map((i) => Number.parseInt(primaryHex.slice(i, i + 2), 16));
+      const max = Math.max(r, g, b), min = Math.min(r, g, b);
+      suspiciousWarmPrimary = r > g && g > b && (max - min) >= 18 && r >= 120 && g >= 90 && b >= 55;
+    }
+    const suspiciousNoisyPalette = uniqueHexes.length >= 4;
+    if (!existingWithhold && !suspiciousWarmPrimary && !suspiciousNoisyPalette) return instance;
+
+    return {
+      ...instance,
+      object_local_colors: [],
+      support_colors: [],
+      secondary_colors: [],
+      region_colors: [],
+      detected_colors: [],
+      hex: null,
+      dominant_hex: null,
+      dominant_color: null,
+      primary_color: null,
+      signature_color: null,
+      color_publication_decision: existingWithhold ? decision || "withhold_unvalidated_color" : "withhold_unvalidated_color",
+      validation_decision: "identity_only",
+      validation_reason: existingWithhold ? (instance?.validation_reason || "accessory_color_already_withheld") : "suspicious_accessory_palette_without_ownership_region",
+      color_authority_source: "piece_color_ownership_v1",
+      stale_accessory_palette_suppressed: true,
+      accessory_final_publication_gate_v1: true,
+    };
+  }
   const debug = ownershipDebug(region) || {};
   const applied = debug?.applied === true;
   const colors = applied ? ownedColors(region) : [];
