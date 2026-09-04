@@ -28,5 +28,5 @@ test('stale watch instance cannot publish color without validated ownership regi
   assert.equal(next.accessory_instances_v1.instances[0].hex, null);
   assert.equal(next.accessory_instances_v1.instances[0].color_publication_decision, 'withhold_unvalidated_color');
   assert.equal(next.garment_zones.zones.watch.hex, null);
-  assert.equal(next.garment_zones.zones.watch.validation_reason, 'no_validated_accessory_ownership_region');
+  assert.equal(next.garment_zones.zones.watch.validation_reason, 'suspicious_accessory_palette_without_ownership_region');
 });
