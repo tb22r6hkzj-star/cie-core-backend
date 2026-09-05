@@ -50,6 +50,7 @@ test("does not recover a broad wrist-like mask", () => {
   const watch = result.regions[0];
   assert.notEqual(watch?.positive_accessory_mask_v1?.validated, true);
   assert.equal(watch.accessory_mask_recovery_v1.recovered, false);
+  assert.equal(watch.accessory_mask_recovery_v1.reason, "low_target_overlap");
   assert.equal(result.summary.recovered_count, 0);
 });
 
@@ -61,7 +62,22 @@ test("does not recover skin-contaminated mask", () => {
   const result = applyAccessoryMaskRecoveryV1([region], [samMask()]);
   const watch = result.regions[0];
   assert.notEqual(watch?.positive_accessory_mask_v1?.validated, true);
-  assert.equal(watch.accessory_mask_recovery_v1.reason, "recovery_skin_or_exclusion_contamination");
+  assert.equal(watch.accessory_mask_recovery_v1.reason, "skin_contamination");
+});
+
+test("reports insufficient usable pixels instead of inventing accessory color", () => {
+  const weakPixels = samMask({ region_colors: [{ hex: "#C9A765", pct: 1, pixel_count: 4 }] });
+  const result = applyAccessoryMaskRecoveryV1([watchRegion()], [weakPixels]);
+  const watch = result.regions[0];
+  assert.equal(watch.accessory_mask_recovery_v1.recovered, false);
+  assert.equal(watch.accessory_mask_recovery_v1.reason, "insufficient_usable_pixels");
+  assert.deepEqual(watch.accessory_positive_mask_colors, []);
+});
+
+test("reports no_mask when no usable recovery segment exists", () => {
+  const result = applyAccessoryMaskRecoveryV1([watchRegion()], []);
+  assert.equal(result.regions[0].accessory_mask_recovery_v1.reason, "no_mask");
+  assert.equal(result.summary.failure_reasons.no_mask, 1);
 });
 
 test("preserves already validated masks without a recovery attempt", () => {
