@@ -31,7 +31,21 @@ jobs:
       - name: Syntax
         run: node --check src/server.js && node --check src/intelligence/accessoryMaskRecoveryV1.js
       - name: Full suite serial
-        run: NODE_ENV=test node --test --test-concurrency=1
+        shell: bash
+        run: |
+          set +e
+          NODE_ENV=test node --test --test-concurrency=1 > /tmp/visioncore-serial.log 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "=== VisionCore serial suite failure excerpt ==="
+            grep -nE "not ok|AssertionError|ERR_|failureType|error:|actual:|expected:|operator:|Subtest:" /tmp/visioncore-serial.log | tail -n 180 || true
+            echo "=== Tail of serial suite log ==="
+            tail -n 220 /tmp/visioncore-serial.log
+          else
+            echo "Serial suite passed."
+            tail -n 30 /tmp/visioncore-serial.log
+          fi
+          exit "$status"
       - name: Full suite normal
         run: NODE_ENV=test node --test
       - name: Commit live recovery wiring
