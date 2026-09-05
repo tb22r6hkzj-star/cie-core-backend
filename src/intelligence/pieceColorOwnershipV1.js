@@ -254,10 +254,18 @@ function accessoryPaletteLimit(zone) {
   return zone === "accessory_jewelry" ? 2 : 3;
 }
 
+function accessorySemanticExclusionBoxesV2(region = {}) {
+  return (Array.isArray(region?.accessory_semantic_exclusions_v2) ? region.accessory_semantic_exclusions_v2 : [])
+    .filter((row) => normalizeConfidence(row?.confidence) >= 0.6)
+    .map((row) => row?.bbox)
+    .filter(Boolean);
+}
+
 function buildAccessoryNestedInteriorValidation(region, targetBox, decodedImage) {
   const zone = String(region?.zone || "");
   if (!ACCESSORY_TARGET_ZONES.has(zone)) return { candidates: [], validators: [], measurements: null };
   const confidence = normalizeConfidence(region?.confidence);
+  const semanticExclusions = accessorySemanticExclusionBoxesV2(region);
   if (confidence < ACCESSORY_MIN_CONFIDENCE) {
     return { candidates: [], validators: [], measurements: null, reason: "accessory_confidence_too_low" };
   }
@@ -265,12 +273,14 @@ function buildAccessoryNestedInteriorValidation(region, targetBox, decodedImage)
   const outer = measureDinoInteriorPixelsV1({
     decodedImage,
     bbox: targetBox,
+    exclusions: semanticExclusions,
     insetRatio: zone === "accessory_jewelry" ? 0.24 : ACCESSORY_OUTER_INSET,
     limit: 5,
   });
   const inner = measureDinoInteriorPixelsV1({
     decodedImage,
     bbox: targetBox,
+    exclusions: semanticExclusions,
     insetRatio: zone === "accessory_jewelry" ? 0.33 : ACCESSORY_INNER_INSET,
     limit: 5,
   });
@@ -294,9 +304,12 @@ function buildAccessoryNestedInteriorValidation(region, targetBox, decodedImage)
     max_delta_e: maxDeltaE,
     outer_sample_count: Number(outer?.sample_count || 0),
     inner_sample_count: Number(inner?.sample_count || 0),
+    semantic_exclusion_count_v2: semanticExclusions.length,
+    outer_excluded_sample_count_v2: Number(outer?.excluded_sample_count || 0),
+    inner_excluded_sample_count_v2: Number(inner?.excluded_sample_count || 0),
     confidence: round3(confidence),
     validated: stable,
-    doctrine: "detector_box_proposes_nested_pixel_stability_validates",
+    doctrine: semanticExclusions.length ? "semantic_exclusions_plus_nested_pixel_stability_validate" : "detector_box_proposes_nested_pixel_stability_validates",
   };
   if (!stable) {
     return { candidates: [], validators: [validator], measurements: { outer, inner }, reason: "nested_interior_unstable" };
