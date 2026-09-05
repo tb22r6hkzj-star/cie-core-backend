@@ -270,6 +270,52 @@ function buildAccessoryNestedInteriorValidation(region, targetBox, decodedImage)
     return { candidates: [], validators: [], measurements: null, reason: "accessory_confidence_too_low" };
   }
 
+  const positiveMask = region?.positive_accessory_mask_v1 || null;
+  if (zone === "accessory_jewelry" && positiveMask) {
+    const maskColors = (Array.isArray(region?.accessory_positive_mask_colors) ? region.accessory_positive_mask_colors : [])
+      .map((color) => ({ ...color, hex: safeHex(color?.hex) }))
+      .filter((color) => !!color.hex);
+    if (positiveMask?.validated !== true || !maskColors.length) {
+      return {
+        candidates: [],
+        validators: [{
+          validator: "positive_accessory_mask_ownership_v1",
+          target_zone: zone,
+          validated: false,
+          reason: positiveMask?.reason || "positive_accessory_mask_required",
+          sam_region_id: positiveMask?.sam_region_id || null,
+          authority_owner: "visioncore",
+        }],
+        measurements: { positive_mask: positiveMask },
+        reason: "positive_accessory_mask_required",
+      };
+    }
+    const validator = {
+      validator: "positive_accessory_mask_ownership_v1",
+      target_zone: zone,
+      validated: true,
+      reason: positiveMask?.reason || "positive_accessory_mask_validated",
+      sam_region_id: positiveMask?.sam_region_id || null,
+      target_overlap_ratio: positiveMask?.target_overlap_ratio ?? null,
+      mask_overlap_ratio: positiveMask?.mask_overlap_ratio ?? null,
+      confidence: positiveMask?.confidence ?? confidence,
+      authority_owner: "visioncore",
+      doctrine: "positive_mask_membership_precedes_jewelry_color",
+    };
+    const candidates = maskColors.slice(0, accessoryPaletteLimit(zone)).map((color) => ({
+      ...color,
+      source: "accessory_positive_mask_pixels",
+      measurement_source: "accessory_positive_mask_pixels",
+      ownership_state: "owned",
+      ownership_validated: true,
+      ownership_validation: validator,
+      confidence,
+      traceable_to_pixels: true,
+      interior_ratio: 1,
+    }));
+    return { candidates, validators: [validator], measurements: { positive_mask: positiveMask }, reason: null };
+  }
+
   const outer = measureDinoInteriorPixelsV1({
     decodedImage,
     bbox: targetBox,
