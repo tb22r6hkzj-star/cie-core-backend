@@ -77,33 +77,51 @@ test("stable nested footwear interior corrects a contaminated detector-box domin
   assert.equal(result.summary.validated_accessory_region_count, 1);
 });
 
-test("stable jewelry core can replace surrounding skin contamination and keep the palette compact", () => {
+test("validated positive jewelry mask replaces surrounding skin contamination and keeps the palette compact", () => {
   const img = image();
   const watchBox = { x: 0.48, y: 0.40, width: 0.22, height: 0.22 };
   paint(img, watchBox, "#C58C59");
   paint(img, { x: 0.535, y: 0.455, width: 0.11, height: 0.11 }, "#C9A765");
 
-  const watch = dinoRegion(
-    "watch",
-    "accessory_jewelry",
-    watchBox,
-    "gold watch",
-    "#D8B38E",
-    0.91,
-    [
-      { hex: "#D8B38E", pct: 0.55 },
-      { hex: "#C9A765", pct: 0.18 },
-      { hex: "#8E684A", pct: 0.14 },
-      { hex: "#6C5748", pct: 0.13 },
-    ]
-  );
+  const watch = {
+    ...dinoRegion(
+      "watch",
+      "accessory_jewelry",
+      watchBox,
+      "gold watch",
+      "#D8B38E",
+      0.91,
+      [
+        { hex: "#D8B38E", pct: 0.55 },
+        { hex: "#C9A765", pct: 0.18 },
+        { hex: "#8E684A", pct: 0.14 },
+        { hex: "#6C5748", pct: 0.13 },
+      ]
+    ),
+    object_type: "watch",
+    accessory_type: "watch",
+    positive_accessory_mask_v1: {
+      version: "accessory_positive_mask_ownership_v2",
+      validated: true,
+      reason: "target_conditioned_sam_positive_mask",
+      confidence: 0.92,
+      sam_region_id: "watch_mask",
+      target_overlap_ratio: 0.88,
+      mask_overlap_ratio: 0.94,
+    },
+    accessory_positive_mask_colors: [
+      { hex: "#C9A765", pct: 0.84, pixel_count: 66 },
+      { hex: "#8E684A", pct: 0.16, pixel_count: 13 },
+    ],
+  };
 
   const result = applyPieceColorOwnershipV1({ decodedImage: img, regions: [watch] });
   const corrected = result.regions[0];
   assert.equal(corrected.dominant_hex, "#C9A765");
   assert.equal(corrected.color_debug.piece_color_ownership_v1.applied, true);
-  assert.equal(corrected.color_debug.piece_color_ownership_v1.doctrine, "nested_interior_stability_then_publish");
+  assert.equal(corrected.color_debug.piece_color_ownership_v1.doctrine, "positive_mask_membership_precedes_jewelry_color");
   assert.ok(corrected.region_colors.length <= 2);
+  assert.equal(corrected.region_colors[0].measurement_source, "accessory_positive_mask_pixels");
   assert.equal(corrected.color_debug.piece_color_ownership_v1.accessory_ownership_validators[0].validated, true);
 });
 
