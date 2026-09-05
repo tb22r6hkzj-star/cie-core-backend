@@ -1,4 +1,4 @@
-const TARGET_PATTERN = /\b(watch|earring|earrings|ear stud|stud earring|bracelet|ring|necklace|chain|pendant|brooch|pin)\b/i;
+const TARGET_PATTERN = /\b(watch|earring|earrings|ear stud|stud earring)\b/i;
 
 function confidence01(value) {
   const n = Number(value || 0);
@@ -29,7 +29,7 @@ function tokens(region = {}) {
     .join(" ");
 }
 
-function isJewelryTarget(region = {}) {
+function isRecoveryTarget(region = {}) {
   return String(region?.zone || "") === "accessory_jewelry" && TARGET_PATTERN.test(tokens(region));
 }
 
@@ -49,19 +49,24 @@ function exclusionRatio(mask, rows = []) {
 
 function recoveryCandidate(region, samRegions = []) {
   const target = boxOf(region);
-  if (!target) return { match: null, reason: "recovery_target_box_missing" };
+  if (!target) return { match: null, reason: "no_mask" };
   const targetArea = target.w * target.h;
   const blocked = exclusions(region);
   let best = null;
+  let sawMask = false;
   let sawOverlap = false;
-  let sawTooBroad = false;
-  let sawExclusionConflict = false;
+  let sawTooSmall = false;
+  let sawLowTargetOverlap = false;
+  let sawSkinContamination = false;
+  let sawInsufficientPixels = false;
 
   for (const sam of Array.isArray(samRegions) ? samRegions : []) {
     if (sam?.source_type !== "sam_segment" || !sam?.mask_url || !sam?.mask_geometry) continue;
     if (confidence01(sam?.confidence) < 0.5) continue;
     const mask = boxOf(sam);
     if (!mask) continue;
+    sawMask = true;
+
     const maskArea = mask.w * mask.h;
     const intersection = overlapArea(target, mask);
     if (!intersection) continue;
@@ -72,21 +77,31 @@ function recoveryCandidate(region, samRegions = []) {
     const blockedRatio = exclusionRatio(mask, blocked);
     const sizeRatio = maskArea / Math.max(targetArea, 1e-9);
 
-    // Recovery is intentionally different from the strict first pass:
-    // it tolerates tiny/discontinuous jewelry masks, but tightens contamination limits.
-    if (targetCoverage < 0.1 || maskCoverage < 0.55) continue;
+    // Recovery accepts small/discontinuous jewelry masks, but it is stricter
+    // than the first pass on contamination and on pixel ownership.
+    if (sizeRatio < 0.025 || maskArea < 1e-6) {
+      sawTooSmall = true;
+      continue;
+    }
+    if (targetCoverage < 0.1 || maskCoverage < 0.55) {
+      sawLowTargetOverlap = true;
+      continue;
+    }
     if (sizeRatio > 1.25) {
-      sawTooBroad = true;
+      sawLowTargetOverlap = true;
       continue;
     }
     if (blockedRatio > 0.12) {
-      sawExclusionConflict = true;
+      sawSkinContamination = true;
       continue;
     }
 
     const colors = Array.isArray(sam?.region_colors) ? sam.region_colors : [];
     const pixelCount = colors.reduce((sum, row) => sum + Math.max(0, Number(row?.pixel_count || 0)), 0);
-    if (!colors.length || pixelCount < 6) continue;
+    if (!colors.length || pixelCount < 6) {
+      sawInsufficientPixels = true;
+      continue;
+    }
 
     const compactness = Math.min(1, targetArea / Math.max(maskArea, 1e-9));
     const score = Math.min(maskCoverage, 1) * 0.4
@@ -100,10 +115,12 @@ function recoveryCandidate(region, samRegions = []) {
   }
 
   if (best) return { match: best, reason: "recovered_target_conditioned_mask" };
-  if (sawExclusionConflict) return { match: null, reason: "recovery_skin_or_exclusion_contamination" };
-  if (sawTooBroad) return { match: null, reason: "recovery_mask_too_broad" };
-  if (sawOverlap) return { match: null, reason: "recovery_mask_insufficient_owned_pixels_or_overlap" };
-  return { match: null, reason: "recovery_no_overlapping_mask" };
+  if (sawSkinContamination) return { match: null, reason: "skin_contamination" };
+  if (sawInsufficientPixels) return { match: null, reason: "insufficient_usable_pixels" };
+  if (sawTooSmall) return { match: null, reason: "mask_too_small" };
+  if (sawLowTargetOverlap || sawOverlap) return { match: null, reason: "low_target_overlap" };
+  if (sawMask) return { match: null, reason: "low_target_overlap" };
+  return { match: null, reason: "no_mask" };
 }
 
 export function applyAccessoryMaskRecoveryV1(regions = [], samRegions = []) {
@@ -112,7 +129,7 @@ export function applyAccessoryMaskRecoveryV1(regions = [], samRegions = []) {
   const failureReasons = {};
 
   const out = (Array.isArray(regions) ? regions : []).map((region) => {
-    if (!isJewelryTarget(region)) return region;
+    if (!isRecoveryTarget(region)) return region;
     if (region?.positive_accessory_mask_v1?.validated === true) return region;
 
     attempted += 1;
@@ -121,6 +138,7 @@ export function applyAccessoryMaskRecoveryV1(regions = [], samRegions = []) {
       failureReasons[result.reason] = (failureReasons[result.reason] || 0) + 1;
       return {
         ...region,
+        accessory_positive_mask_colors: [],
         accessory_mask_recovery_v1: {
           version: "accessory_mask_recovery_v1",
           attempted: true,
@@ -128,6 +146,7 @@ export function applyAccessoryMaskRecoveryV1(regions = [], samRegions = []) {
           reason: result.reason,
           authority_owner: "visioncore",
           retry_budget: 1,
+          legacy_color_fallback_allowed: false,
         },
       };
     }
@@ -162,6 +181,7 @@ export function applyAccessoryMaskRecoveryV1(regions = [], samRegions = []) {
         retry_budget: 1,
         pixel_count: pixelCount,
         score: Number(score.toFixed(3)),
+        legacy_color_fallback_allowed: false,
       },
     };
   });
@@ -176,6 +196,7 @@ export function applyAccessoryMaskRecoveryV1(regions = [], samRegions = []) {
       failure_reasons: failureReasons,
       policy: {
         one_bounded_recovery_pass: true,
+        recovery_targets: ["watch", "earrings"],
         strict_first_pass_remains_primary: true,
         semantic_exclusion_overlap_must_be_low: true,
         minimum_recovered_pixel_count: 6,
