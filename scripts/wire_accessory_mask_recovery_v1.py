@@ -11,7 +11,7 @@ if import_insert not in source:
     source = source.replace(import_anchor, import_insert, 1)
 
 old = '''  const positiveMaskDinoRegions = attachAccessoryPositiveMaskOwnershipV1(dedupedDinoRegions, samRegions);\n  const rawGarmentEvidenceRegions = samRegions.length ? samRegions.concat(positiveMaskDinoRegions) : attachAccessoryPositiveMaskOwnershipV1(dinoRegions, samRegions);\n'''
-new = '''  const positiveMaskDinoRegions = attachAccessoryPositiveMaskOwnershipV1(dedupedDinoRegions, samRegions);\n  const accessoryMaskRecovery = applyAccessoryMaskRecoveryV1(positiveMaskDinoRegions, samRegions);\n  const recoveredPositiveMaskDinoRegions = accessoryMaskRecovery.regions;\n  const rawGarmentEvidenceRegions = samRegions.length\n    ? samRegions.concat(recoveredPositiveMaskDinoRegions)\n    : applyAccessoryMaskRecoveryV1(attachAccessoryPositiveMaskOwnershipV1(dinoRegions, samRegions), samRegions).regions;\n'''
+new = '''  const positiveMaskDinoRegions = attachAccessoryPositiveMaskOwnershipV1(dedupedDinoRegions, samRegions);\n  const accessoryMaskRecovery = samRegions.length\n    ? applyAccessoryMaskRecoveryV1(positiveMaskDinoRegions, samRegions)\n    : { regions: positiveMaskDinoRegions, summary: null };\n  const recoveredPositiveMaskDinoRegions = accessoryMaskRecovery.regions;\n  const rawGarmentEvidenceRegions = samRegions.length\n    ? samRegions.concat(recoveredPositiveMaskDinoRegions)\n    : attachAccessoryPositiveMaskOwnershipV1(dinoRegions, samRegions);\n'''
 if new not in source:
     if old not in source:
         raise SystemExit('positive mask evidence anchor missing')
