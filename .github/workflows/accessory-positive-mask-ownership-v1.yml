@@ -1,0 +1,45 @@
+name: Accessory Positive Mask Ownership V1
+on:
+  push:
+    branches: [visioncore-accessory-positive-mask-ownership-v1]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/intelligence/accessoryPositiveMaskOwnershipV1.js'
+      - 'src/intelligence/pieceColorOwnershipV1.js'
+      - 'src/server.js'
+      - 'test/accessoryPositiveMaskOwnershipV1.test.js'
+      - '.github/workflows/accessory-positive-mask-ownership-v1.yml'
+permissions:
+  contents: write
+jobs:
+  positive-mask:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply wiring
+        if: github.event_name == 'push'
+        run: python3 scripts/wire_accessory_positive_mask_ownership_v1.py
+      - run: npm install --no-audit --no-fund
+      - name: Focused regressions
+        run: NODE_ENV=test node --test test/accessoryPositiveMaskOwnershipV1.test.js test/accessoryColorOwnershipV1.test.js test/pieceColorOwnershipV1.test.js
+      - name: Syntax
+        run: node --check src/intelligence/accessoryPositiveMaskOwnershipV1.js && node --check src/intelligence/pieceColorOwnershipV1.js && node --check src/server.js
+      - name: Full suite serial
+        run: NODE_ENV=test node --test --test-concurrency=1
+      - name: Full suite normal
+        run: NODE_ENV=test node --test
+      - name: Commit wiring
+        if: github.event_name == 'push'
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/server.js src/intelligence/pieceColorOwnershipV1.js
+          git commit -m "Wire Accessory Positive Mask Ownership V1"
+          git push
