@@ -34,6 +34,7 @@
 // - PIXELCUT_ENDPOINT
 // - AMAZON_PARTNER_TAG (optional)
 
+import "./intelligence/liveServerTelemetryPreloadV1.js";
 import express from "express";
 import cors from "cors";
 import multer from "multer";
