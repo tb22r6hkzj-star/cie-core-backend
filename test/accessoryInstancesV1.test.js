@@ -19,6 +19,7 @@ function evidence({
   source = "grounding_dino",
   accepted = true,
   supported = true,
+  targeted = false,
 } = {}) {
   return {
     id,
@@ -28,6 +29,7 @@ function evidence({
     confidence,
     geometry,
     accepted,
+    targeted_reanalysis_v1: targeted,
     validation: { supported, reason: supported ? "small_object_local_pixels_validated" : "insufficient_small_object_pixel_evidence" },
     pixel_evidence: { available: true, sample_count: 64 },
     object_local_colors: colors,
@@ -51,6 +53,55 @@ test("publishes simultaneous jewelry types as independent UI-ready zones", () =>
   assert.equal(result.zones.accessory_watch.display_zone_label, "Watch");
   assert.equal(result.color_published_count, 0);
   assert.equal(result.color_withheld_count, 3);
+});
+
+test("publishes targeted VisionCore watch identity even when color measurement is rejected", () => {
+  const result = buildAccessoryInstancesV1({
+    perceptionV6: {
+      evidence_ledger: [evidence({
+        id: "targeted-watch",
+        label: "watch",
+        confidence: .78,
+        accepted: false,
+        supported: false,
+        targeted: true,
+        colors: [{
+          hex: "#C29B6C",
+          pct: .8,
+          pixel_count: 30,
+          source_class: "object",
+          surrounding_distance: .2,
+        }],
+        geometry: { x: .71, y: .46, x2: .81, y2: .57 },
+      })],
+    },
+  });
+
+  assert.equal(result.detected_count, 1);
+  assert.equal(result.identity_only_count, 1);
+  assert.equal(result.zones.accessory_watch.display_zone_label, "Watch");
+  assert.equal(result.instances[0].identity_publication_decision, "publish");
+  assert.equal(result.instances[0].validation_decision, "identity_only");
+  assert.equal(result.instances[0].validation_reason, "targeted_visioncore_identity_without_color_authority");
+  assert.equal(result.instances[0].identity_authority_source, "visioncore_targeted_spatial_detection");
+  assert.equal(result.instances[0].hex, null);
+  assert.equal(result.instances[0].dominant_hex, null);
+  assert.deepEqual(result.instances[0].object_local_colors, []);
+  assert.equal(result.color_published_count, 0);
+});
+
+test("does not let targeted identity bypass spatial-source or confidence gates", () => {
+  const result = buildAccessoryInstancesV1({
+    perceptionV6: {
+      evidence_ledger: [
+        evidence({ id: "semantic-watch", label: "watch", source: "openai_semantic_observer", accepted: false, targeted: true }),
+        evidence({ id: "weak-earring", label: "earring", confidence: .31, accepted: false, targeted: true }),
+      ],
+    },
+  });
+
+  assert.equal(result.detected_count, 0);
+  assert.deepEqual(result.zones, {});
 });
 
 test("labels validated reflective warm jewelry pixels as measured gold tone", () => {
