@@ -270,8 +270,9 @@ function buildAccessoryNestedInteriorValidation(region, targetBox, decodedImage)
     return { candidates: [], validators: [], measurements: null, reason: "accessory_confidence_too_low" };
   }
 
-  const positiveMask = region?.positive_accessory_mask_v1 || null;
-  if (zone === "accessory_jewelry" && positiveMask) {
+  const requiresPositiveJewelryMask = zone === "accessory_jewelry" && pieceClass(region) === "jewelry";
+  if (requiresPositiveJewelryMask) {
+    const positiveMask = region?.positive_accessory_mask_v1 || null;
     const maskColors = (Array.isArray(region?.accessory_positive_mask_colors) ? region.accessory_positive_mask_colors : [])
       .map((color) => ({ ...color, hex: safeHex(color?.hex) }))
       .filter((color) => !!color.hex);
@@ -477,13 +478,19 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
     const accessoryValidation = isAccessoryTarget
       ? buildAccessoryNestedInteriorValidation(region, targetBox, decodedImage)
       : { candidates: [], validators: [], measurements: null, reason: null };
+    const requiresPositiveJewelryMask = isAccessoryTarget && pieceClass(region) === "jewelry";
     const validatedCandidates = [...samValidation.candidates, ...accessoryValidation.candidates];
-    const authority = selectMeasuredColorAuthorityV1(
-      buildMeasurementCandidates(region, interiorMeasurement, validatedCandidates)
-    );
+    const authorityCandidates = requiresPositiveJewelryMask
+      ? accessoryValidation.candidates
+      : buildMeasurementCandidates(region, interiorMeasurement, validatedCandidates);
+    const authority = selectMeasuredColorAuthorityV1(authorityCandidates);
     const selected = authority.selected;
+    const measurementAvailable = requiresPositiveJewelryMask
+      ? accessoryValidation.candidates.length > 0
+      : interiorMeasurement?.available;
+    const sampleRatioValid = requiresPositiveJewelryMask ? true : keptRatio >= MIN_KEPT_SAMPLE_RATIO;
 
-    if (!interiorMeasurement?.available || !selected || keptRatio < MIN_KEPT_SAMPLE_RATIO) {
+    if (!measurementAvailable || !selected || !sampleRatioValid) {
       if (isAccessoryTarget) accessoryAbstentionCount += 1;
       return {
         ...region,
@@ -557,9 +564,11 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
           kept_sample_ratio: round3(keptRatio),
           measurement_source: selected.source,
           measurement_authority_v1: authority,
-          doctrine: isAccessoryTarget
-            ? "nested_interior_stability_then_publish"
-            : "measure_validate_publish",
+          doctrine: requiresPositiveJewelryMask
+            ? "positive_mask_membership_precedes_jewelry_color"
+            : isAccessoryTarget
+              ? "nested_interior_stability_then_publish"
+              : "measure_validate_publish",
         },
       },
     };
