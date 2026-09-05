@@ -5,6 +5,7 @@ import { buildRecommendationRuntimeTelemetryV1 } from "./recommendationRuntimeTe
 import { buildLiveReasoningCardsV1 } from "./liveReasoningCardsV1.js";
 import { classifyExternalStageV2, summarizeExternalStageEventsV2 } from "./externalStageTimingV2.js";
 import { reconcileAccessoryPublicationPayloadV1 } from "./accessoryPublicationBridgeV1.js";
+import { applyAccessoryCanonicalPublicationV2 } from "./accessoryCanonicalPublicationV2.js";
 import { applyTransformGarmentColorAuthorityV1 } from "./transformGarmentColorAuthorityV1.js";
 
 const runtime = createAnalysisLatencyRuntimeV1({ maxRecords: 500 });
@@ -121,7 +122,8 @@ function runtimeStages(record, scope) {
 
 function applyLivePublicationGuards(payload = {}, route = null) {
   const bridged = reconcileAccessoryPublicationPayloadV1(payload);
-  const reasoned = attachReasoningCards(bridged);
+  const canonical = applyAccessoryCanonicalPublicationV2(bridged);
+  const reasoned = attachReasoningCards(canonical);
   return route === "/api/images/transform"
     ? applyTransformGarmentColorAuthorityV1(reasoned)
     : reasoned;
