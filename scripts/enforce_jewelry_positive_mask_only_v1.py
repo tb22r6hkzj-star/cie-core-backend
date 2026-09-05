@@ -6,7 +6,8 @@ old = '''  const positiveMask = region?.positive_accessory_mask_v1 || null;
   if (zone === "accessory_jewelry" && positiveMask) {
     const maskColors = (Array.isArray(region?.accessory_positive_mask_colors) ? region.accessory_positive_mask_colors : [])
 '''
-new = '''  if (zone === "accessory_jewelry") {
+new = '''  const requiresPositiveJewelryMask = zone === "accessory_jewelry" && pieceClass(region) === "jewelry";
+  if (requiresPositiveJewelryMask) {
     const positiveMask = region?.positive_accessory_mask_v1 || null;
     const maskColors = (Array.isArray(region?.accessory_positive_mask_colors) ? region.accessory_positive_mask_colors : [])
 '''
@@ -15,4 +16,4 @@ if new not in source:
         raise SystemExit('positive mask conditional anchor missing')
     source = source.replace(old, new, 1)
 path.write_text(source)
-print('enforced jewelry positive-mask-only ownership')
+print('enforced positive-mask-only ownership for true jewelry targets')
