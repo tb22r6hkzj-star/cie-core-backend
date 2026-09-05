@@ -63,6 +63,7 @@ import {
 } from "./intelligence/targetedAccessoryReanalysisV1.js";
 import { buildAccessoryIntelligenceLaneV1 } from "./intelligence/accessoryIntelligenceLaneV1.js";
 import { executeAccessoryMicroCropRuntimeV1 } from "./intelligence/accessoryMicroCropRuntimeV1.js";
+import { attachAccessoryPositiveMaskOwnershipV1 } from "./intelligence/accessoryPositiveMaskOwnershipV1.js";
 import { attachBeltLocalizationV1 } from "./intelligence/beltLocalizationV1.js";
 import { resolveMaskStrengthV1, resolveOpaqueMaskStrengthV1 } from "./intelligence/maskStrengthV1.js";
 import { normalizeExternalIntelligenceMode } from "./intelligence/visionCoreExternalIntelligencePolicyV1.js";
@@ -4950,7 +4951,8 @@ function buildOutfitAnalysis({ dominantHex, topColors, segmentedRegions = [], di
   const dedupedDinoRegions = samRegions.length
     ? dinoRegions.filter((region) => region?.zone === "accessory_jewelry" || !samZones.has(region?.zone))
     : dinoRegions;
-  const rawGarmentEvidenceRegions = samRegions.length ? samRegions.concat(dedupedDinoRegions) : dinoRegions;
+  const positiveMaskDinoRegions = attachAccessoryPositiveMaskOwnershipV1(dedupedDinoRegions, samRegions);
+  const rawGarmentEvidenceRegions = samRegions.length ? samRegions.concat(positiveMaskDinoRegions) : attachAccessoryPositiveMaskOwnershipV1(dinoRegions, samRegions);
   const pieceColorOwnership = applyPieceColorOwnershipV1({
     decodedImage,
     regions: rawGarmentEvidenceRegions,
