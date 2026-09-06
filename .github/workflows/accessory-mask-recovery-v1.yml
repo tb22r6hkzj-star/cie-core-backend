@@ -1,0 +1,65 @@
+name: Accessory Mask Recovery V1
+on:
+  push:
+    branches: [visioncore-accessory-mask-recovery-v1]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/server.js'
+      - 'src/intelligence/accessoryMaskRecoveryV1.js'
+      - 'src/intelligence/accessoryPositiveMaskOwnershipV1.js'
+      - 'src/intelligence/pieceColorOwnershipV1.js'
+      - 'test/accessoryMaskRecoveryV1.test.js'
+      - '.github/workflows/accessory-mask-recovery-v1.yml'
+permissions:
+  contents: write
+jobs:
+  recovery:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply recovery wiring
+        run: python3 scripts/wire_accessory_mask_recovery_v1.py
+      - run: npm install --no-audit --no-fund
+      - name: Focused regressions
+        run: NODE_ENV=test node --test test/accessoryMaskRecoveryV1.test.js test/accessoryPositiveMaskOwnershipV1.test.js test/accessoryColorOwnershipV1.test.js test/jewelryPositiveMaskOnlyV1.test.js test/accessoryCanonicalPublicationV2.test.js
+      - name: Syntax
+        run: node --check src/server.js && node --check src/intelligence/accessoryMaskRecoveryV1.js
+      - name: Full suite serial
+        shell: bash
+        run: |
+          set +e
+          NODE_ENV=test node --test --test-concurrency=1 > /tmp/visioncore-serial.log 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "=== VisionCore exact serial failure ==="
+            failure_line=$(grep -n '^not ok ' /tmp/visioncore-serial.log | head -n 1 | cut -d: -f1)
+            if [ -n "$failure_line" ]; then
+              start=$((failure_line > 25 ? failure_line - 25 : 1))
+              end=$((failure_line + 90))
+              sed -n "${start},${end}p" /tmp/visioncore-serial.log
+            else
+              echo "No TAP not-ok line found; showing final 180 lines."
+              tail -n 180 /tmp/visioncore-serial.log
+            fi
+          else
+            echo "Serial suite passed."
+            tail -n 30 /tmp/visioncore-serial.log
+          fi
+          exit "$status"
+      - name: Full suite normal
+        run: NODE_ENV=test node --test
+      - name: Commit live recovery wiring
+        if: github.event_name == 'push'
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/server.js
+          git commit -m "Wire Accessory Mask Recovery V1 into live ownership path"
+          git push origin HEAD:${{ github.ref_name }}
