@@ -20,6 +20,38 @@ test('targeted spatial identity survives color measurement failure', () => {
   assert.equal(result.external_color_authority, false);
 });
 
+test('primary spatial identity survives color measurement failure', () => {
+  const result = resolveAccessoryEvidenceV1({
+    entry: { source: 'grounding_dino', confidence: 0.78 },
+    type: 'watch',
+    confidenceFloor: 0.46,
+    targetedIdentity: false,
+    measurementAccepted: false,
+    pixelSupported: false,
+    colorsAvailable: false,
+  });
+  assert.equal(result.identity_state, 'confirmed');
+  assert.equal(result.publish_identity, true);
+  assert.equal(result.publish_color, false);
+  assert.equal(result.color_state, 'withheld');
+  assert.equal(result.identity_authority_source, 'visioncore_spatial_detection');
+});
+
+test('low-confidence primary spatial detection stays suppressed', () => {
+  const result = resolveAccessoryEvidenceV1({
+    entry: { source: 'grounding_dino', confidence: 0.31 },
+    type: 'watch',
+    confidenceFloor: 0.46,
+    targetedIdentity: false,
+    measurementAccepted: false,
+    pixelSupported: false,
+    colorsAvailable: false,
+  });
+  assert.equal(result.identity_state, 'insufficient');
+  assert.equal(result.publish_identity, false);
+  assert.equal(result.publish_color, false);
+});
+
 test('measurement success cannot publish color without supported owned pixels', () => {
   const result = resolveAccessoryEvidenceV1({
     entry: { source: 'grounding_dino', confidence: 0.83 },
@@ -48,6 +80,36 @@ test('explicit identity challenge can overturn a targeted identity', () => {
   assert.equal(result.identity_state, 'challenged');
   assert.equal(result.publish_identity, false);
   assert.equal(result.publish_color, false);
+});
+
+test('explicit spatial or scene rejection suppresses otherwise supported identity', () => {
+  for (const rejection_scope of ['spatial', 'scene']) {
+    const result = resolveAccessoryEvidenceV1({
+      entry: { source: 'grounding_dino', confidence: 0.92, rejection_scope },
+      type: 'watch',
+      confidenceFloor: 0.46,
+      measurementAccepted: false,
+    });
+    assert.equal(result.identity_state, 'rejected');
+    assert.equal(result.publish_identity, false);
+    assert.equal(result.publish_color, false);
+  }
+});
+
+test('color or mask rejection does not erase supported spatial identity', () => {
+  for (const rejection_scope of ['color', 'mask']) {
+    const result = resolveAccessoryEvidenceV1({
+      entry: { source: 'grounding_dino', confidence: 0.92, rejection_scope },
+      type: 'watch',
+      confidenceFloor: 0.46,
+      measurementAccepted: false,
+      pixelSupported: false,
+      colorsAvailable: false,
+    });
+    assert.equal(result.identity_state, 'confirmed');
+    assert.equal(result.publish_identity, true);
+    assert.equal(result.publish_color, false);
+  }
 });
 
 test('semantic-only evidence cannot become VisionCore identity authority', () => {
