@@ -33,9 +33,12 @@ export function resolveAccessoryEvidenceV1({
   const rejected = isExplicitIdentityRejection(entry);
   const challenged = isExplicitIdentityChallenge(entry);
 
+  // Identity authority is spatial. A sufficiently confident VisionCore-owned
+  // detector/segmenter result can establish object identity independently of
+  // whether later mask/color measurement succeeds. Measurement remains a
+  // separate requirement for publishing color.
   const identitySupported = directSpatialSource
-    && confidence >= clamp01(confidenceFloor)
-    && (measurementAccepted || targetedIdentity);
+    && confidence >= clamp01(confidenceFloor);
 
   const identityState = rejected
     ? "rejected"
@@ -45,9 +48,6 @@ export function resolveAccessoryEvidenceV1({
         ? "confirmed"
         : "insufficient";
 
-  // A measurement or mask failure can withhold color, but it cannot erase a
-  // strong spatial identity. Only an explicit identity-level challenge or
-  // rejection can stop identity publication.
   const publishIdentity = identityState === "confirmed";
   const publishColor = publishIdentity
     && measurementAccepted
@@ -77,7 +77,7 @@ export function resolveAccessoryEvidenceV1({
     identity_authority_source: publishIdentity
       ? targetedIdentity
         ? "visioncore_targeted_spatial_detection"
-        : "visioncore_evidence_ledger"
+        : "visioncore_spatial_detection"
       : null,
     color_authority_source: publishColor ? "visioncore_object_local_pixels" : null,
     external_color_authority: false,
