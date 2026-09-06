@@ -72,6 +72,7 @@ import { normalizeExternalIntelligenceMode } from "./intelligence/visionCoreExte
 import { evaluateCaptureQualityV1 } from "./intelligence/captureQualityGateV1.js";
 import { buildConsumerEvidenceV1 } from "./intelligence/consumerEvidenceV1.js";
 import { createTransformLatencyBudgetV1, shouldRunAccessoryEscalationV1 } from "./intelligence/transformLatencyBudgetV1.js";
+import { buildGroundingDinoQueryPlanV1 } from "./intelligence/groundingDinoQueryPlanV1.js";
 import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
 import { mapDinoLabel } from "./engines/ontology/dinoMappings.js";
 import {
@@ -7742,12 +7743,14 @@ async function analyzeGhostColors(ghostUrl) {
 
   const samPromise = runSamSegmentation(ghostUrl);
   const configuredSingleQuery = String(process.env.GROUNDING_DINO_QUERY || "").trim();
-  const groundingPasses = configuredSingleQuery
-    ? [await runGroundingDinoDetection(ghostUrl, configuredSingleQuery)]
-    : await Promise.all([
-      runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_GARMENT_QUERY),
-      runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_ACCESSORY_QUERY),
-    ]);
+  const groundingQueryPlan = buildGroundingDinoQueryPlanV1({
+    configuredPrimaryQuery: configuredSingleQuery,
+    defaultGarmentQuery: DEFAULT_GROUNDING_DINO_GARMENT_QUERY,
+    accessoryQuery: DEFAULT_GROUNDING_DINO_ACCESSORY_QUERY,
+  });
+  const groundingPasses = await Promise.all(
+    groundingQueryPlan.queries.map((query) => runGroundingDinoDetection(ghostUrl, query))
+  );
   const dinoDetections = groundingPasses.flatMap((pass) => Array.isArray(pass?.detections) ? pass.detections : []);
   const groundingDino = {
     enabled: groundingPasses.some((pass) => pass?.enabled),
