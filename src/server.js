@@ -7975,14 +7975,13 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       1000,
       ACCESSORY_REANALYSIS_BUDGET_MS - transformLatencyBudget.reserve_ms
     );
-    const canPrioritizeLocalAccessoryRecovery = Boolean(
+    const localAccessoryRecoveryRequired = Boolean(
       captureQuality?.disposition !== "retake" &&
       EXTERNAL_INTELLIGENCE_MODE === "assist" &&
       TARGETED_ACCESSORY_REANALYSIS_MODE === "assist" &&
-      preExternalForcedAccessoryTargets.length &&
-      transformLatencyBudget.canRun(accessoryReanalysisMinimumRemainingMs)
+      preExternalForcedAccessoryTargets.length
     );
-    const externalObserverMinimumRemainingMs = canPrioritizeLocalAccessoryRecovery
+    const externalObserverMinimumRemainingMs = localAccessoryRecoveryRequired
       ? EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS + accessoryReanalysisMinimumRemainingMs
       : EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS;
     const effectiveExternalIntelligenceMode = captureQuality?.disposition === "retake" ||
@@ -7990,7 +7989,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       ? "off"
       : EXTERNAL_INTELLIGENCE_MODE;
     const accessoryRecoveryPrioritizedOverExternalObserver = Boolean(
-      canPrioritizeLocalAccessoryRecovery && effectiveExternalIntelligenceMode === "off"
+      localAccessoryRecoveryRequired && effectiveExternalIntelligenceMode === "off"
     );
     const externalSemantic = await runOpenAISemanticObserverV1({
       mode: effectiveExternalIntelligenceMode,
@@ -8054,6 +8053,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
     if (
       targetedAccessoryReanalysis.execution_allowed &&
       targetedAccessoryReanalysis.query &&
+      !localAccessoryRecoveryRequired &&
       !shouldRunAccessoryEscalationV1(transformLatencyBudget, accessoryReanalysisMinimumRemainingMs)
     ) {
       targetedAccessoryReanalysis = {
@@ -8411,6 +8411,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           targeted_accessory_reanalysis: targetedAccessoryReanalysis,
           accessory_recovery_priority_v1: {
             applied: accessoryRecoveryPrioritizedOverExternalObserver,
+            required_by_local_color_challenge: localAccessoryRecoveryRequired,
             forced_targets: preExternalForcedAccessoryTargets,
             external_observer_minimum_remaining_ms: externalObserverMinimumRemainingMs,
             accessory_reanalysis_budget_ms: ACCESSORY_REANALYSIS_BUDGET_MS,
