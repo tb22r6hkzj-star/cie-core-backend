@@ -125,6 +125,45 @@ test("validated positive jewelry mask replaces surrounding skin contamination an
   assert.equal(corrected.color_debug.piece_color_ownership_v1.accessory_ownership_validators[0].validated, true);
 });
 
+test("validated watch mask supplies independent ownership at the mask-backed confidence floor", () => {
+  const img = image();
+  const watch = {
+    ...dinoRegion("targeted-watch", "accessory_jewelry", { x: 0.62, y: 0.41, width: 0.07, height: 0.04 }, "watch", null, 0.49, []),
+    object_type: "watch",
+    accessory_type: "watch",
+    positive_accessory_mask_v1: {
+      validated: true,
+      reason: "recovered_target_conditioned_sam_mask",
+      confidence: 0.7,
+      sam_region_id: "sam-watch",
+      target_overlap_ratio: 0.013,
+      mask_overlap_ratio: 1,
+    },
+    accessory_positive_mask_colors: [
+      { hex: "#C0AC93", pct: 0.6, pixel_count: 8 },
+      { hex: "#9C8A71", pct: 0.4, pixel_count: 6 },
+    ],
+  };
+  const result = applyPieceColorOwnershipV1({ decodedImage: img, regions: [watch] });
+  assert.equal(result.regions[0].color_debug.piece_color_ownership_v1.applied, true);
+  assert.equal(result.regions[0].dominant_hex, "#C0AC93");
+  assert.equal(result.regions[0].color_debug.piece_color_ownership_v1.doctrine, "positive_mask_membership_precedes_jewelry_color");
+});
+
+test("tiny jewelry still requires the higher mask-backed detector floor", () => {
+  const img = image();
+  const earring = {
+    ...dinoRegion("targeted-earring", "accessory_jewelry", { x: 0.5, y: 0.09, width: 0.02, height: 0.015 }, "stud earring", null, 0.49, []),
+    object_type: "earrings",
+    accessory_type: "earrings",
+    positive_accessory_mask_v1: { validated: true, confidence: 0.8, sam_region_id: "sam-earring" },
+    accessory_positive_mask_colors: [{ hex: "#D9D9D6", pct: 1, pixel_count: 12 }],
+  };
+  const result = applyPieceColorOwnershipV1({ decodedImage: img, regions: [earring] });
+  assert.equal(result.regions[0].color_debug.piece_color_ownership_v1.applied, false);
+  assert.equal(result.regions[0].color_debug.piece_color_ownership_v1.reason, "accessory_confidence_too_low");
+});
+
 test("low-confidence accessory abstains and preserves the original evidence", () => {
   const img = image();
   const earringBox = { x: 0.44, y: 0.12, width: 0.08, height: 0.08 };
