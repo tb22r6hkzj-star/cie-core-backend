@@ -12,7 +12,7 @@ test("transform route wires a physical original-image accessory crop into target
   assert.match(source, /createAccessoryMicroCropImageUrlV1\(/);
   assert.match(source, /cropDecodedImageToPngV1\(decodedOriginal, crop\)/);
   assert.match(source, /runGroundingDinoDetection\(cropArtifact\.url, microQuery\)/);
-  assert.match(source, /remapCropDetectionToFullImageV1\(detection, cropArtifact\.crop\)/);
+  assert.match(source, /remapCropDetectionToFullImageV1\(\s*detection,\s*cropArtifact\.crop,\s*cropArtifact\.pixel_bbox\s*\)/);
   assert.match(source, /detector_input: "physical_original_image_crop"/);
   assert.doesNotMatch(source, /runDetector: async \(\) => runGroundingDinoDetection\(ghostUrl, microQuery\)/);
   assert.match(source, /targetedAcceptedDetections = \[/);
