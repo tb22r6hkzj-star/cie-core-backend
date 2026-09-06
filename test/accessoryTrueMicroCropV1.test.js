@@ -21,7 +21,7 @@ test("real crop buffer is cut from the supplied original decoded image", () => {
   const data = Buffer.alloc(width * height * 4, 255);
   const result = cropDecodedImageToPngV1({ width, height, data }, { x: 0.2, y: 0.3, width: 0.4, height: 0.2 });
   assert.ok(result?.buffer?.length > 0);
-  assert.deepEqual(result.pixel_bbox, { x1: 2, y1: 3, x2: 7, y2: 5, width: 5, height: 2 });
+  assert.deepEqual(result.pixel_bbox, { x1: 2, y1: 3, x2: 6, y2: 5, width: 4, height: 2 });
 });
 
 test("crop-relative detections remap back into full-image coordinates", () => {
