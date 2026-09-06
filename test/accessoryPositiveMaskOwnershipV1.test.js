@@ -37,3 +37,16 @@ test('watch without target-conditioned SAM mask is explicitly marked unvalidated
   assert.equal(next.positive_accessory_mask_v1.validated,false);
   assert.equal(next.positive_accessory_mask_v1.reason,'target_conditioned_positive_accessory_mask_required');
 });
+
+test('an already validated recovery mask survives later full-suite reconciliation', () => {
+  const watch = {
+    id:'watch1', zone:'accessory_jewelry', label:'watch', confidence:.9,
+    bbox:{x:.66,y:.42,width:.08,height:.08},
+    positive_accessory_mask_v1:{ validated:true, reason:'recovered_target_conditioned_sam_mask' },
+    accessory_positive_mask_colors:[{hex:'#C8A24A',pct:.7,pixel_count:14},{hex:'#7E612B',pct:.3,pixel_count:6}],
+  };
+  const [next] = attachAccessoryPositiveMaskOwnershipV1([watch],[]);
+  assert.equal(next.positive_accessory_mask_v1.validated,true);
+  assert.equal(next.positive_accessory_mask_v1.reason,'recovered_target_conditioned_sam_mask');
+  assert.equal(next.accessory_positive_mask_colors[0].hex,'#C8A24A');
+});

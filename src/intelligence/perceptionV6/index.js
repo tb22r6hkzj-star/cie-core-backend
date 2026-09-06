@@ -97,6 +97,56 @@ function inspectPixels(region, decodedImage) {
   return { available: true, valid: true, reason: "pixels_sampled", crop: { x: x1, y: y1, width: x2-x1, height: y2-y1 }, sample_count: samples.length, surrounding_sample_count: surrounding.length, ratios, contrast, spatial_structure, object_local_colors: localColors };
 }
 
+function inspectValidatedAccessoryMask(region = {}) {
+  const mask = region?.positive_accessory_mask_v1;
+  const colors = (Array.isArray(region?.accessory_positive_mask_colors)
+    ? region.accessory_positive_mask_colors
+    : [])
+    .map((color) => ({
+      ...color,
+      pct: clamp(color?.pct ?? color?.percentage),
+      pixel_count: Math.max(0, Number(color?.pixel_count || color?.sample_count || 0)),
+      source_class: color?.source_class || "object",
+      surrounding_distance: Number(color?.surrounding_distance ?? 0),
+      measurement_source: color?.measurement_source || color?.source || "accessory_positive_mask_pixels",
+    }))
+    .filter((color) => /^#[0-9a-f]{6}$/i.test(String(color?.hex || "")));
+  const sampleCount = colors.reduce((sum, color) => sum + color.pixel_count, 0);
+  if (mask?.validated !== true || colors.length === 0 || sampleCount < 6) return null;
+  return {
+    available: true,
+    valid: true,
+    reason: "validated_accessory_positive_mask_pixels",
+    crop: mask?.mask_geometry?.bbox || null,
+    sample_count: sampleCount,
+    surrounding_sample_count: 0,
+    ratios: { skin: 0, highlight: 0, dark: 0, object: 1 },
+    contrast: 0,
+    spatial_structure: { target_conditioned_positive_mask: true },
+    object_local_colors: colors,
+    positive_mask_v1: mask,
+  };
+}
+
+function validateAccessoryPositiveMask(entry = {}, pixels = {}) {
+  const label = String(entry?.label || "").toLowerCase();
+  const tinyIdentity = /earring|ear stud|\bring\b|brooch|\bpin\b/.test(label);
+  const confidenceFloor = tinyIdentity ? .52 : .44;
+  const supported = pixels?.available === true && Number(pixels?.sample_count || 0) >= 6;
+  return {
+    supported,
+    accepted: supported && Number(entry?.confidence || 0) >= confidenceFloor,
+    reason: supported
+      ? Number(entry?.confidence || 0) >= confidenceFloor
+        ? "positive_accessory_mask_pixels_validated"
+        : "insufficient_small_object_detector_confidence"
+      : "insufficient_positive_accessory_mask_pixels",
+    contamination: [],
+    positive_evidence: supported ? ["target_conditioned_positive_mask", "object_local_color"] : [],
+    structural_evidence: supported ? ["validated_mask_membership"] : [],
+  };
+}
+
 function evaluatePositiveObjectPresence(entry, pixels) {
   const label = `${entry.label} ${entry.zone}`.toLowerCase();
   const r = pixels.ratios || {};
@@ -231,7 +281,11 @@ export function analyzePerceptionV6({ perceptionV5, regions = [], decodedImage =
     const best = v5.hypotheses?.find((h) => h.region_index === index && h.strategy === "original");
     const confidence = best?.score != null ? normalizeConfidence(best.score) : normalizeConfidence(region.confidence ?? region.score), geometry = v5.normalized_regions?.[index]?.normalized_box ?? null;
     const base = { id: region.id ?? `region-${index}`, source: region.source_type ?? "segmentation", zone: region.zone ?? "unknown", label: region.segment_label ?? region.label ?? region.category ?? "unknown", confidence, geometry, targeted_reanalysis_v1: region?.targeted_reanalysis_v1 === true, targeted_accessory_reanalysis_v1: region?.targeted_accessory_reanalysis_v1 === true };
-    const pixelEvidence = inspectPixels({ ...region, normalized_box: geometry }, decodedImage), validation = validateObject(base, pixelEvidence);
+    const positiveMaskPixels = inspectValidatedAccessoryMask(region);
+    const pixelEvidence = positiveMaskPixels || inspectPixels({ ...region, normalized_box: geometry }, decodedImage);
+    const validation = positiveMaskPixels
+      ? validateAccessoryPositiveMask(base, pixelEvidence)
+      : validateObject(base, pixelEvidence);
     const supplied = (region.region_colors || []).map(c => c.hex).filter(Boolean);
     const survivingColors = pixelEvidence.available
       ? pixelEvidence.object_local_colors.filter(c => !["skin", "highlight"].includes(c.source_class))

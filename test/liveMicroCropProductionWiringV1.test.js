@@ -5,6 +5,9 @@ import fs from "node:fs";
 test("transform route wires a physical original-image accessory crop into targeted reanalysis", () => {
   const source = fs.readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
   assert.match(source, /executeAccessoryMicroCropRuntimeV1/);
+  assert.match(source, /runSegmenter: async/);
+  assert.match(source, /runSamSegmentation\(trueMicroCropArtifact\.url\)/);
+  assert.match(source, /remapCropMaskRegionToFullImageV1/);
   assert.match(source, /accessoryMicroCropTarget = plannedMicroCropTypes\.includes\("watch"\)/);
   assert.match(source, /createAccessoryMicroCropImageUrlV1\(/);
   assert.match(source, /cropDecodedImageToPngV1\(decodedOriginal, crop\)/);

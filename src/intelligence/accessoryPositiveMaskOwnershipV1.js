@@ -90,6 +90,13 @@ function choosePositiveMask(region, samRegions = []) {
 export function attachAccessoryPositiveMaskOwnershipV1(dinoRegions = [], samRegions = []) {
   return (Array.isArray(dinoRegions) ? dinoRegions : []).map((region) => {
     if (!isJewelryTarget(region)) return region;
+    if (
+      region?.positive_accessory_mask_v1?.validated === true &&
+      Array.isArray(region?.accessory_positive_mask_colors) &&
+      region.accessory_positive_mask_colors.length > 0
+    ) {
+      return region;
+    }
     const match = choosePositiveMask(region, samRegions);
     if (!match) {
       return {
