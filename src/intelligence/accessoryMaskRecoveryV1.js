@@ -165,7 +165,16 @@ export function applyAccessoryMaskRecoveryV1(regions = [], samRegions = []) {
 
     recovered += 1;
     const { sam, targetCoverage, maskCoverage, blockedRatio, pixelCount, score } = result.match;
-    const colors = (Array.isArray(sam?.region_colors) ? sam.region_colors : []).map((row) => ({ ...row }));
+    const colors = (Array.isArray(sam?.region_colors) ? sam.region_colors : []).map((row) => {
+      const explicitPixelCount = Math.max(0, Number(row?.pixel_count || row?.sample_count || 0));
+      const measuredShare = Math.max(0, Number(row?.pct ?? row?.percentage ?? 0));
+      return {
+        ...row,
+        pixel_count: explicitPixelCount || Math.max(1, Math.round(measuredShare * pixelCount)),
+        measurement_source: row?.measurement_source || "accessory_positive_mask_pixels",
+        source_class: row?.source_class || "object",
+      };
+    });
     return {
       ...region,
       positive_accessory_mask_v1: {

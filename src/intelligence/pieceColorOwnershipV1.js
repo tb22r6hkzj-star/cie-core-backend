@@ -266,13 +266,18 @@ function buildAccessoryNestedInteriorValidation(region, targetBox, decodedImage)
   if (!ACCESSORY_TARGET_ZONES.has(zone)) return { candidates: [], validators: [], measurements: null };
   const confidence = normalizeConfidence(region?.confidence);
   const semanticExclusions = accessorySemanticExclusionBoxesV2(region);
-  if (confidence < ACCESSORY_MIN_CONFIDENCE) {
+  const requiresPositiveJewelryMask = zone === "accessory_jewelry" && pieceClass(region) === "jewelry";
+  const positiveMask = region?.positive_accessory_mask_v1 || null;
+  const label = [region?.label, region?.segment_label, region?.accessory_type].filter(Boolean).join(" ").toLowerCase();
+  const positiveMaskConfidenceFloor = /earring|ear stud|\bring\b|brooch|\bpin\b/.test(label) ? 0.52 : 0.44;
+  const effectiveConfidenceFloor = requiresPositiveJewelryMask && positiveMask?.validated === true
+    ? positiveMaskConfidenceFloor
+    : ACCESSORY_MIN_CONFIDENCE;
+  if (confidence < effectiveConfidenceFloor) {
     return { candidates: [], validators: [], measurements: null, reason: "accessory_confidence_too_low" };
   }
 
-  const requiresPositiveJewelryMask = zone === "accessory_jewelry" && pieceClass(region) === "jewelry";
   if (requiresPositiveJewelryMask) {
-    const positiveMask = region?.positive_accessory_mask_v1 || null;
     const maskColors = (Array.isArray(region?.accessory_positive_mask_colors) ? region.accessory_positive_mask_colors : [])
       .map((color) => ({ ...color, hex: safeHex(color?.hex) }))
       .filter((color) => !!color.hex);

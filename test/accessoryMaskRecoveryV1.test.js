@@ -62,6 +62,8 @@ test("recovers a small well-contained true-crop mask with independently counted 
   const result = applyAccessoryMaskRecoveryV1([region], [mask]);
   assert.equal(result.regions[0].positive_accessory_mask_v1.validated, true);
   assert.equal(result.regions[0].accessory_mask_recovery_v1.pixel_count, 26);
+  assert.ok(result.regions[0].accessory_positive_mask_colors.every((color) => color.pixel_count >= 1));
+  assert.ok(result.regions[0].accessory_positive_mask_colors.every((color) => color.measurement_source === "accessory_positive_mask_pixels"));
 });
 
 test("rejects a true-crop mask that touches the crop edge", () => {
