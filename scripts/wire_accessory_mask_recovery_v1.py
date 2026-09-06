@@ -11,17 +11,16 @@ if import_insert not in source:
     source = source.replace(import_anchor, import_insert, 1)
 
 old = '''  const positiveMaskDinoRegions = attachAccessoryPositiveMaskOwnershipV1(dedupedDinoRegions, samRegions);\n  const rawGarmentEvidenceRegions = samRegions.length ? samRegions.concat(positiveMaskDinoRegions) : attachAccessoryPositiveMaskOwnershipV1(dinoRegions, samRegions);\n'''
-new = '''  const positiveMaskDinoRegions = attachAccessoryPositiveMaskOwnershipV1(dedupedDinoRegions, samRegions);\n  const accessoryMaskRecovery = applyAccessoryMaskRecoveryV1(positiveMaskDinoRegions, samRegions);\n  const recoveredPositiveMaskDinoRegions = accessoryMaskRecovery.regions;\n  const rawGarmentEvidenceRegions = samRegions.length\n    ? samRegions.concat(recoveredPositiveMaskDinoRegions)\n    : applyAccessoryMaskRecoveryV1(attachAccessoryPositiveMaskOwnershipV1(dinoRegions, samRegions), samRegions).regions;\n'''
+new = '''  const positiveMaskDinoRegions = attachAccessoryPositiveMaskOwnershipV1(dedupedDinoRegions, samRegions);\n  const accessoryMaskRecovery = samRegions.length\n    ? applyAccessoryMaskRecoveryV1(positiveMaskDinoRegions, samRegions)\n    : { regions: positiveMaskDinoRegions, summary: null };\n  const recoveredPositiveMaskDinoRegions = accessoryMaskRecovery.regions;\n  const rawGarmentEvidenceRegions = samRegions.length\n    ? samRegions.concat(recoveredPositiveMaskDinoRegions)\n    : attachAccessoryPositiveMaskOwnershipV1(dinoRegions, samRegions);\n'''
 if new not in source:
     if old not in source:
         raise SystemExit('positive mask evidence anchor missing')
     source = source.replace(old, new, 1)
 
-# Add recovery summary to debug payload next to piece ownership when possible.
-anchor = 'piece_color_ownership_v1: pieceColorOwnership.summary,\n'
-replacement = anchor + '      accessory_mask_recovery_v1: accessoryMaskRecovery.summary,\n'
-if replacement not in source and anchor in source:
-    source = source.replace(anchor, replacement, 1)
+# Do not inject recovery telemetry through a global string anchor here.
+# That can place accessoryMaskRecovery outside its lexical scope in server.js.
+# Recovery remains live in the ownership path; telemetry should be wired later
+# at an explicitly verified in-scope payload location.
 
 path.write_text(source)
 print('wired Accessory Mask Recovery V1 into live transform ownership path')

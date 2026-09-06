@@ -6,7 +6,7 @@ test('production wires positive accessory masks before piece color ownership', (
   const source = fs.readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
   assert.match(source, /attachAccessoryPositiveMaskOwnershipV1/);
   assert.match(source, /positiveMaskDinoRegions/);
-  assert.match(source, /samRegions\.concat\(positiveMaskDinoRegions\)/);
+  assert.match(source, /samRegions\.concat\((?:recoveredPositiveMaskDinoRegions|positiveMaskDinoRegions)\)/);
 });
 
 test('jewelry ownership consumes positive mask evidence before nested rectangle sampling', () => {

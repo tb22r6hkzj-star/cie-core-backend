@@ -31,7 +31,27 @@ jobs:
       - name: Syntax
         run: node --check src/server.js && node --check src/intelligence/accessoryMaskRecoveryV1.js
       - name: Full suite serial
-        run: NODE_ENV=test node --test --test-concurrency=1
+        shell: bash
+        run: |
+          set +e
+          NODE_ENV=test node --test --test-concurrency=1 > /tmp/visioncore-serial.log 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "=== VisionCore exact serial failure ==="
+            failure_line=$(grep -n '^not ok ' /tmp/visioncore-serial.log | head -n 1 | cut -d: -f1)
+            if [ -n "$failure_line" ]; then
+              start=$((failure_line > 25 ? failure_line - 25 : 1))
+              end=$((failure_line + 90))
+              sed -n "${start},${end}p" /tmp/visioncore-serial.log
+            else
+              echo "No TAP not-ok line found; showing final 180 lines."
+              tail -n 180 /tmp/visioncore-serial.log
+            fi
+          else
+            echo "Serial suite passed."
+            tail -n 30 /tmp/visioncore-serial.log
+          fi
+          exit "$status"
       - name: Full suite normal
         run: NODE_ENV=test node --test
       - name: Commit live recovery wiring

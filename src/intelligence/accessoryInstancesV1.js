@@ -90,6 +90,13 @@ function publishableColors(entry = {}) {
     .slice(0, 4);
 }
 
+function targetedIdentityEligible(entry = {}) {
+  return entry?.targeted_reanalysis_v1 === true
+    || entry?.targeted_accessory_reanalysis_v1 === true
+    || entry?.metadata?.targeted_reanalysis_v1 === true
+    || entry?.source_region?.targeted_reanalysis_v1 === true;
+}
+
 function evaluateEntry(entry = {}) {
   const type = normalizeType(entry?.label);
   if (entry?.zone !== "accessory_jewelry" || !JEWELRY_TYPES.has(type)) return null;
@@ -98,15 +105,26 @@ function evaluateEntry(entry = {}) {
   const pixels = entry?.pixel_evidence || {};
   const validation = entry?.validation || {};
   const directSpatialSource = ["grounding_dino", "dino_detection", "sam_segment"].includes(String(entry?.source || ""));
-  const identityAccepted = entry?.accepted === true && directSpatialSource && confidence >= (CONFIDENCE_FLOORS[type] || 0.5);
+  const measurementAccepted = entry?.accepted === true;
+  const targetedIdentity = targetedIdentityEligible(entry);
+
+  // Identity and color are deliberately separate authorities. A bounded,
+  // targeted VisionCore spatial detection may publish the accessory identity
+  // even when color ownership/validation abstains. Color still requires the
+  // original accepted measurement path and can never come from OpenAI.
+  const identityAccepted = directSpatialSource
+    && confidence >= (CONFIDENCE_FLOORS[type] || 0.5)
+    && (measurementAccepted || targetedIdentity);
   const pixelSupported = pixels?.available === true && validation?.supported === true && Number(pixels?.sample_count || 0) >= 6;
-  const colorAccepted = identityAccepted && pixelSupported && colors.length > 0;
+  const colorAccepted = measurementAccepted && identityAccepted && pixelSupported && colors.length > 0;
   return {
     type,
     confidence,
     colors,
     identityAccepted,
     colorAccepted,
+    measurementAccepted,
+    targetedIdentity,
     evidenceId: entry?.id || null,
     geometry: entry?.geometry || null,
     validationReason: validation?.reason || null,
@@ -137,6 +155,9 @@ function buildInstance(entry, index) {
     "necklace", "chain", "pendant", "earrings", "ring", "watch", "shoe_hardware",
   ]).has(entry.type);
   const colorAccepted = entry.colorAccepted && (!metallicColorRequired || metallicIdentity.publishable);
+  const identityOnlyReason = entry.targetedIdentity && !entry.measurementAccepted
+    ? "targeted_visioncore_identity_without_color_authority"
+    : entry.validationReason || "insufficient_object_local_color_evidence";
   return {
     instance_id: `${entry.type}_${index + 1}`,
     zone_key: `accessory_${entry.type}${index ? `_${index + 1}` : ""}`,
@@ -157,17 +178,24 @@ function buildInstance(entry, index) {
       ? "validated_small_object_local_pixels"
       : metallicColorRequired && entry.colorAccepted
         ? "metallic_identity_not_isolated"
-        : entry.validationReason || "insufficient_object_local_color_evidence",
+        : identityOnlyReason,
     object_local_colors: colorAccepted ? entry.colors : [],
+    region_colors: colorAccepted ? entry.colors : [],
     hex: colorAccepted ? primary?.hex || null : null,
+    dominant_hex: colorAccepted ? primary?.hex || null : null,
     dominant_color: colorAccepted ? primary : null,
+    primary_color: colorAccepted ? primary : null,
     support_colors: colorAccepted ? entry.colors.slice(1) : [],
+    secondary_colors: colorAccepted ? entry.colors.slice(1) : [],
     material_family: metallicIdentity.publishable ? metallicIdentity.family : null,
     material_display_name: metallicIdentity.publishable ? metallicIdentity.display_name : null,
     metallic_color_evidence_v1: metallicIdentity,
     source_type: "visioncore_accessory_instances_v1",
+    identity_authority_source: entry.targetedIdentity ? "visioncore_targeted_spatial_detection" : "visioncore_evidence_ledger",
+    color_authority_source: colorAccepted ? "visioncore_object_local_pixels" : null,
     external_color_authority: false,
     pixel_sample_count: entry.pixelSampleCount,
+    identity_first_publication_v1: entry.targetedIdentity === true,
   };
 }
 
@@ -191,10 +219,12 @@ export function buildAccessoryInstancesV1({ perceptionV6 = {} } = {}) {
   return {
     version: "accessory_instances_v1",
     authority_owner: "visioncore",
+    identity_publication_doctrine: "identity_first_color_strict_v1",
     external_color_authority: false,
     instances,
     zones: Object.fromEntries(instances.map((instance) => [instance.zone_key, instance])),
     detected_count: instances.length,
+    identity_only_count: instances.filter((instance) => instance.validation_decision === "identity_only").length,
     color_published_count: instances.filter((instance) => instance.color_publication_decision === "publish_object_local_color").length,
     color_withheld_count: instances.filter((instance) => instance.color_publication_decision !== "publish_object_local_color").length,
   };
