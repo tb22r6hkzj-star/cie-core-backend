@@ -52,6 +52,8 @@ const TARGETS = Object.freeze({
   },
 });
 
+const DISCOVERY_TYPES = Object.freeze(["watch", "earrings"]);
+
 function token(value) {
   return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 }
@@ -95,10 +97,18 @@ function publishedAccessoryCounts(outfitAnalysis = {}) {
   return counts;
 }
 
+function publishedAccessoryTotal(outfitAnalysis = {}) {
+  const direct = Number(outfitAnalysis?.accessory_instances_v1?.detected_count);
+  if (Number.isFinite(direct)) return Math.max(0, direct);
+  return Object.values(publishedAccessoryCounts(outfitAnalysis)).reduce((sum, value) => sum + Number(value || 0), 0);
+}
+
 /**
- * OpenAI can trigger this plan, but it cannot construct the detector query.
- * Only allowlisted accessory types with stable instance keys can enter one
- * bounded VisionCore detector pass.
+ * OpenAI may request targeted reanalysis, but VisionCore no longer depends on
+ * OpenAI to notice every small accessory. When the primary VisionCore pass
+ * publishes zero accessory instances, one bounded discovery pass is allowed
+ * for the two highest-value missing small-object types: watch and earrings.
+ * Existing server latency budget logic still decides whether the pass runs.
  */
 export function buildTargetedAccessoryReanalysisPlanV1({
   mode = "off",
@@ -123,18 +133,34 @@ export function buildTargetedAccessoryReanalysisPlanV1({
     semanticKeysByType.set(target, keys);
   }
 
-  const targets = [...semanticKeysByType.entries()]
+  let targets = [...semanticKeysByType.entries()]
     .map(([type, keys]) => ({
       type,
       semantic_instance_count: keys.size,
       measured_instance_count: publishedCounts[type] || 0,
       missing_instance_count: Math.max(0, keys.size - (publishedCounts[type] || 0)),
+      trigger_source: "openai_semantic_mismatch",
     }))
     .filter((entry) => entry.missing_instance_count > 0)
     .sort((a, b) => b.missing_instance_count - a.missing_instance_count || a.type.localeCompare(b.type))
     .slice(0, Math.max(1, Math.min(4, Number(maxTargets) || 4)));
 
+  const semanticMismatchPresent = targets.length > 0;
+  const primaryAccessoryCount = publishedAccessoryTotal(outfitAnalysis);
+
+  if (!semanticMismatchPresent && normalizedMode !== "off" && primaryAccessoryCount === 0) {
+    targets = DISCOVERY_TYPES.map((type) => ({
+      type,
+      semantic_instance_count: 0,
+      measured_instance_count: 0,
+      missing_instance_count: 1,
+      trigger_source: "visioncore_zero_accessory_discovery",
+    }));
+  }
+
   const queryTerms = targets.flatMap((entry) => TARGETS[entry.type].query);
+  const discoveryTriggered = !semanticMismatchPresent && targets.some((entry) => entry.trigger_source === "visioncore_zero_accessory_discovery");
+
   return {
     version: "targeted_accessory_reanalysis_v1",
     mode: normalizedMode,
@@ -143,9 +169,15 @@ export function buildTargetedAccessoryReanalysisPlanV1({
     publication_allowed: normalizedMode === "assist",
     execution_allowed: normalizedMode !== "off" && targets.length > 0,
     detector_pass_budget: 1,
+    discovery_sweep_v1: discoveryTriggered,
+    trigger_source: semanticMismatchPresent ? "openai_semantic_mismatch" : discoveryTriggered ? "visioncore_zero_accessory_discovery" : "none",
     targets,
     query: queryTerms.length ? `${queryTerms.join(". ")}.` : null,
-    reason: targets.length ? "semantic_instance_count_exceeds_measured_visioncore_instances" : "no_eligible_instance_mismatch",
+    reason: semanticMismatchPresent
+      ? "semantic_instance_count_exceeds_measured_visioncore_instances"
+      : discoveryTriggered
+        ? "visioncore_primary_pass_published_zero_accessories"
+        : "no_eligible_instance_mismatch",
   };
 }
 
