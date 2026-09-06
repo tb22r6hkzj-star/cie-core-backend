@@ -138,6 +138,43 @@ test("post-ownership summary authority outranks stale segmented watch palette", 
   assert.equal(result.garment_zones.zones.accessory_watch.hex, "#C69B43");
 });
 
+test("applied same-type summary authority outranks a higher-confidence abstention", () => {
+  const instance = watchInstance();
+  const analysis = analysisWith({}, instance);
+  analysis.piece_color_ownership_v1 = {
+    version: "piece_color_ownership_v1",
+    accessory_color_authorities: [
+      {
+        id: "watch_unmasked",
+        type: "watch",
+        confidence: 55,
+        applied: false,
+        reason: "positive_accessory_mask_required",
+        dominant_hex: null,
+        region_colors: [],
+      },
+      {
+        id: "watch_targeted_mask",
+        type: "watch",
+        confidence: 49,
+        applied: true,
+        dominant_hex: "#C0AC93",
+        region_colors: [
+          { hex: "#C0AC93", pct: 0.6, pixel_count: 16 },
+          { hex: "#CFB293", pct: 0.4, pixel_count: 10 },
+        ],
+        doctrine: "positive_mask_membership_precedes_jewelry_color",
+      },
+    ],
+  };
+
+  const result = reconcileAccessoryPublicationV1(analysis);
+  const bridged = result.accessory_instances_v1.instances[0];
+  assert.equal(bridged.hex, "#C0AC93");
+  assert.equal(bridged.color_publication_decision, "publish_owned_color");
+  assert.equal(bridged.validation_decision, "accepted");
+});
+
 test("post-ownership summary abstention suppresses stale segmented watch palette", () => {
   const staleRegion = {
     id: "watch_detection",
