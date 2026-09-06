@@ -1,7 +1,7 @@
 name: Accessory Mask Recovery V1
 on:
   push:
-    branches: [visioncore-accessory-mask-recovery-v1, visioncore-targeted-provenance-bridge-v1, visioncore-accessory-evidence-contract-v1]
+    branches: [visioncore-accessory-mask-recovery-v1]
   pull_request:
     branches: [main]
     paths:
@@ -9,13 +9,7 @@ on:
       - 'src/intelligence/accessoryMaskRecoveryV1.js'
       - 'src/intelligence/accessoryPositiveMaskOwnershipV1.js'
       - 'src/intelligence/pieceColorOwnershipV1.js'
-      - 'src/intelligence/perceptionV6/index.js'
-      - 'src/intelligence/accessoryInstancesV1.js'
-      - 'src/intelligence/accessoryEvidenceContractV1.js'
       - 'test/accessoryMaskRecoveryV1.test.js'
-      - 'test/targetedAccessoryProvenanceBridgeV1.test.js'
-      - 'test/targetedMicroCropIdentityFallbackV1.test.js'
-      - 'test/accessoryEvidenceContractV1.test.js'
       - '.github/workflows/accessory-mask-recovery-v1.yml'
 permissions:
   contents: write
@@ -30,15 +24,12 @@ jobs:
         with:
           node-version: 22
       - name: Apply recovery wiring
-        run: |
-          python3 scripts/wire_accessory_mask_recovery_v1.py
-          python3 scripts/wire_targeted_identity_bridge_v1.py
-          python3 scripts/wire_accessory_evidence_contract_v1.py
+        run: python3 scripts/wire_accessory_mask_recovery_v1.py
       - run: npm install --no-audit --no-fund
       - name: Focused regressions
-        run: NODE_ENV=test node --test test/accessoryMaskRecoveryV1.test.js test/accessoryPositiveMaskOwnershipV1.test.js test/accessoryColorOwnershipV1.test.js test/jewelryPositiveMaskOnlyV1.test.js test/accessoryCanonicalPublicationV2.test.js test/targetedAccessoryProvenanceBridgeV1.test.js test/targetedMicroCropIdentityFallbackV1.test.js test/accessoryEvidenceContractV1.test.js
+        run: NODE_ENV=test node --test test/accessoryMaskRecoveryV1.test.js test/accessoryPositiveMaskOwnershipV1.test.js test/accessoryColorOwnershipV1.test.js test/jewelryPositiveMaskOnlyV1.test.js test/accessoryCanonicalPublicationV2.test.js
       - name: Syntax
-        run: node --check src/server.js && node --check src/intelligence/accessoryMaskRecoveryV1.js && node --check src/intelligence/perceptionV6/index.js && node --check src/intelligence/accessoryInstancesV1.js && node --check src/intelligence/accessoryEvidenceContractV1.js
+        run: node --check src/server.js && node --check src/intelligence/accessoryMaskRecoveryV1.js
       - name: Full suite serial
         shell: bash
         run: |
@@ -69,6 +60,6 @@ jobs:
           if git diff --quiet; then exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/server.js src/intelligence/perceptionV6/index.js src/intelligence/accessoryInstancesV1.js
-          git commit -m "Apply accessory evidence contract to live publication path"
+          git add src/server.js
+          git commit -m "Wire Accessory Mask Recovery V1 into live ownership path"
           git push origin HEAD:${{ github.ref_name }}
