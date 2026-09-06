@@ -28,9 +28,15 @@ test("optional external intelligence and accessory escalation obey remaining bud
 test("local accessory color recovery takes priority over optional semantic observation", () => {
   assert.match(source, /preExternalAccessoryIntelligenceLane/);
   assert.match(source, /preExternalForcedAccessoryTargets/);
+  assert.match(source, /localAccessoryRecoveryRequired/);
   assert.match(source, /accessoryRecoveryPrioritizedOverExternalObserver/);
   assert.match(source, /accessory_recovery_priority_v1/);
+  assert.match(source, /required_by_local_color_challenge/);
   assert.match(source, /response_reserve_counted_ms/);
+});
+
+test("required local accessory recovery is not suppressed by the optional-work latency gate", () => {
+  assert.match(source, /targetedAccessoryReanalysis\.query &&\s*!localAccessoryRecoveryRequired &&\s*!shouldRunAccessoryEscalationV1/);
 });
 
 test("response debug exposes transform latency budget snapshot", () => {
