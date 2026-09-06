@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveAccessoryEvidenceV1 } from '../src/intelligence/accessoryEvidenceContractV1.js';
 
+// Accessory Evidence Contract V1 keeps identity and color authority independent.
 test('targeted spatial identity survives color measurement failure', () => {
   const result = resolveAccessoryEvidenceV1({
     entry: { source: 'grounding_dino', confidence: 0.81 },
