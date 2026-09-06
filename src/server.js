@@ -147,6 +147,8 @@ export const TARGETED_ACCESSORY_REANALYSIS_MODE = normalizeTargetedAccessoryRean
   process.env.VISIONCORE_TARGETED_ACCESSORY_REANALYSIS_MODE,
   "assist"
 );
+const EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS = 8000;
+const ACCESSORY_REANALYSIS_BUDGET_MS = 10000;
 const externalSemanticCache = new Map();
 
 function buildExternalSemanticEvidence(outfitAnalysis = {}) {
@@ -7954,16 +7956,45 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       return sendStepError(res, 500, "palette_engine", error);
     }
 
-    const effectiveExternalIntelligenceMode = captureQuality?.disposition === "retake" || !transformLatencyBudget.canRun(8000)
+    // A validated local accessory identity with rejected color is a stronger
+    // reason to spend the remaining latency budget than optional semantic
+    // corroboration. Detect that condition before the observer runs so the
+    // observer cannot consume the only window in which object-local color can
+    // still be recovered.
+    const preExternalAccessoryIntelligenceLane = buildAccessoryIntelligenceLaneV1({
+      outfitAnalysis,
+      reconciliation: { candidates: [] },
+    });
+    const preExternalForcedAccessoryTargets = (
+      preExternalAccessoryIntelligenceLane?.forced_micro_crop_targets || []
+    ).filter((type) => ["watch", "earrings"].includes(type));
+    const canPrioritizeLocalAccessoryRecovery = Boolean(
+      captureQuality?.disposition !== "retake" &&
+      EXTERNAL_INTELLIGENCE_MODE === "assist" &&
+      TARGETED_ACCESSORY_REANALYSIS_MODE === "assist" &&
+      preExternalForcedAccessoryTargets.length &&
+      transformLatencyBudget.canRun(ACCESSORY_REANALYSIS_BUDGET_MS)
+    );
+    const externalObserverMinimumRemainingMs = canPrioritizeLocalAccessoryRecovery
+      ? EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS + ACCESSORY_REANALYSIS_BUDGET_MS
+      : EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS;
+    const effectiveExternalIntelligenceMode = captureQuality?.disposition === "retake" ||
+      !transformLatencyBudget.canRun(externalObserverMinimumRemainingMs)
       ? "off"
       : EXTERNAL_INTELLIGENCE_MODE;
+    const accessoryRecoveryPrioritizedOverExternalObserver = Boolean(
+      canPrioritizeLocalAccessoryRecovery && effectiveExternalIntelligenceMode === "off"
+    );
     const externalSemantic = await runOpenAISemanticObserverV1({
       mode: effectiveExternalIntelligenceMode,
       imageUrl: publicUrl,
       visionCoreEvidence: buildExternalSemanticEvidence(outfitAnalysis),
       visionCoreDecision: buildExternalCompositeDecision(outfitAnalysis),
       model: OPENAI_SEMANTIC_MODEL,
-      timeoutMs: transformLatencyBudget.providerTimeoutMs({ requestedMs: 8000, maximumMs: 8000 }),
+      timeoutMs: transformLatencyBudget.providerTimeoutMs({
+        requestedMs: EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS,
+        maximumMs: EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS,
+      }),
       cache: externalSemanticCache,
       cacheKey: `${publicUrl}:visioncore_external_handoff_v1:${OPENAI_SEMANTIC_MODEL}`,
     });
@@ -7977,7 +8008,9 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
     });
     let targetedAccessoryReanalysis = buildTargetedAccessoryReanalysisPlanV1({
       mode: resolveTargetedAccessoryReanalysisModeV1({
-        externalMode: effectiveExternalIntelligenceMode,
+        externalMode: accessoryRecoveryPrioritizedOverExternalObserver
+          ? EXTERNAL_INTELLIGENCE_MODE
+          : effectiveExternalIntelligenceMode,
         configuredMode: TARGETED_ACCESSORY_REANALYSIS_MODE,
       }),
       reconciliation: semanticReconciliation,
@@ -8014,7 +8047,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
     if (
       targetedAccessoryReanalysis.execution_allowed &&
       targetedAccessoryReanalysis.query &&
-      !shouldRunAccessoryEscalationV1(transformLatencyBudget, 10000)
+      !shouldRunAccessoryEscalationV1(transformLatencyBudget, ACCESSORY_REANALYSIS_BUDGET_MS)
     ) {
       targetedAccessoryReanalysis = {
         ...targetedAccessoryReanalysis,
@@ -8369,6 +8402,12 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           semantic_reconciliation: semanticReconciliation,
           accessory_intelligence_lane: accessoryIntelligenceLane,
           targeted_accessory_reanalysis: targetedAccessoryReanalysis,
+          accessory_recovery_priority_v1: {
+            applied: accessoryRecoveryPrioritizedOverExternalObserver,
+            forced_targets: preExternalForcedAccessoryTargets,
+            external_observer_minimum_remaining_ms: externalObserverMinimumRemainingMs,
+            accessory_reanalysis_budget_ms: ACCESSORY_REANALYSIS_BUDGET_MS,
+          },
           semantic_publication_policy: semanticPublicationConstraints,
           publication_changed: Boolean(
             semanticPublicationConstraints.confirmed_pieces.length ||

@@ -17,10 +17,18 @@ test("SAM starts in parallel with DINO", () => {
 });
 
 test("optional external intelligence and accessory escalation obey remaining budget", () => {
-  assert.match(source, /!transformLatencyBudget\.canRun\(8000\)/);
-  assert.match(source, /timeoutMs: transformLatencyBudget\.providerTimeoutMs\(\{ requestedMs: 8000, maximumMs: 8000 \}\)/);
-  assert.match(source, /shouldRunAccessoryEscalationV1\(transformLatencyBudget, 10000\)/);
+  assert.match(source, /EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS \+ ACCESSORY_REANALYSIS_BUDGET_MS/);
+  assert.match(source, /!transformLatencyBudget\.canRun\(externalObserverMinimumRemainingMs\)/);
+  assert.match(source, /requestedMs: EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS/);
+  assert.match(source, /shouldRunAccessoryEscalationV1\(transformLatencyBudget, ACCESSORY_REANALYSIS_BUDGET_MS\)/);
   assert.match(source, /transform_latency_budget_insufficient_for_optional_accessory_reanalysis/);
+});
+
+test("local accessory color recovery takes priority over optional semantic observation", () => {
+  assert.match(source, /preExternalAccessoryIntelligenceLane/);
+  assert.match(source, /preExternalForcedAccessoryTargets/);
+  assert.match(source, /accessoryRecoveryPrioritizedOverExternalObserver/);
+  assert.match(source, /accessory_recovery_priority_v1/);
 });
 
 test("response debug exposes transform latency budget snapshot", () => {
