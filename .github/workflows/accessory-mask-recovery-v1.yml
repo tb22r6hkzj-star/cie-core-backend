@@ -1,7 +1,7 @@
 name: Accessory Mask Recovery V1
 on:
   push:
-    branches: [visioncore-accessory-mask-recovery-v1, visioncore-live-accessory-recovery-wiring-v1]
+    branches: [visioncore-accessory-mask-recovery-v1]
   pull_request:
     branches: [main]
     paths:
