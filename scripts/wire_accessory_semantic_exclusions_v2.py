@@ -10,8 +10,8 @@ if replacement not in source:
         raise SystemExit('nested accessory validation anchor missing')
     source = source.replace(anchor, replacement, 1)
 
-conf_anchor = '''  const confidence = normalizeConfidence(region?.confidence);\n  if (confidence < ACCESSORY_MIN_CONFIDENCE) {'''
-conf_replacement = '''  const confidence = normalizeConfidence(region?.confidence);\n  const semanticExclusions = accessorySemanticExclusionBoxesV2(region);\n  if (confidence < ACCESSORY_MIN_CONFIDENCE) {'''
+conf_anchor = '''  const confidence = normalizeConfidence(region?.confidence);'''
+conf_replacement = '''  const confidence = normalizeConfidence(region?.confidence);\n  const semanticExclusions = accessorySemanticExclusionBoxesV2(region);'''
 if conf_replacement not in source:
     if conf_anchor not in source:
         raise SystemExit('confidence anchor missing')
