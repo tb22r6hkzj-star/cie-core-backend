@@ -41,6 +41,45 @@ test("recovers a compact clean watch mask rejected by the strict first pass", ()
   assert.equal(result.summary.recovered_count, 1);
 });
 
+test("recovers a small well-contained true-crop mask with independently counted pixels", () => {
+  const region = watchRegion();
+  region.bbox = { x: 0.62616, y: 0.409948, width: 0.073448, height: 0.040144 };
+  region.accessory_semantic_exclusions_v2 = [];
+  const mask = samMask({
+    micro_crop_mask_v1: true,
+    mask_geometry: {
+      bbox: { x: 0.647347, y: 0.438622, w: 0.009887, h: 0.003186 },
+      pixel_count: 26,
+      fill_ratio: 0.743,
+      image_edge_ratio: 0,
+    },
+    region_colors: [
+      { hex: "#C0AC93", pct: 0.46 },
+      { hex: "#9C8A71", pct: 0.31 },
+      { hex: "#83735E", pct: 0.23 },
+    ],
+  });
+  const result = applyAccessoryMaskRecoveryV1([region], [mask]);
+  assert.equal(result.regions[0].positive_accessory_mask_v1.validated, true);
+  assert.equal(result.regions[0].accessory_mask_recovery_v1.pixel_count, 26);
+});
+
+test("rejects a true-crop mask that touches the crop edge", () => {
+  const mask = samMask({
+    micro_crop_mask_v1: true,
+    mask_geometry: {
+      bbox: { x: 0.415, y: 0.415, width: 0.01, height: 0.01 },
+      pixel_count: 30,
+      fill_ratio: 0.8,
+      image_edge_ratio: 0.4,
+    },
+    region_colors: [{ hex: "#C9A765", pct: 1 }],
+  });
+  const result = applyAccessoryMaskRecoveryV1([watchRegion()], [mask]);
+  assert.equal(result.regions[0].accessory_mask_recovery_v1.recovered, false);
+  assert.equal(result.regions[0].accessory_mask_recovery_v1.reason, "skin_contamination");
+});
+
 test("does not recover a broad wrist-like mask", () => {
   const broad = samMask({
     id: "sam_wrist",

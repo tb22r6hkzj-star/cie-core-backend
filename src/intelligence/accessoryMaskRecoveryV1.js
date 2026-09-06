@@ -76,14 +76,21 @@ function recoveryCandidate(region, samRegions = []) {
     const maskCoverage = intersection / Math.max(maskArea, 1e-9);
     const blockedRatio = exclusionRatio(mask, blocked);
     const sizeRatio = maskArea / Math.max(targetArea, 1e-9);
+    const microCropMask = sam?.micro_crop_mask_v1 === true;
+    const geometry = sam?.mask_geometry || {};
+    const fillRatio = Number(geometry?.fill_ratio || 0);
+    const imageEdgeRatio = Number(geometry?.image_edge_ratio || 0);
+    const sizeRatioFloor = microCropMask ? 0.005 : 0.025;
+    const targetCoverageFloor = microCropMask ? 0.005 : 0.1;
+    const maskCoverageFloor = microCropMask ? 0.8 : 0.55;
 
     // Recovery accepts small/discontinuous jewelry masks, but it is stricter
     // than the first pass on contamination and on pixel ownership.
-    if (sizeRatio < 0.025 || maskArea < 1e-6) {
+    if (sizeRatio < sizeRatioFloor || maskArea < 1e-6) {
       sawTooSmall = true;
       continue;
     }
-    if (targetCoverage < 0.1 || maskCoverage < 0.55) {
+    if (targetCoverage < targetCoverageFloor || maskCoverage < maskCoverageFloor) {
       sawLowTargetOverlap = true;
       continue;
     }
@@ -95,9 +102,14 @@ function recoveryCandidate(region, samRegions = []) {
       sawSkinContamination = true;
       continue;
     }
+    if (microCropMask && (fillRatio < 0.55 || imageEdgeRatio > 0.12)) {
+      sawSkinContamination = true;
+      continue;
+    }
 
     const colors = Array.isArray(sam?.region_colors) ? sam.region_colors : [];
-    const pixelCount = colors.reduce((sum, row) => sum + Math.max(0, Number(row?.pixel_count || 0)), 0);
+    const colorPixelCount = colors.reduce((sum, row) => sum + Math.max(0, Number(row?.pixel_count || 0)), 0);
+    const pixelCount = Math.max(colorPixelCount, Number(geometry?.pixel_count || 0));
     if (!colors.length || pixelCount < 6) {
       sawInsufficientPixels = true;
       continue;

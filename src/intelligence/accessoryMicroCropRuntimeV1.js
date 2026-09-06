@@ -67,14 +67,25 @@ export async function executeAccessoryMicroCropRuntimeV1({
   if (!["watch", "earrings"].includes(targetType)) {
     return { ok: false, skipped: true, reason: "unsupported_target", target_type: targetType || null };
   }
-  const guidance = await runLocator({ imageUrl, targetType, apiKey, model });
   const normalizedDetectorBox = normalizeBox(detectorBox);
   const useVisionCoreDetectorFallback = Boolean(
-    !guidance?.found && normalizedDetectorBox && detectorValidated === true
+    normalizedDetectorBox && detectorValidated === true
   );
+  const locatorGuidance = useVisionCoreDetectorFallback
+    ? {
+        ok: true,
+        skipped: true,
+        found: false,
+        target_type: targetType,
+        confidence: 0,
+        bbox: null,
+        reason: "visioncore_detector_spatial_authority_available",
+        external_color_authority: false,
+      }
+    : await runLocator({ imageUrl, targetType, apiKey, model });
   const effectiveGuidance = useVisionCoreDetectorFallback
     ? {
-        ...guidance,
+        ...locatorGuidance,
         found: true,
         confidence: Number(detectorConfidence || 0),
         target_bbox: normalizedDetectorBox,
@@ -84,7 +95,7 @@ export async function executeAccessoryMicroCropRuntimeV1({
         spatial_authority: "visioncore_detector",
         external_color_authority: false,
       }
-    : guidance;
+    : locatorGuidance;
   const locatorForPlan = {
     ...effectiveGuidance,
     bbox: effectiveGuidance?.focus_bbox || effectiveGuidance?.target_bbox || effectiveGuidance?.bbox || null,
@@ -97,12 +108,23 @@ export async function executeAccessoryMicroCropRuntimeV1({
     detectorValidated,
   });
   if (!effectiveGuidance?.found || !plan.execution_allowed) {
-    return { ok: true, skipped: true, target_type: targetType, locator: guidance, guidance: effectiveGuidance, plan, reason: plan.reason || effectiveGuidance?.reason || "micro_crop_not_allowed" };
+    return { ok: true, skipped: true, target_type: targetType, locator: locatorGuidance, guidance: effectiveGuidance, plan, reason: plan.reason || effectiveGuidance?.reason || "micro_crop_not_allowed" };
   }
   if (typeof runDetector !== "function") {
-    return { ok: true, skipped: true, target_type: targetType, locator: guidance, guidance, plan, reason: "detector_executor_missing" };
+    return { ok: true, skipped: true, target_type: targetType, locator: locatorGuidance, guidance: effectiveGuidance, plan, reason: "detector_executor_missing" };
   }
-  const detected = await runDetector({ imageUrl, targetType, crop: plan.crop, maxPasses: 1 });
+  const detected = useVisionCoreDetectorFallback
+    ? {
+        ok: true,
+        reused_validated_detector: true,
+        detections: [{
+          label: targetType,
+          confidence: Number(detectorConfidence || 0),
+          bbox: normalizedDetectorBox,
+          visioncore_detector_reused_v1: true,
+        }],
+      }
+    : await runDetector({ imageUrl, targetType, crop: plan.crop, maxPasses: 1 });
   const rows = Array.isArray(detected?.detections) ? detected.detections : Array.isArray(detected) ? detected : [];
   const clippedDetections = rows.map((row) => clipDetectionToMicroCropV1(row, plan.crop, effectiveGuidance)).filter(Boolean);
   let segmentation = null;
@@ -115,14 +137,14 @@ export async function executeAccessoryMicroCropRuntimeV1({
     version: "accessory_micro_crop_runtime_v2",
     authority_owner: "visioncore",
     target_type: targetType,
-    locator: guidance,
+    locator: locatorGuidance,
     guidance: effectiveGuidance,
     visioncore_detector_fallback_applied: useVisionCoreDetectorFallback,
     plan,
-    semantic_exclusions: normalizedExclusions(guidance),
-    material_hypothesis: guidance?.material || "unknown",
-    perceived_color_family: guidance?.perceived_color_family || "unclear",
-    appearance_note: guidance?.appearance_note || "",
+    semantic_exclusions: normalizedExclusions(effectiveGuidance),
+    material_hypothesis: effectiveGuidance?.material || "unknown",
+    perceived_color_family: effectiveGuidance?.perceived_color_family || "unclear",
+    appearance_note: effectiveGuidance?.appearance_note || "",
     clipped_detections: clippedDetections,
     segmentation,
     publication_changed: false,
@@ -132,6 +154,7 @@ export async function executeAccessoryMicroCropRuntimeV1({
       openai_exclusions_require_visioncore_operational_application: true,
       visioncore_validates_crop: true,
       detector_pass_budget: 1,
+      validated_detector_reuse_avoids_duplicate_pass: true,
       segmentation_pass_budget: 1,
       color_requires_existing_pixel_ownership_gate: true,
     },
