@@ -6,6 +6,7 @@ test("transform route wires a physical original-image accessory crop into target
   const source = fs.readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
   assert.match(source, /executeAccessoryMicroCropRuntimeV1/);
   assert.match(source, /runSegmenter: async/);
+  assert.match(source, /runSegmenter: async \(\{ crop \}\) => \{\s*if \(!trueMicroCropArtifact\?\.ok \|\| !trueMicroCropArtifact\?\.url\) \{\s*trueMicroCropArtifact = await createAccessoryMicroCropImageUrlV1/);
   assert.match(source, /runSamSegmentation\(trueMicroCropArtifact\.url, \{\s*timeoutMs: ACCESSORY_MICRO_CROP_SAM_TIMEOUT_MS/);
   assert.match(source, /const ACCESSORY_MICRO_CROP_SAM_TIMEOUT_MS = 15000/);
   assert.match(source, /remapCropMaskRegionToFullImageV1/);

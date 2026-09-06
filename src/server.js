@@ -8161,6 +8161,13 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           },
           runSegmenter: async ({ crop }) => {
             if (!trueMicroCropArtifact?.ok || !trueMicroCropArtifact?.url) {
+              trueMicroCropArtifact = await createAccessoryMicroCropImageUrlV1(
+                publicUrl,
+                crop,
+                accessoryMicroCropTarget
+              );
+            }
+            if (!trueMicroCropArtifact?.ok || !trueMicroCropArtifact?.url) {
               return {
                 enabled: true,
                 ok: false,
