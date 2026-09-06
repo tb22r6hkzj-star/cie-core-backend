@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   normalizeDinoBboxPrecisionV1,
+  normalizeCropRelativeDinoBboxV1,
   normalizeAccessoryCropV1,
   cropDecodedImageToPngV1,
   remapCropDetectionToFullImageV1,
@@ -35,6 +36,30 @@ test("crop-relative detections remap back into full-image coordinates", () => {
   assert.equal(mapped.bbox.x_max, 0.55);
   assert.equal(mapped.bbox.y_max, 0.47);
   assert.equal(mapped.true_micro_crop_v1, true);
+});
+
+test("crop-pixel DINO detections normalize before full-image remap", () => {
+  const relative = normalizeCropRelativeDinoBboxV1(
+    { x_min: 8, y_min: 3, x_max: 32, y_max: 17 },
+    { width: 40, height: 20 }
+  );
+  assert.deepEqual(relative, {
+    x_min: 0.2,
+    y_min: 0.15,
+    x_max: 0.8,
+    y_max: 0.85,
+    width: 0.6,
+    height: 0.7,
+  });
+  const mapped = remapCropDetectionToFullImageV1(
+    { label: "watch", confidence: 0.81, bbox: { x_min: 8, y_min: 3, x_max: 32, y_max: 17 } },
+    { x: 0.6, y: 0.4, width: 0.1, height: 0.05 },
+    { width: 40, height: 20 }
+  );
+  assert.equal(mapped.bbox.x_min, 0.62);
+  assert.equal(mapped.bbox.y_min, 0.4075);
+  assert.equal(mapped.bbox.x_max, 0.68);
+  assert.equal(mapped.bbox.y_max, 0.4425);
 });
 
 test("crop-relative mask geometry remaps back into full-image coordinates", () => {

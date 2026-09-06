@@ -8131,7 +8131,11 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
             }
             const detected = await runGroundingDinoDetection(cropArtifact.url, microQuery);
             const remappedDetections = (detected?.detections || [])
-              .map((detection) => remapCropDetectionToFullImageV1(detection, cropArtifact.crop))
+              .map((detection) => remapCropDetectionToFullImageV1(
+                detection,
+                cropArtifact.crop,
+                cropArtifact.pixel_bbox
+              ))
               .filter(Boolean);
             return {
               ...detected,

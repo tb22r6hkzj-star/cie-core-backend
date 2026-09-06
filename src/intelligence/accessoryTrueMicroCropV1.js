@@ -35,6 +35,21 @@ export function normalizeDinoBboxPrecisionV1(rawBbox = null) {
   };
 }
 
+export function normalizeCropRelativeDinoBboxV1(rawBbox = null, cropPixelDimensions = {}) {
+  const bbox = normalizeDinoBboxPrecisionV1(rawBbox);
+  if (!bbox) return null;
+  if (bbox.x_min >= 0 && bbox.y_min >= 0 && bbox.x_max <= 1 && bbox.y_max <= 1) return bbox;
+  const width = Number(cropPixelDimensions?.width || 0);
+  const height = Number(cropPixelDimensions?.height || 0);
+  if (!(width > 0) || !(height > 0)) return null;
+  return normalizeDinoBboxPrecisionV1({
+    x_min: bbox.x_min / width,
+    y_min: bbox.y_min / height,
+    x_max: bbox.x_max / width,
+    y_max: bbox.y_max / height,
+  });
+}
+
 export function normalizeAccessoryCropV1(crop = {}) {
   const x = clamp01(crop?.x ?? crop?.x_min ?? crop?.left);
   const y = clamp01(crop?.y ?? crop?.y_min ?? crop?.top);
@@ -83,9 +98,12 @@ export function cropDecodedImageToPngV1(decodedImage = {}, crop = {}) {
   };
 }
 
-export function remapCropDetectionToFullImageV1(detection = {}, crop = {}) {
+export function remapCropDetectionToFullImageV1(detection = {}, crop = {}, cropPixelDimensions = {}) {
   const normalizedCrop = normalizeAccessoryCropV1(crop);
-  const bbox = normalizeDinoBboxPrecisionV1(detection?.bbox || detection?.bounding_box || detection);
+  const bbox = normalizeCropRelativeDinoBboxV1(
+    detection?.bbox || detection?.bounding_box || detection,
+    cropPixelDimensions
+  );
   if (!normalizedCrop || !bbox) return null;
   const mapped = normalizeDinoBboxPrecisionV1({
     x_min: normalizedCrop.x + bbox.x_min * normalizedCrop.width,
