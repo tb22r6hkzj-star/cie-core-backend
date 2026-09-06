@@ -61,3 +61,20 @@ test("mixed eyewear crops retain dark object pixels without publishing skin pixe
   assert.ok(!evidence.object_local_colors.some(c=>c.source_class==="skin"));
   assert.ok(evidence.pixel_evidence.ratios.skin>0);
 });
+
+test("validated accessory mask pixels remain color evidence without rectangle resampling",()=>{
+  const watch={
+    id:"watch-mask",source_type:"grounding_dino",zone:"accessory_jewelry",label:"watch",segment_label:"watch",
+    confidence:.9,coverage:.006,bbox:{x:.62,y:.48,width:.07,height:.08},dominant_hex:"#C8A24A",
+    region_colors:[{hex:"#C8A24A",pct:.7,pixel_count:14},{hex:"#7E612B",pct:.3,pixel_count:6}],
+    positive_accessory_mask_v1:{validated:true,reason:"recovered_target_conditioned_sam_mask",mask_geometry:{bbox:{x:.625,y:.485,w:.06,h:.07}}},
+    accessory_positive_mask_colors:[{hex:"#C8A24A",pct:.7,pixel_count:14},{hex:"#7E612B",pct:.3,pixel_count:6}],
+  };
+  const v5=analyzePerceptionV5({regions:[watch]});
+  const v6=analyzePerceptionV6({perceptionV5:v5,regions:[watch],decodedImage:null,mode:"assist"});
+  const evidence=v6.evidence_ledger[0];
+  assert.equal(evidence.pixel_evidence.reason,"validated_accessory_positive_mask_pixels");
+  assert.equal(evidence.validation.reason,"positive_accessory_mask_pixels_validated");
+  assert.equal(evidence.validation.supported,true);
+  assert.equal(evidence.object_local_colors[0].hex,"#C8A24A");
+});

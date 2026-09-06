@@ -5,6 +5,7 @@ import {
   normalizeAccessoryCropV1,
   cropDecodedImageToPngV1,
   remapCropDetectionToFullImageV1,
+  remapCropMaskRegionToFullImageV1,
 } from "../src/intelligence/accessoryTrueMicroCropV1.js";
 
 test("tiny normalized DINO boxes keep precision and do not collapse", () => {
@@ -34,6 +35,28 @@ test("crop-relative detections remap back into full-image coordinates", () => {
   assert.equal(mapped.bbox.x_max, 0.55);
   assert.equal(mapped.bbox.y_max, 0.47);
   assert.equal(mapped.true_micro_crop_v1, true);
+});
+
+test("crop-relative mask geometry remaps back into full-image coordinates", () => {
+  const mapped = remapCropMaskRegionToFullImageV1(
+    {
+      id: "sam-watch",
+      coverage: 0.2,
+      mask_geometry: {
+        bbox: { x: 0.25, y: 0.5, w: 0.5, h: 0.4 },
+        coverage: 0.2,
+        bbox_area: 0.2,
+        centroid_x: 0.5,
+        centroid_y: 0.7,
+      },
+    },
+    { x: 0.4, y: 0.2, width: 0.2, height: 0.3 }
+  );
+  assert.deepEqual(mapped.mask_geometry.bbox, { x: 0.45, y: 0.35, w: 0.1, h: 0.12 });
+  assert.equal(mapped.mask_geometry.centroid_x, 0.5);
+  assert.equal(mapped.mask_geometry.centroid_y, 0.41);
+  assert.equal(mapped.mask_geometry.coverage, 0.012);
+  assert.equal(mapped.micro_crop_mask_v1, true);
 });
 
 test("crop normalization remains bounded to image coordinates", () => {

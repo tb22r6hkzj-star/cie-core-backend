@@ -101,3 +101,53 @@ export function remapCropDetectionToFullImageV1(detection = {}, crop = {}) {
     crop_relative_bbox: bbox,
   };
 }
+
+export function remapCropMaskRegionToFullImageV1(region = {}, crop = {}) {
+  const normalizedCrop = normalizeAccessoryCropV1(crop);
+  const geometry = region?.mask_geometry;
+  const bbox = geometry?.bbox;
+  if (!normalizedCrop || !geometry || !bbox) return null;
+
+  const relativeBox = normalizeDinoBboxPrecisionV1(bbox);
+  if (!relativeBox) return null;
+  const mappedBox = normalizeDinoBboxPrecisionV1({
+    x_min: normalizedCrop.x + relativeBox.x_min * normalizedCrop.width,
+    y_min: normalizedCrop.y + relativeBox.y_min * normalizedCrop.height,
+    x_max: normalizedCrop.x + relativeBox.x_max * normalizedCrop.width,
+    y_max: normalizedCrop.y + relativeBox.y_max * normalizedCrop.height,
+  });
+  if (!mappedBox) return null;
+
+  const centroidX = Number(geometry?.centroid_x);
+  const centroidY = Number(geometry?.centroid_y);
+  const cropArea = normalizedCrop.width * normalizedCrop.height;
+  return {
+    ...region,
+    mask_geometry: {
+      ...geometry,
+      bbox: {
+        x: mappedBox.x_min,
+        y: mappedBox.y_min,
+        w: mappedBox.width,
+        h: mappedBox.height,
+      },
+      coverage: Number.isFinite(Number(geometry?.coverage))
+        ? clamp01(Number(geometry.coverage) * cropArea)
+        : geometry?.coverage,
+      bbox_area: Number.isFinite(Number(geometry?.bbox_area))
+        ? clamp01(Number(geometry.bbox_area) * cropArea)
+        : geometry?.bbox_area,
+      centroid_x: Number.isFinite(centroidX)
+        ? round6(normalizedCrop.x + centroidX * normalizedCrop.width)
+        : geometry?.centroid_x,
+      centroid_y: Number.isFinite(centroidY)
+        ? round6(normalizedCrop.y + centroidY * normalizedCrop.height)
+        : geometry?.centroid_y,
+    },
+    coverage: Number.isFinite(Number(region?.coverage))
+      ? clamp01(Number(region.coverage) * cropArea)
+      : region?.coverage,
+    micro_crop_mask_v1: true,
+    micro_crop_source: "original_upload_true_crop",
+  };
+}

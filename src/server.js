@@ -77,6 +77,7 @@ import {
   cropDecodedImageToPngV1,
   normalizeDinoBboxPrecisionV1,
   remapCropDetectionToFullImageV1,
+  remapCropMaskRegionToFullImageV1,
 } from "./intelligence/accessoryTrueMicroCropV1.js";
 import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
 import { mapDinoLabel } from "./engines/ontology/dinoMappings.js";
@@ -8047,6 +8048,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       };
 
       if (accessoryMicroCropTarget && targetedAccessoryReanalysis.publication_allowed) {
+        let trueMicroCropArtifact = null;
         const detectorCandidate = targetedAcceptedDetections.find((detection) =>
           microCropLabelMatches(detection, accessoryMicroCropTarget)
         );
@@ -8074,6 +8076,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
               crop,
               accessoryMicroCropTarget
             );
+            trueMicroCropArtifact = cropArtifact;
             if (!cropArtifact?.ok || !cropArtifact?.url) {
               return {
                 enabled: true,
@@ -8099,6 +8102,34 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
                 pixel_bbox: cropArtifact.pixel_bbox,
                 detector_input: "physical_original_image_crop",
                 remapped_detection_count: remappedDetections.length,
+              },
+            };
+          },
+          runSegmenter: async ({ crop }) => {
+            if (!trueMicroCropArtifact?.ok || !trueMicroCropArtifact?.url) {
+              return {
+                enabled: true,
+                ok: false,
+                reason: trueMicroCropArtifact?.reason || "true_micro_crop_unavailable_for_segmentation",
+                regions: [],
+              };
+            }
+            const segmented = await runSamSegmentation(trueMicroCropArtifact.url);
+            const remappedRegions = (Array.isArray(segmented?.regions) ? segmented.regions : [])
+              .map((region) => remapCropMaskRegionToFullImageV1(region, trueMicroCropArtifact.crop || crop))
+              .filter(Boolean);
+            return {
+              ...segmented,
+              ok: remappedRegions.length > 0,
+              regions: remappedRegions,
+              true_micro_crop_v1: {
+                ok: true,
+                source: trueMicroCropArtifact.source,
+                target_type: trueMicroCropArtifact.target_type,
+                crop: trueMicroCropArtifact.crop,
+                pixel_bbox: trueMicroCropArtifact.pixel_bbox,
+                segmentation_input: "physical_original_image_crop",
+                remapped_mask_count: remappedRegions.length,
               },
             };
           },
@@ -8135,6 +8166,27 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           id: `targeted_dino_${index + 1}`,
           targeted_reanalysis_v1: true,
         }));
+      const microCropSamRegions = Array.isArray(accessoryMicroCropRuntime?.segmentation?.regions)
+        ? accessoryMicroCropRuntime.segmentation.regions
+        : [];
+      if (targetedRegions.length && microCropSamRegions.length) {
+        const strictPositiveMaskRegions = attachAccessoryPositiveMaskOwnershipV1(
+          targetedRegions,
+          microCropSamRegions
+        );
+        const boundedRecovery = applyAccessoryMaskRecoveryV1(
+          strictPositiveMaskRegions,
+          microCropSamRegions
+        );
+        targetedRegions = boundedRecovery.regions;
+        accessoryMicroCropRuntime = {
+          ...accessoryMicroCropRuntime,
+          mask_recovery_v1: boundedRecovery.summary,
+          color_ownership_candidate_count: targetedRegions.filter((region) =>
+            region?.positive_accessory_mask_v1?.validated === true
+          ).length,
+        };
+      }
       if (targetedRegions.length) {
         try {
           const ghostBuffer = await fetchImageBuffer(ghostUrl);
