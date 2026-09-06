@@ -230,7 +230,7 @@ export function analyzePerceptionV6({ perceptionV5, regions = [], decodedImage =
   const evidenceLedger = regions.map((region, index) => {
     const best = v5.hypotheses?.find((h) => h.region_index === index && h.strategy === "original");
     const confidence = best?.score != null ? normalizeConfidence(best.score) : normalizeConfidence(region.confidence ?? region.score), geometry = v5.normalized_regions?.[index]?.normalized_box ?? null;
-    const base = { id: region.id ?? `region-${index}`, source: region.source_type ?? "segmentation", zone: region.zone ?? "unknown", label: region.segment_label ?? region.label ?? region.category ?? "unknown", confidence, geometry };
+    const base = { id: region.id ?? `region-${index}`, source: region.source_type ?? "segmentation", zone: region.zone ?? "unknown", label: region.segment_label ?? region.label ?? region.category ?? "unknown", confidence, geometry, targeted_reanalysis_v1: region?.targeted_reanalysis_v1 === true, targeted_accessory_reanalysis_v1: region?.targeted_accessory_reanalysis_v1 === true };
     const pixelEvidence = inspectPixels({ ...region, normalized_box: geometry }, decodedImage), validation = validateObject(base, pixelEvidence);
     const supplied = (region.region_colors || []).map(c => c.hex).filter(Boolean);
     const survivingColors = pixelEvidence.available

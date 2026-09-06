@@ -8063,9 +8063,16 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
             ...accessoryMicroCropRuntime.clipped_detections,
           ];
         } else if (accessoryMicroCropRuntime?.locator?.skipped !== true) {
-          targetedAcceptedDetections = targetedAcceptedDetections.filter((detection) =>
-            !microCropLabelMatches(detection, accessoryMicroCropTarget)
-          );
+          // Identity-first doctrine: a failed refinement pass cannot erase an
+          // already accepted full-image VisionCore spatial detection. Keep the
+          // detection for identity publication; downstream mask/color gates
+          // still decide whether any color authority can be published.
+          accessoryMicroCropRuntime = {
+            ...accessoryMicroCropRuntime,
+            identity_fallback_preserved: targetedAcceptedDetections.some((detection) =>
+              microCropLabelMatches(detection, accessoryMicroCropTarget)
+            ),
+          };
         }
       }
 

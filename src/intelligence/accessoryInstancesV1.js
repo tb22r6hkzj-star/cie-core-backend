@@ -1,5 +1,6 @@
 import { inferAccessoryDisplayMetadata } from "../ui/accessoryDisplay.js";
 import { classifyMeasuredMetallicPaletteV1 } from "./metallicColorIdentityV1.js";
+import { resolveAccessoryEvidenceV1 } from "./accessoryEvidenceContractV1.js";
 
 const JEWELRY_TYPES = new Set([
   "necklace",
@@ -107,16 +108,18 @@ function evaluateEntry(entry = {}) {
   const directSpatialSource = ["grounding_dino", "dino_detection", "sam_segment"].includes(String(entry?.source || ""));
   const measurementAccepted = entry?.accepted === true;
   const targetedIdentity = targetedIdentityEligible(entry);
-
-  // Identity and color are deliberately separate authorities. A bounded,
-  // targeted VisionCore spatial detection may publish the accessory identity
-  // even when color ownership/validation abstains. Color still requires the
-  // original accepted measurement path and can never come from OpenAI.
-  const identityAccepted = directSpatialSource
-    && confidence >= (CONFIDENCE_FLOORS[type] || 0.5)
-    && (measurementAccepted || targetedIdentity);
   const pixelSupported = pixels?.available === true && validation?.supported === true && Number(pixels?.sample_count || 0) >= 6;
-  const colorAccepted = measurementAccepted && identityAccepted && pixelSupported && colors.length > 0;
+  const evidenceContract = resolveAccessoryEvidenceV1({
+    entry,
+    type,
+    confidenceFloor: CONFIDENCE_FLOORS[type] || 0.5,
+    targetedIdentity,
+    measurementAccepted,
+    pixelSupported,
+    colorsAvailable: colors.length > 0,
+  });
+  const identityAccepted = evidenceContract.publish_identity;
+  const colorAccepted = evidenceContract.publish_color;
   return {
     type,
     confidence,
@@ -125,6 +128,7 @@ function evaluateEntry(entry = {}) {
     colorAccepted,
     measurementAccepted,
     targetedIdentity,
+    evidenceContract,
     evidenceId: entry?.id || null,
     geometry: entry?.geometry || null,
     validationReason: validation?.reason || null,
@@ -191,9 +195,10 @@ function buildInstance(entry, index) {
     material_display_name: metallicIdentity.publishable ? metallicIdentity.display_name : null,
     metallic_color_evidence_v1: metallicIdentity,
     source_type: "visioncore_accessory_instances_v1",
-    identity_authority_source: entry.targetedIdentity ? "visioncore_targeted_spatial_detection" : "visioncore_evidence_ledger",
-    color_authority_source: colorAccepted ? "visioncore_object_local_pixels" : null,
+    identity_authority_source: entry.evidenceContract?.identity_authority_source || null,
+    color_authority_source: colorAccepted ? entry.evidenceContract?.color_authority_source || "visioncore_object_local_pixels" : null,
     external_color_authority: false,
+    accessory_evidence_contract_v1: entry.evidenceContract || null,
     pixel_sample_count: entry.pixelSampleCount,
     identity_first_publication_v1: entry.targetedIdentity === true,
   };
