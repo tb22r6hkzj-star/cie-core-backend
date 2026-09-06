@@ -14,7 +14,8 @@ export function normalizeDinoBboxPrecisionV1(rawBbox = null) {
     const y2 = rawBbox.y_max ?? rawBbox.ymax ?? rawBbox.bottom ?? rawBbox.y2;
     const w = rawBbox.width ?? rawBbox.w;
     const h = rawBbox.height ?? rawBbox.h;
-    values = [Number(x1), Number(y1), Number(x2 ?? Number(x1) + Number(w)), Number(y2 ?? Number(y1) + Number(h))];
+    values = [Number(x1), Number(x2 ?? Number(x1) + Number(w)), Number(y1), Number(y2 ?? Number(y1) + Number(h))];
+    values = [values[0], values[2], values[1], values[3]];
   }
   if (!values || values.some((value) => !Number.isFinite(value))) return null;
   let [x1, y1, x2, y2] = values;
@@ -33,8 +34,10 @@ export function normalizeDinoBboxPrecisionV1(rawBbox = null) {
 export function normalizeAccessoryCropV1(crop = {}) {
   const x = clamp01(crop?.x ?? crop?.x_min ?? crop?.left);
   const y = clamp01(crop?.y ?? crop?.y_min ?? crop?.top);
-  const right = clamp01(crop?.right ?? crop?.x_max ?? (x + Number(crop?.width ?? crop?.w || 0)));
-  const bottom = clamp01(crop?.bottom ?? crop?.y_max ?? (y + Number(crop?.height ?? crop?.h || 0)));
+  const width = Number(crop?.width ?? crop?.w ?? 0);
+  const height = Number(crop?.height ?? crop?.h ?? 0);
+  const right = clamp01(crop?.right ?? crop?.x_max ?? (x + width));
+  const bottom = clamp01(crop?.bottom ?? crop?.y_max ?? (y + height));
   if (![x, y, right, bottom].every(Number.isFinite) || right <= x || bottom <= y) return null;
   return { x: round6(x), y: round6(y), width: round6(right - x), height: round6(bottom - y), right: round6(right), bottom: round6(bottom) };
 }
