@@ -70,6 +70,7 @@ test("low-confidence earring localization fails open without publishing color", 
 
 test("validated VisionCore detector box recovers when the external locator returns no box", async () => {
   let detectorCalled = false;
+  let locatorCalled = false;
   const detectorBox = { x: 0.625, y: 0.413, width: 0.069, height: 0.035 };
   const result = await executeAccessoryMicroCropRuntimeV1({
     imageUrl: "https://example.test/outfit.jpg",
@@ -77,7 +78,10 @@ test("validated VisionCore detector box recovers when the external locator retur
     detectorBox,
     detectorValidated: true,
     detectorConfidence: 0.49,
-    runLocator: async () => ({ ok: true, found: false, confidence: 0.94, bbox: null, reason: "accessory_spatial_guidance_not_confident" }),
+    runLocator: async () => {
+      locatorCalled = true;
+      return { ok: true, found: false, confidence: 0.94, bbox: null, reason: "accessory_spatial_guidance_not_confident" };
+    },
     runDetector: async () => {
       detectorCalled = true;
       return { detections: [{ label: "watch", confidence: 0.9, bbox: detectorBox }] };
@@ -85,9 +89,11 @@ test("validated VisionCore detector box recovers when the external locator retur
     runSegmenter: async () => ({ ok: true, regions: [{ id: "watch-mask" }] }),
   });
   assert.equal(result.skipped, false);
-  assert.equal(detectorCalled, true);
+  assert.equal(locatorCalled, false);
+  assert.equal(detectorCalled, false);
   assert.equal(result.visioncore_detector_fallback_applied, true);
   assert.equal(result.guidance.spatial_authority, "visioncore_detector");
   assert.equal(result.plan.reason, "visioncore_detector_micro_crop_spatially_validated");
   assert.equal(result.clipped_detections[0].micro_crop_source, "visioncore_targeted_detector_v1");
+  assert.equal(result.clipped_detections[0].visioncore_detector_reused_v1, true);
 });

@@ -149,6 +149,7 @@ export const TARGETED_ACCESSORY_REANALYSIS_MODE = normalizeTargetedAccessoryRean
 );
 const EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS = 8000;
 const ACCESSORY_REANALYSIS_BUDGET_MS = 10000;
+const ACCESSORY_MICRO_CROP_SAM_TIMEOUT_MS = 15000;
 const externalSemanticCache = new Map();
 
 function buildExternalSemanticEvidence(outfitAnalysis = {}) {
@@ -7085,6 +7086,7 @@ function extractMaskGeometry(maskImage) {
 
   return {
     coverage: clamp01(onCount / (maskW * maskH)),
+    pixel_count: onCount,
     centroid_x: clamp01(sumX / onCount / maskW),
     centroid_y: clamp01(sumY / onCount / maskH),
     bbox: {
@@ -7460,7 +7462,7 @@ async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DIN
   }
 }
 
-async function runSamSegmentation(imageUrl) {
+async function runSamSegmentation(imageUrl, { timeoutMs = REPLICATE_SAM_TIMEOUT_MS } = {}) {
   const token = process.env.REPLICATE_API_TOKEN;
   if (!token) {
     console.warn("[SAM DEBUG] Missing REPLICATE_API_TOKEN: skipping SAM segmentation");
@@ -7523,7 +7525,11 @@ async function runSamSegmentation(imageUrl) {
     const startedAt = Date.now();
     let prediction = createResp;
 
-    while (Date.now() - startedAt < REPLICATE_SAM_TIMEOUT_MS) {
+    const effectiveTimeoutMs = Math.max(
+      2500,
+      Math.min(REPLICATE_SAM_TIMEOUT_MS, Number(timeoutMs) || REPLICATE_SAM_TIMEOUT_MS)
+    );
+    while (Date.now() - startedAt < effectiveTimeoutMs) {
       if (["succeeded", "failed", "canceled"].includes(prediction?.status)) break;
       await new Promise((resolve) => setTimeout(resolve, REPLICATE_SAM_POLL_MS));
       let retryAttempt = 0;
@@ -7588,6 +7594,7 @@ async function runSamSegmentation(imageUrl) {
         enabled: true,
         ok: false,
         reason: "sam_timeout",
+        timeout_ms: effectiveTimeoutMs,
         regions: [],
       };
     }
@@ -8161,7 +8168,9 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
                 regions: [],
               };
             }
-            const segmented = await runSamSegmentation(trueMicroCropArtifact.url);
+            const segmented = await runSamSegmentation(trueMicroCropArtifact.url, {
+              timeoutMs: ACCESSORY_MICRO_CROP_SAM_TIMEOUT_MS,
+            });
             const remappedRegions = (Array.isArray(segmented?.regions) ? segmented.regions : [])
               .map((region) => remapCropMaskRegionToFullImageV1(region, trueMicroCropArtifact.crop || crop))
               .filter(Boolean);
