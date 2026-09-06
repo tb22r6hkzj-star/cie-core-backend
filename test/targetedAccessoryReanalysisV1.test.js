@@ -32,19 +32,45 @@ test("one broad necklace does not satisfy three chains and a pendant", () => {
   assert.equal(plan.detector_pass_budget, 1);
   assert.deepEqual(plan.targets.map((target) => [target.type, target.missing_instance_count]), [["chain", 3], ["pendant", 1]]);
   assert.equal(plan.query, "chain necklace. pendant. cross pendant.");
+  assert.equal(plan.trigger_source, "openai_semantic_mismatch");
 });
 
-test("no instance mismatch produces no detector work", () => {
+test("zero published accessories triggers one bounded VisionCore watch and earring discovery sweep", () => {
+  const plan = buildTargetedAccessoryReanalysisPlanV1({
+    mode: "assist",
+    reconciliation: { candidates: [] },
+    outfitAnalysis: { accessory_instances_v1: { instances: [], detected_count: 0 } },
+  });
+  assert.equal(plan.execution_allowed, true);
+  assert.equal(plan.detector_pass_budget, 1);
+  assert.equal(plan.discovery_sweep_v1, true);
+  assert.equal(plan.trigger_source, "visioncore_zero_accessory_discovery");
+  assert.deepEqual(plan.targets.map((target) => target.type), ["watch", "earrings"]);
+  assert.equal(plan.query, "watch. earring. stud earring. earrings.");
+});
+
+test("existing accessory instance prevents unsolicited discovery when there is no semantic mismatch", () => {
+  const plan = buildTargetedAccessoryReanalysisPlanV1({
+    mode: "assist",
+    reconciliation: { candidates: [] },
+    outfitAnalysis: { accessory_instances_v1: { instances: [{ accessory_type: "necklace" }], detected_count: 1 } },
+  });
+  assert.equal(plan.execution_allowed, false);
+  assert.equal(plan.discovery_sweep_v1, false);
+  assert.equal(plan.query, null);
+});
+
+test("a satisfied semantic watch does not start extra discovery when an accessory is already published", () => {
   const plan = buildTargetedAccessoryReanalysisPlanV1({
     mode: "assist",
     reconciliation: { candidates: [candidate({ subtype: "watch", key: "watch_1", label: "watch" })] },
-    outfitAnalysis: { accessory_instances_v1: { instances: [{ accessory_type: "watch" }] } },
+    outfitAnalysis: { accessory_instances_v1: { instances: [{ accessory_type: "watch" }], detected_count: 1 } },
   });
   assert.equal(plan.execution_allowed, false);
   assert.equal(plan.query, null);
 });
 
-test("low confidence, missing keys, garments, and arbitrary semantic text cannot enter the query", () => {
+test("low confidence, missing keys, garments, and arbitrary semantic text cannot enter the semantic query", () => {
   const plan = buildTargetedAccessoryReanalysisPlanV1({
     mode: "assist",
     reconciliation: { candidates: [
@@ -83,6 +109,16 @@ test("shadow can execute measurement but can never publish", () => {
   assert.equal(plan.execution_allowed, true);
   assert.equal(plan.publication_allowed, false);
   assert.equal(plan.external_color_authority, false);
+});
+
+test("off mode never runs VisionCore discovery", () => {
+  const plan = buildTargetedAccessoryReanalysisPlanV1({
+    mode: "off",
+    reconciliation: { candidates: [] },
+    outfitAnalysis: { accessory_instances_v1: { instances: [], detected_count: 0 } },
+  });
+  assert.equal(plan.execution_allowed, false);
+  assert.equal(plan.query, null);
 });
 
 test("external shadow mode ceilings a separately configured assist mode", () => {
