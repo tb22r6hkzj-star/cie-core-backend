@@ -1,0 +1,29 @@
+name: Accessory Discovery Sweep V1
+on:
+  push:
+    branches: [visioncore-accessory-discovery-sweep-v1]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/intelligence/targetedAccessoryReanalysisV1.js'
+      - 'test/targetedAccessoryReanalysisV1.test.js'
+      - '.github/workflows/accessory-discovery-sweep-v1.yml'
+permissions:
+  contents: read
+jobs:
+  discovery:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - name: Focused accessory discovery regressions
+        run: NODE_ENV=test node --test test/targetedAccessoryReanalysisV1.test.js
+      - name: Syntax
+        run: node --check src/intelligence/targetedAccessoryReanalysisV1.js
+      - name: Full suite serial
+        run: NODE_ENV=test node --test --test-concurrency=1
+      - name: Full suite normal
+        run: NODE_ENV=test node --test
