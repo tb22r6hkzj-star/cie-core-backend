@@ -7968,15 +7968,22 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
     const preExternalForcedAccessoryTargets = (
       preExternalAccessoryIntelligenceLane?.forced_micro_crop_targets || []
     ).filter((type) => ["watch", "earrings"].includes(type));
+    // remainingMs() already excludes the response reserve. Count that reserve
+    // toward the full recovery window instead of requiring 10s plus the 5s
+    // reserve (15s total) before a bounded 10s recovery may start.
+    const accessoryReanalysisMinimumRemainingMs = Math.max(
+      1000,
+      ACCESSORY_REANALYSIS_BUDGET_MS - transformLatencyBudget.reserve_ms
+    );
     const canPrioritizeLocalAccessoryRecovery = Boolean(
       captureQuality?.disposition !== "retake" &&
       EXTERNAL_INTELLIGENCE_MODE === "assist" &&
       TARGETED_ACCESSORY_REANALYSIS_MODE === "assist" &&
       preExternalForcedAccessoryTargets.length &&
-      transformLatencyBudget.canRun(ACCESSORY_REANALYSIS_BUDGET_MS)
+      transformLatencyBudget.canRun(accessoryReanalysisMinimumRemainingMs)
     );
     const externalObserverMinimumRemainingMs = canPrioritizeLocalAccessoryRecovery
-      ? EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS + ACCESSORY_REANALYSIS_BUDGET_MS
+      ? EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS + accessoryReanalysisMinimumRemainingMs
       : EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS;
     const effectiveExternalIntelligenceMode = captureQuality?.disposition === "retake" ||
       !transformLatencyBudget.canRun(externalObserverMinimumRemainingMs)
@@ -8047,7 +8054,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
     if (
       targetedAccessoryReanalysis.execution_allowed &&
       targetedAccessoryReanalysis.query &&
-      !shouldRunAccessoryEscalationV1(transformLatencyBudget, ACCESSORY_REANALYSIS_BUDGET_MS)
+      !shouldRunAccessoryEscalationV1(transformLatencyBudget, accessoryReanalysisMinimumRemainingMs)
     ) {
       targetedAccessoryReanalysis = {
         ...targetedAccessoryReanalysis,
@@ -8407,6 +8414,8 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
             forced_targets: preExternalForcedAccessoryTargets,
             external_observer_minimum_remaining_ms: externalObserverMinimumRemainingMs,
             accessory_reanalysis_budget_ms: ACCESSORY_REANALYSIS_BUDGET_MS,
+            accessory_reanalysis_minimum_remaining_ms: accessoryReanalysisMinimumRemainingMs,
+            response_reserve_counted_ms: transformLatencyBudget.reserve_ms,
           },
           semantic_publication_policy: semanticPublicationConstraints,
           publication_changed: Boolean(
