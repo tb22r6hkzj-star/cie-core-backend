@@ -136,6 +136,9 @@ function chooseRegion(instance, regions = []) {
     if (Boolean(b?.post_ownership_summary_authority) !== Boolean(a?.post_ownership_summary_authority)) {
       return b?.post_ownership_summary_authority ? 1 : -1;
     }
+    const aApplied = ownershipDebug(a)?.applied === true;
+    const bApplied = ownershipDebug(b)?.applied === true;
+    if (bApplied !== aApplied) return bApplied ? 1 : -1;
     return Number(b?.confidence || 0) - Number(a?.confidence || 0);
   })[0];
 }
