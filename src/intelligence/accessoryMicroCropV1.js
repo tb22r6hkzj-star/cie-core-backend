@@ -21,13 +21,14 @@ function intersect(a, b) {
   return { x, y, width: right - x, height: bottom - y, right, bottom };
 }
 
-export function validateAccessoryMicroCropV1({ targetType, locatorBox, detectorBox = null, locatorConfidence = 0 } = {}) {
+export function validateAccessoryMicroCropV1({ targetType, locatorBox, detectorBox = null, locatorConfidence = 0, spatialSource = "openai_locator", detectorValidated = false } = {}) {
   const config = TARGETS[targetType];
   const locator = normalizeMicroCropBoxV1(locatorBox);
   const detector = detectorBox ? normalizeMicroCropBoxV1(detectorBox) : null;
   if (!config) return { accepted: false, reason: "unsupported_target" };
   if (!locator) return { accepted: false, reason: "invalid_locator_box" };
-  if (Number(locatorConfidence) < 0.72) return { accepted: false, reason: "locator_confidence_below_floor" };
+  if (spatialSource === "visioncore_detector" && detectorValidated !== true) return { accepted: false, reason: "visioncore_detector_not_validated" };
+  if (spatialSource !== "visioncore_detector" && Number(locatorConfidence) < 0.72) return { accepted: false, reason: "locator_confidence_below_floor" };
   if (area(locator) > config.maxArea || locator.width > config.maxWidth || locator.height > config.maxHeight) return { accepted: false, reason: "locator_box_too_broad" };
 
   let overlap = null;
@@ -43,7 +44,9 @@ export function validateAccessoryMicroCropV1({ targetType, locatorBox, detectorB
   const crop = { x, y, width: right - x, height: bottom - y, right, bottom };
   return {
     accepted: true,
-    reason: "openai_micro_locator_spatially_validated",
+    reason: spatialSource === "visioncore_detector"
+      ? "visioncore_detector_micro_crop_spatially_validated"
+      : "openai_micro_locator_spatially_validated",
     target_type: targetType,
     crop,
     locator_box: locator,
@@ -57,12 +60,14 @@ export function validateAccessoryMicroCropV1({ targetType, locatorBox, detectorB
   };
 }
 
-export function buildAccessoryMicroCropPlanV1({ targetType, locatorResult = {}, detectorBox = null } = {}) {
+export function buildAccessoryMicroCropPlanV1({ targetType, locatorResult = {}, detectorBox = null, spatialSource = "openai_locator", detectorValidated = false } = {}) {
   const validation = validateAccessoryMicroCropV1({
     targetType,
     locatorBox: locatorResult?.bbox,
     detectorBox,
     locatorConfidence: locatorResult?.confidence,
+    spatialSource,
+    detectorValidated,
   });
   return {
     version: "accessory_micro_crop_v1",

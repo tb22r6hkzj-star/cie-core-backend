@@ -41,7 +41,9 @@ export function clipDetectionToMicroCropV1(detection = {}, crop = null, guidance
     ...detection,
     bbox: { x: clipped.x, y: clipped.y, width: clipped.width, height: clipped.height },
     micro_crop_applied: true,
-    micro_crop_source: "openai_spatial_guidance_v2_visioncore_validated",
+    micro_crop_source: guidance?.spatial_authority === "visioncore_detector"
+      ? "visioncore_targeted_detector_v1"
+      : "openai_spatial_guidance_v2_visioncore_validated",
     accessory_semantic_exclusions_v2: exclusions,
     accessory_material_hypothesis_v2: guidance?.material || "unknown",
     accessory_perceived_color_family_v2: guidance?.perceived_color_family || "unclear",
@@ -54,6 +56,8 @@ export async function executeAccessoryMicroCropRuntimeV1({
   imageUrl,
   targetType,
   detectorBox = null,
+  detectorValidated = false,
+  detectorConfidence = 0,
   runLocator = runOpenAIAccessorySpatialGuidanceV2,
   runDetector,
   runSegmenter,
@@ -64,23 +68,46 @@ export async function executeAccessoryMicroCropRuntimeV1({
     return { ok: false, skipped: true, reason: "unsupported_target", target_type: targetType || null };
   }
   const guidance = await runLocator({ imageUrl, targetType, apiKey, model });
+  const normalizedDetectorBox = normalizeBox(detectorBox);
+  const useVisionCoreDetectorFallback = Boolean(
+    !guidance?.found && normalizedDetectorBox && detectorValidated === true
+  );
+  const effectiveGuidance = useVisionCoreDetectorFallback
+    ? {
+        ...guidance,
+        found: true,
+        confidence: Number(detectorConfidence || 0),
+        target_bbox: normalizedDetectorBox,
+        focus_bbox: normalizedDetectorBox,
+        bbox: normalizedDetectorBox,
+        reason: "visioncore_detector_spatial_authority",
+        spatial_authority: "visioncore_detector",
+        external_color_authority: false,
+      }
+    : guidance;
   const locatorForPlan = {
-    ...guidance,
-    bbox: guidance?.focus_bbox || guidance?.target_bbox || guidance?.bbox || null,
+    ...effectiveGuidance,
+    bbox: effectiveGuidance?.focus_bbox || effectiveGuidance?.target_bbox || effectiveGuidance?.bbox || null,
   };
-  const plan = buildAccessoryMicroCropPlanV1({ targetType, locatorResult: locatorForPlan, detectorBox });
-  if (!guidance?.found || !plan.execution_allowed) {
-    return { ok: true, skipped: true, target_type: targetType, locator: guidance, guidance, plan, reason: plan.reason || guidance?.reason || "micro_crop_not_allowed" };
+  const plan = buildAccessoryMicroCropPlanV1({
+    targetType,
+    locatorResult: locatorForPlan,
+    detectorBox,
+    spatialSource: useVisionCoreDetectorFallback ? "visioncore_detector" : "openai_locator",
+    detectorValidated,
+  });
+  if (!effectiveGuidance?.found || !plan.execution_allowed) {
+    return { ok: true, skipped: true, target_type: targetType, locator: guidance, guidance: effectiveGuidance, plan, reason: plan.reason || effectiveGuidance?.reason || "micro_crop_not_allowed" };
   }
   if (typeof runDetector !== "function") {
     return { ok: true, skipped: true, target_type: targetType, locator: guidance, guidance, plan, reason: "detector_executor_missing" };
   }
   const detected = await runDetector({ imageUrl, targetType, crop: plan.crop, maxPasses: 1 });
   const rows = Array.isArray(detected?.detections) ? detected.detections : Array.isArray(detected) ? detected : [];
-  const clippedDetections = rows.map((row) => clipDetectionToMicroCropV1(row, plan.crop, guidance)).filter(Boolean);
+  const clippedDetections = rows.map((row) => clipDetectionToMicroCropV1(row, plan.crop, effectiveGuidance)).filter(Boolean);
   let segmentation = null;
   if (clippedDetections.length && typeof runSegmenter === "function") {
-    segmentation = await runSegmenter({ imageUrl, targetType, crop: plan.crop, detections: clippedDetections, maxPasses: 1, guidance });
+    segmentation = await runSegmenter({ imageUrl, targetType, crop: plan.crop, detections: clippedDetections, maxPasses: 1, guidance: effectiveGuidance });
   }
   return {
     ok: true,
@@ -89,7 +116,8 @@ export async function executeAccessoryMicroCropRuntimeV1({
     authority_owner: "visioncore",
     target_type: targetType,
     locator: guidance,
-    guidance,
+    guidance: effectiveGuidance,
+    visioncore_detector_fallback_applied: useVisionCoreDetectorFallback,
     plan,
     semantic_exclusions: normalizedExclusions(guidance),
     material_hypothesis: guidance?.material || "unknown",

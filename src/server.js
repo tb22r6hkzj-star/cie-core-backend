@@ -8068,6 +8068,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       const targetedFilter = filterTargetedAccessoryDetectionsV1({
         plan: targetedAccessoryReanalysis,
         detections: targetedDetector?.detections || [],
+        imageDimensions: analysis.decodedImage,
       });
       let targetedAcceptedDetections = targetedFilter.accepted;
       let accessoryMicroCropRuntime = null;
@@ -8110,6 +8111,8 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           imageUrl: publicUrl,
           targetType: accessoryMicroCropTarget,
           detectorBox,
+          detectorValidated: Boolean(detectorCandidate),
+          detectorConfidence: Number(detectorCandidate?.confidence || 0),
           runDetector: async ({ imageUrl: sourceImageUrl, crop }) => {
             const cropArtifact = await createAccessoryMicroCropImageUrlV1(
               sourceImageUrl,

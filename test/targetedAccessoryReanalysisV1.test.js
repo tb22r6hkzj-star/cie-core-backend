@@ -101,6 +101,22 @@ test("body-region and small-area gates reject contamination-prone detections", (
   ]);
 });
 
+test("normalizes live Grounding DINO pixel boxes before targeted spatial gates", () => {
+  const plan = buildTargetedAccessoryReanalysisPlanV1({
+    mode: "assist",
+    reconciliation: { candidates: [candidate({ subtype: "watch", key: "watch_1", label: "watch" })] },
+  });
+  const result = filterTargetedAccessoryDetectionsV1({
+    plan,
+    imageDimensions: { width: 707, height: 1536 },
+    detections: [{ label: "watch", confidence: 0.49, bbox: { x_min: 442, y_min: 634, x_max: 491, y_max: 688 } }],
+  });
+  assert.equal(result.rejected.length, 0);
+  assert.equal(result.accepted.length, 1);
+  assert.ok(Math.abs(result.accepted[0].bbox.x_min - 442 / 707) < 1e-12);
+  assert.ok(Math.abs(result.accepted[0].bbox.y_max - 688 / 1536) < 1e-12);
+});
+
 test("shadow can execute measurement but can never publish", () => {
   const plan = buildTargetedAccessoryReanalysisPlanV1({
     mode: "shadow",

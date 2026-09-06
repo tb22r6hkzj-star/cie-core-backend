@@ -181,14 +181,22 @@ export function buildTargetedAccessoryReanalysisPlanV1({
   };
 }
 
-function normalizedBox(bbox = {}) {
+function normalizedBox(bbox = {}, imageDimensions = {}) {
   const x1 = Number(bbox?.x_min ?? bbox?.x ?? bbox?.left);
   const y1 = Number(bbox?.y_min ?? bbox?.y ?? bbox?.top);
   const x2 = Number(bbox?.x_max ?? bbox?.x2 ?? (x1 + Number(bbox?.width ?? bbox?.w)));
   const y2 = Number(bbox?.y_max ?? bbox?.y2 ?? (y1 + Number(bbox?.height ?? bbox?.h)));
   if (![x1, y1, x2, y2].every(Number.isFinite)) return null;
-  if (x1 < 0 || y1 < 0 || x2 > 1 || y2 > 1 || x2 <= x1 || y2 <= y1) return null;
-  return { x1, y1, x2, y2, area: (x2 - x1) * (y2 - y1), centerY: (y1 + y2) / 2 };
+  const unit = x1 >= 0 && y1 >= 0 && x2 <= 1 && y2 <= 1;
+  const imageWidth = Number(imageDimensions?.width || 0);
+  const imageHeight = Number(imageDimensions?.height || 0);
+  if (!unit && (!(imageWidth > 0) || !(imageHeight > 0))) return null;
+  const nx1 = unit ? x1 : x1 / imageWidth;
+  const ny1 = unit ? y1 : y1 / imageHeight;
+  const nx2 = unit ? x2 : x2 / imageWidth;
+  const ny2 = unit ? y2 : y2 / imageHeight;
+  if (nx1 < 0 || ny1 < 0 || nx2 > 1 || ny2 > 1 || nx2 <= nx1 || ny2 <= ny1) return null;
+  return { x1: nx1, y1: ny1, x2: nx2, y2: ny2, area: (nx2 - nx1) * (ny2 - ny1), centerY: (ny1 + ny2) / 2 };
 }
 
 function detectionTarget(label, plannedTypes) {
@@ -196,13 +204,13 @@ function detectionTarget(label, plannedTypes) {
   return plannedTypes.find((type) => TARGETS[type].labels.some((allowed) => normalized === allowed || normalized.includes(allowed))) || null;
 }
 
-export function filterTargetedAccessoryDetectionsV1({ plan = {}, detections = [] } = {}) {
+export function filterTargetedAccessoryDetectionsV1({ plan = {}, detections = [], imageDimensions = {} } = {}) {
   const plannedTypes = (plan?.targets || []).map((target) => target.type).filter((type) => TARGETS[type]);
   const accepted = [];
   const rejected = [];
   for (const detection of detections || []) {
     const type = detectionTarget(detection?.label, plannedTypes);
-    const box = normalizedBox(detection?.bbox);
+    const box = normalizedBox(detection?.bbox, imageDimensions);
     const config = type ? TARGETS[type] : null;
     let reason = null;
     if (!type) reason = "label_not_in_allowlisted_plan";
@@ -213,6 +221,14 @@ export function filterTargetedAccessoryDetectionsV1({ plan = {}, detections = []
     if (reason) rejected.push({ ...detection, targeted_type: type, rejection_reason: reason });
     else accepted.push({
       ...detection,
+      bbox: {
+        x_min: box.x1,
+        y_min: box.y1,
+        x_max: box.x2,
+        y_max: box.y2,
+        width: box.x2 - box.x1,
+        height: box.y2 - box.y1,
+      },
       targeted_type: type,
       label: type === "shoe_hardware" ? "shoe hardware" : type === "earrings" ? "earrings" : type,
     });
