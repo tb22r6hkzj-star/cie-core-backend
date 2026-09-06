@@ -73,6 +73,11 @@ import { evaluateCaptureQualityV1 } from "./intelligence/captureQualityGateV1.js
 import { buildConsumerEvidenceV1 } from "./intelligence/consumerEvidenceV1.js";
 import { createTransformLatencyBudgetV1, shouldRunAccessoryEscalationV1 } from "./intelligence/transformLatencyBudgetV1.js";
 import { buildGroundingDinoQueryPlanV1 } from "./intelligence/groundingDinoQueryPlanV1.js";
+import {
+  cropDecodedImageToPngV1,
+  normalizeDinoBboxPrecisionV1,
+  remapCropDetectionToFullImageV1,
+} from "./intelligence/accessoryTrueMicroCropV1.js";
 import { getZoneFromLabel } from "./engines/zoneMapper/index.js";
 import { mapDinoLabel } from "./engines/ontology/dinoMappings.js";
 import {
@@ -6146,32 +6151,9 @@ function randomPollRetryDelayMs() {
 }
 
 function normalizeGroundingDinoBbox(rawBbox) {
-  let values = null;
-  if (Array.isArray(rawBbox)) {
-    values = rawBbox.slice(0, 4).map(Number);
-  } else if (rawBbox && typeof rawBbox === "object") {
-    const x1 = rawBbox.x_min ?? rawBbox.xmin ?? rawBbox.left ?? rawBbox.x1 ?? rawBbox.x;
-    const y1 = rawBbox.y_min ?? rawBbox.ymin ?? rawBbox.top ?? rawBbox.y1 ?? rawBbox.y;
-    const x2 = rawBbox.x_max ?? rawBbox.xmax ?? rawBbox.right ?? rawBbox.x2;
-    const y2 = rawBbox.y_max ?? rawBbox.ymax ?? rawBbox.bottom ?? rawBbox.y2;
-    const w = rawBbox.width ?? rawBbox.w;
-    const h = rawBbox.height ?? rawBbox.h;
-    values = [Number(x1), Number(y1), Number(x2 ?? Number(x1) + Number(w)), Number(y2 ?? Number(y1) + Number(h))];
-  }
-
-  if (!values || values.some((value) => !Number.isFinite(value))) return null;
-  let [x1, y1, x2, y2] = values;
-  if (x2 < x1) [x1, x2] = [x2, x1];
-  if (y2 < y1) [y1, y2] = [y2, y1];
-
-  return {
-    x_min: round2(x1),
-    y_min: round2(y1),
-    x_max: round2(x2),
-    y_max: round2(y2),
-    width: round2(Math.max(0, x2 - x1)),
-    height: round2(Math.max(0, y2 - y1)),
-  };
+  // Preserve tiny watch/earring geometry. Two-decimal rounding can collapse
+  // small normalized boxes before they ever reach VisionCore mapping.
+  return normalizeDinoBboxPrecisionV1(rawBbox);
 }
 
 
@@ -7655,6 +7637,41 @@ async function uploadToCloudinary(file) {
   return result.secure_url;
 }
 
+async function createAccessoryMicroCropImageUrlV1(imageUrl, crop, targetType = "accessory") {
+  try {
+    const originalBuffer = await fetchImageBuffer(imageUrl);
+    const decodedOriginal = decodeImageRgba(originalBuffer, imageUrl);
+    const artifact = cropDecodedImageToPngV1(decodedOriginal, crop);
+    if (!artifact?.buffer?.length) {
+      return { ok: false, reason: "micro_crop_buffer_unavailable", url: null };
+    }
+    const dataUri = `data:image/png;base64,${artifact.buffer.toString("base64")}`;
+    const uploaded = await cloudinary.uploader.upload(dataUri, {
+      folder: "cie/accessory-micro-crops",
+      resource_type: "image",
+    });
+    if (!uploaded?.secure_url) {
+      return { ok: false, reason: "micro_crop_upload_missing_url", url: null };
+    }
+    return {
+      ok: true,
+      url: uploaded.secure_url,
+      crop: artifact.crop,
+      pixel_bbox: artifact.pixel_bbox,
+      target_type: targetType,
+      source: "original_upload_true_crop",
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error?.message || "micro_crop_creation_failed",
+      url: null,
+      target_type: targetType,
+      source: "original_upload_true_crop",
+    };
+  }
+}
+
 async function callPixelcutRemoveBg(imageUrl, timeoutMs = PIXELCUT_TIMEOUT_MS) {
   const apiKey = process.env.PIXELCUT_API_KEY;
   const endpoint = process.env.PIXELCUT_ENDPOINT;
@@ -8051,7 +8068,40 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           imageUrl: publicUrl,
           targetType: accessoryMicroCropTarget,
           detectorBox,
-          runDetector: async () => runGroundingDinoDetection(ghostUrl, microQuery),
+          runDetector: async ({ imageUrl: sourceImageUrl, crop }) => {
+            const cropArtifact = await createAccessoryMicroCropImageUrlV1(
+              sourceImageUrl,
+              crop,
+              accessoryMicroCropTarget
+            );
+            if (!cropArtifact?.ok || !cropArtifact?.url) {
+              return {
+                enabled: true,
+                ok: false,
+                reason: cropArtifact?.reason || "true_micro_crop_creation_failed",
+                detections: [],
+                true_micro_crop_v1: cropArtifact,
+              };
+            }
+            const detected = await runGroundingDinoDetection(cropArtifact.url, microQuery);
+            const remappedDetections = (detected?.detections || [])
+              .map((detection) => remapCropDetectionToFullImageV1(detection, cropArtifact.crop))
+              .filter(Boolean);
+            return {
+              ...detected,
+              ok: remappedDetections.length > 0,
+              detections: remappedDetections,
+              true_micro_crop_v1: {
+                ok: true,
+                source: cropArtifact.source,
+                target_type: cropArtifact.target_type,
+                crop: cropArtifact.crop,
+                pixel_bbox: cropArtifact.pixel_bbox,
+                detector_input: "physical_original_image_crop",
+                remapped_detection_count: remappedDetections.length,
+              },
+            };
+          },
         });
         const microCropSucceeded = Boolean(
           accessoryMicroCropRuntime?.ok &&
