@@ -82,6 +82,36 @@ test('explicit identity challenge can overturn a targeted identity', () => {
   assert.equal(result.publish_color, false);
 });
 
+test('explicit spatial or scene rejection suppresses otherwise supported identity', () => {
+  for (const rejection_scope of ['spatial', 'scene']) {
+    const result = resolveAccessoryEvidenceV1({
+      entry: { source: 'grounding_dino', confidence: 0.92, rejection_scope },
+      type: 'watch',
+      confidenceFloor: 0.46,
+      measurementAccepted: false,
+    });
+    assert.equal(result.identity_state, 'rejected');
+    assert.equal(result.publish_identity, false);
+    assert.equal(result.publish_color, false);
+  }
+});
+
+test('color or mask rejection does not erase supported spatial identity', () => {
+  for (const rejection_scope of ['color', 'mask']) {
+    const result = resolveAccessoryEvidenceV1({
+      entry: { source: 'grounding_dino', confidence: 0.92, rejection_scope },
+      type: 'watch',
+      confidenceFloor: 0.46,
+      measurementAccepted: false,
+      pixelSupported: false,
+      colorsAvailable: false,
+    });
+    assert.equal(result.identity_state, 'confirmed');
+    assert.equal(result.publish_identity, true);
+    assert.equal(result.publish_color, false);
+  }
+});
+
 test('semantic-only evidence cannot become VisionCore identity authority', () => {
   const result = resolveAccessoryEvidenceV1({
     entry: { source: 'openai_semantic', confidence: 0.99 },

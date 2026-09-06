@@ -20,6 +20,7 @@ function evidence({
   accepted = true,
   supported = true,
   targeted = false,
+  identityRejected = false,
 } = {}) {
   return {
     id,
@@ -29,6 +30,7 @@ function evidence({
     confidence,
     geometry,
     accepted,
+    identity_rejected: identityRejected,
     targeted_reanalysis_v1: targeted,
     validation: { supported, reason: supported ? "small_object_local_pixels_validated" : "insufficient_small_object_pixel_evidence" },
     pixel_evidence: { available: true, sample_count: 64 },
@@ -194,7 +196,7 @@ test("rejects semantic-only, low-confidence, rejected, and non-jewelry evidence"
       evidence_ledger: [
         evidence({ id: "semantic", label: "necklace", source: "openai_semantic_observer" }),
         evidence({ id: "weak", label: "ring", confidence: .31 }),
-        evidence({ id: "rejected", label: "bracelet", accepted: false }),
+        evidence({ id: "rejected", label: "bracelet", accepted: false, identityRejected: true }),
         evidence({ id: "shirt", label: "shirt" }),
       ],
     },

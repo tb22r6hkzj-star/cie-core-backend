@@ -7,9 +7,17 @@ const DIRECT_SPATIAL_SOURCES = new Set([
 ]);
 
 function isExplicitIdentityRejection(entry = {}) {
+  const validationDecision = String(entry?.validation_decision || entry?.validation?.decision || "")
+    .trim()
+    .toLowerCase();
+  const rejectionScope = String(entry?.rejection_scope || entry?.validation?.rejection_scope || "")
+    .trim()
+    .toLowerCase();
   return entry?.identity_rejected === true
     || entry?.identity_state === "rejected"
-    || entry?.validation?.identity_rejected === true;
+    || entry?.validation?.identity_rejected === true
+    || ["identity_rejected", "spatial_rejected", "scene_rejected"].includes(validationDecision)
+    || ["identity", "spatial", "scene"].includes(rejectionScope);
 }
 
 function isExplicitIdentityChallenge(entry = {}) {
