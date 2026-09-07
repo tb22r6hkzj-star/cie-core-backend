@@ -54,4 +54,18 @@ test("primary DINO and one YOLO zero-result fallback share the transform budget"
   assert.match(source, /dino_recovery_attempted: recoveryAttempted/);
 });
 
+test("Replicate provider deadlines include prediction creation and polling", () => {
+  const providerFunctions = [
+    source.slice(source.indexOf("async function runGroundingDinoDetection"), source.indexOf("async function runYoloWorldDetection")),
+    source.slice(source.indexOf("async function runYoloWorldDetection"), source.indexOf("async function runSamSegmentation")),
+    source.slice(source.indexOf("async function runSamSegmentation"), source.indexOf("function normalizeSamOutput")),
+  ];
+  for (const providerSource of providerFunctions) {
+    assert.match(providerSource, /const requestStartedAt = Date\.now\(\);/);
+    assert.match(providerSource, /const deadlineAt = requestStartedAt \+ (?:bounded|effective)TimeoutMs;/);
+    assert.match(providerSource, /while \(Date\.now\(\) < deadlineAt\)/);
+    assert.match(providerSource, /Math\.max\(1, deadlineAt - Date\.now\(\)\)/);
+  }
+});
+
 // This file is intentionally part of the wiring workflow trigger set.
