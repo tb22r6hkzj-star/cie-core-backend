@@ -12,7 +12,8 @@ test("transform route uses total latency budget and capped Pixelcut timeout", ()
 });
 
 test("SAM starts in parallel with DINO", () => {
-  assert.match(source, /const samPromise = runSamSegmentation\(ghostUrl\);/);
+  assert.match(source, /requestedMs: 30000, maximumMs: 30000/);
+  assert.match(source, /const samPromise = runSamSegmentation\(ghostUrl, \{ timeoutMs: primarySamTimeoutMs \}\);/);
   assert.match(source, /const sam = await samPromise;/);
 });
 
