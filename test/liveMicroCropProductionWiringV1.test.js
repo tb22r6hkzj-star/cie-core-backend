@@ -7,13 +7,13 @@ test("transform route wires a physical original-image accessory crop into target
   assert.match(source, /executeAccessoryMicroCropRuntimeV1/);
   assert.match(source, /runSegmenter: async/);
   assert.match(source, /runSegmenter: async \(\{ crop \}\) => \{\s*if \(!trueMicroCropArtifact\?\.ok \|\| !trueMicroCropArtifact\?\.url\) \{\s*trueMicroCropArtifact = await createAccessoryMicroCropImageUrlV1/);
-  assert.match(source, /runSamSegmentation\(trueMicroCropArtifact\.url, \{\s*timeoutMs: ACCESSORY_MICRO_CROP_SAM_TIMEOUT_MS/);
+  assert.match(source, /runSamSegmentation\(trueMicroCropArtifact\.url, \{\s*timeoutMs: transformLatencyBudget\.providerTimeoutMs/);
   assert.match(source, /const ACCESSORY_MICRO_CROP_SAM_TIMEOUT_MS = 15000/);
   assert.match(source, /remapCropMaskRegionToFullImageV1/);
   assert.match(source, /accessoryMicroCropTarget = plannedMicroCropTypes\.includes\("watch"\)/);
   assert.match(source, /createAccessoryMicroCropImageUrlV1\(/);
   assert.match(source, /cropDecodedImageToPngV1\(decodedOriginal, crop\)/);
-  assert.match(source, /runGroundingDinoDetection\(cropArtifact\.url, microQuery\)/);
+  assert.match(source, /runGroundingDinoDetection\(cropArtifact\.url, microQuery, \{/);
   assert.match(source, /remapCropDetectionToFullImageV1\(\s*detection,\s*cropArtifact\.crop,\s*cropArtifact\.pixel_bbox\s*\)/);
   assert.match(source, /detector_input: "physical_original_image_crop"/);
   assert.doesNotMatch(source, /runDetector: async \(\) => runGroundingDinoDetection\(ghostUrl, microQuery\)/);

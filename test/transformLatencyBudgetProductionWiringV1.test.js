@@ -37,7 +37,18 @@ test("local accessory color recovery takes priority over optional semantic obser
 });
 
 test("required local accessory recovery is not suppressed by the optional-work latency gate", () => {
-  assert.match(source, /targetedAccessoryReanalysis\.query &&\s*!localAccessoryRecoveryRequired &&\s*!shouldRunAccessoryEscalationV1/);
+  assert.match(source, /!localAccessoryRecoveryRequired &&\s*!shouldRunAccessoryEscalationV1/);
+});
+
+test("targeted accessory recovery cannot outlive the transform budget", () => {
+  assert.match(source, /!transformLatencyBudget\.canRun\(1500\)/);
+  assert.match(source, /transform_latency_budget_exhausted_before_accessory_reanalysis/);
+  assert.match(source, /const targetedDetectorTimeoutMs = transformLatencyBudget\.providerTimeoutMs/);
+  assert.match(source, /targetedAccessoryReanalysis\.query,[\s\S]*\{ timeoutMs: targetedDetectorTimeoutMs \}/);
+  assert.match(source, /runGroundingDinoDetection\(cropArtifact\.url, microQuery, \{/);
+  assert.match(source, /runSamSegmentation\(trueMicroCropArtifact\.url, \{[\s\S]*providerTimeoutMs/);
+  assert.match(source, /transform_latency_budget_exhausted_before_micro_crop_detection/);
+  assert.match(source, /transform_latency_budget_exhausted_before_micro_crop_segmentation/);
 });
 
 test("response debug exposes transform latency budget snapshot", () => {

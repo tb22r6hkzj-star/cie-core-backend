@@ -8153,18 +8153,34 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
     if (
       targetedAccessoryReanalysis.execution_allowed &&
       targetedAccessoryReanalysis.query &&
-      !localAccessoryRecoveryRequired &&
-      !shouldRunAccessoryEscalationV1(transformLatencyBudget, accessoryReanalysisMinimumRemainingMs)
+      (
+        !transformLatencyBudget.canRun(1500) ||
+        (
+          !localAccessoryRecoveryRequired &&
+          !shouldRunAccessoryEscalationV1(transformLatencyBudget, accessoryReanalysisMinimumRemainingMs)
+        )
+      )
     ) {
       targetedAccessoryReanalysis = {
         ...targetedAccessoryReanalysis,
         execution_allowed: false,
         latency_budget_skipped: true,
-        reason: "transform_latency_budget_insufficient_for_optional_accessory_reanalysis",
+        identity_fallback_preserved: true,
+        reason: transformLatencyBudget.canRun(1500)
+          ? "transform_latency_budget_insufficient_for_optional_accessory_reanalysis"
+          : "transform_latency_budget_exhausted_before_accessory_reanalysis",
       };
     }
     if (targetedAccessoryReanalysis.execution_allowed && targetedAccessoryReanalysis.query) {
-      const targetedDetector = await runGroundingDinoDetection(ghostUrl, targetedAccessoryReanalysis.query);
+      const targetedDetectorTimeoutMs = transformLatencyBudget.providerTimeoutMs({
+        requestedMs: ACCESSORY_REANALYSIS_BUDGET_MS,
+        maximumMs: ACCESSORY_REANALYSIS_BUDGET_MS,
+      });
+      const targetedDetector = await runGroundingDinoDetection(
+        ghostUrl,
+        targetedAccessoryReanalysis.query,
+        { timeoutMs: targetedDetectorTimeoutMs }
+      );
       const targetedFilter = filterTargetedAccessoryDetectionsV1({
         plan: targetedAccessoryReanalysis,
         detections: targetedDetector?.detections || [],
@@ -8229,7 +8245,21 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
                 true_micro_crop_v1: cropArtifact,
               };
             }
-            const detected = await runGroundingDinoDetection(cropArtifact.url, microQuery);
+            if (!transformLatencyBudget.canRun(1500)) {
+              return {
+                enabled: true,
+                ok: false,
+                reason: "transform_latency_budget_exhausted_before_micro_crop_detection",
+                detections: [],
+                true_micro_crop_v1: cropArtifact,
+              };
+            }
+            const detected = await runGroundingDinoDetection(cropArtifact.url, microQuery, {
+              timeoutMs: transformLatencyBudget.providerTimeoutMs({
+                requestedMs: ACCESSORY_REANALYSIS_BUDGET_MS,
+                maximumMs: ACCESSORY_REANALYSIS_BUDGET_MS,
+              }),
+            });
             const remappedDetections = (detected?.detections || [])
               .map((detection) => remapCropDetectionToFullImageV1(
                 detection,
@@ -8268,8 +8298,19 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
                 regions: [],
               };
             }
+            if (!transformLatencyBudget.canRun(1500)) {
+              return {
+                enabled: true,
+                ok: false,
+                reason: "transform_latency_budget_exhausted_before_micro_crop_segmentation",
+                regions: [],
+              };
+            }
             const segmented = await runSamSegmentation(trueMicroCropArtifact.url, {
-              timeoutMs: ACCESSORY_MICRO_CROP_SAM_TIMEOUT_MS,
+              timeoutMs: transformLatencyBudget.providerTimeoutMs({
+                requestedMs: ACCESSORY_MICRO_CROP_SAM_TIMEOUT_MS,
+                maximumMs: ACCESSORY_MICRO_CROP_SAM_TIMEOUT_MS,
+              }),
             });
             const remappedRegions = (Array.isArray(segmented?.regions) ? segmented.regions : [])
               .map((region) => remapCropMaskRegionToFullImageV1(region, trueMicroCropArtifact.crop || crop))
