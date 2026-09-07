@@ -7832,7 +7832,10 @@ async function analyzeGhostColors(ghostUrl, { latencyBudget = null } = {}) {
     })
     .filter((x) => !!x.hex);
 
-  const samPromise = runSamSegmentation(ghostUrl);
+  const primarySamTimeoutMs = latencyBudget?.providerTimeoutMs
+    ? latencyBudget.providerTimeoutMs({ requestedMs: 30000, maximumMs: 30000 })
+    : REPLICATE_SAM_TIMEOUT_MS;
+  const samPromise = runSamSegmentation(ghostUrl, { timeoutMs: primarySamTimeoutMs });
   const configuredSingleQuery = String(process.env.GROUNDING_DINO_QUERY || "").trim();
   const groundingQueryPlan = buildGroundingDinoQueryPlanV1({
     configuredPrimaryQuery: configuredSingleQuery,
