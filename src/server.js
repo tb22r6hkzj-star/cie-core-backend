@@ -7326,7 +7326,7 @@ async function enrichSamRegionsWithMaskedColors(imageUrl, regions = []) {
   );
 }
 
-async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DINO_QUERY) {
+async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DINO_QUERY, { timeoutMs = REPLICATE_SAM_TIMEOUT_MS } = {}) {
   const token = process.env.REPLICATE_API_TOKEN;
   if (!token) {
     console.warn("[GDINO DEBUG] Missing REPLICATE_API_TOKEN: skipping Grounding DINO detection");
@@ -7338,6 +7338,7 @@ async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DIN
     };
   }
 
+  const boundedTimeoutMs = Math.max(1500, Math.min(REPLICATE_SAM_TIMEOUT_MS, Number(timeoutMs) || REPLICATE_SAM_TIMEOUT_MS));
   try {
     const groundingDinoVersion = process.env.REPLICATE_GROUNDING_DINO_VERSION || DEFAULT_REPLICATE_GROUNDING_DINO_VERSION;
     const createUrl = "https://api.replicate.com/v1/predictions";
@@ -7363,7 +7364,7 @@ async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DIN
             query,
           },
         }),
-      });
+      }, boundedTimeoutMs);
     } catch (error) {
       console.error("[GDINO DEBUG] Grounding DINO create request failed", {
         failure_stage: "create",
@@ -7388,17 +7389,18 @@ async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DIN
     const startedAt = Date.now();
     let prediction = createResp;
 
-    while (Date.now() - startedAt < REPLICATE_SAM_TIMEOUT_MS) {
+    while (Date.now() - startedAt < boundedTimeoutMs) {
       if (["succeeded", "failed", "canceled"].includes(prediction?.status)) break;
       await new Promise((resolve) => setTimeout(resolve, REPLICATE_SAM_POLL_MS));
       let retryAttempt = 0;
       let pollError = null;
       while (retryAttempt < REPLICATE_SAM_POLL_RETRY_MAX) {
         try {
+          const remainingMs = Math.max(1, boundedTimeoutMs - (Date.now() - startedAt));
           prediction = await replicateRequest(statusUrl, {
             method: "GET",
             headers: { Authorization: `Bearer ${token}` },
-          });
+          }, remainingMs);
           pollError = null;
           break;
         } catch (error) {
@@ -7430,7 +7432,12 @@ async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DIN
         error: prediction?.error || null,
         elapsedMs: Date.now() - startedAt,
       });
-      return { enabled: true, ok: false, reason: prediction?.error || prediction?.status || "unknown_failure", detections: [] };
+      return {
+        enabled: true,
+        ok: false,
+        reason: prediction?.error || (prediction?.status === "starting" || prediction?.status === "processing" ? "grounding_dino_timed_out" : prediction?.status) || "unknown_failure",
+        detections: [],
+      };
     }
 
     console.info("[GDINO DEBUG] RAW Grounding DINO OUTPUT", {
@@ -7736,7 +7743,7 @@ async function callPixelcutRemoveBg(imageUrl, timeoutMs = PIXELCUT_TIMEOUT_MS) {
   }
 }
 
-async function analyzeGhostColors(ghostUrl) {
+async function analyzeGhostColors(ghostUrl, { latencyBudget = null } = {}) {
   const res = await cloudinary.uploader.upload(ghostUrl, {
     folder: "cie/ghost",
     resource_type: "image",
@@ -7775,10 +7782,23 @@ async function analyzeGhostColors(ghostUrl) {
     defaultGarmentQuery: DEFAULT_GROUNDING_DINO_GARMENT_QUERY,
     accessoryQuery: DEFAULT_GROUNDING_DINO_ACCESSORY_QUERY,
   });
-  const groundingPasses = await Promise.all(
-    groundingQueryPlan.queries.map((query) => runGroundingDinoDetection(ghostUrl, query))
+  const primaryDinoTimeoutMs = latencyBudget?.providerTimeoutMs
+    ? latencyBudget.providerTimeoutMs({ requestedMs: 18000, maximumMs: 18000 })
+    : REPLICATE_SAM_TIMEOUT_MS;
+  let groundingPasses = await Promise.all(
+    groundingQueryPlan.queries.map((query) => runGroundingDinoDetection(ghostUrl, query, { timeoutMs: primaryDinoTimeoutMs }))
   );
-  const dinoDetections = groundingPasses.flatMap((pass) => Array.isArray(pass?.detections) ? pass.detections : []);
+  let dinoDetections = groundingPasses.flatMap((pass) => Array.isArray(pass?.detections) ? pass.detections : []);
+  let recoveryAttempted = false;
+  if (!dinoDetections.length && latencyBudget?.canRun?.(8000)) {
+    recoveryAttempted = true;
+    const recoveryTimeoutMs = latencyBudget.providerTimeoutMs({ requestedMs: 12000, maximumMs: 12000 });
+    const recoveryPass = await runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_QUERY, {
+      timeoutMs: recoveryTimeoutMs,
+    });
+    groundingPasses = [...groundingPasses, recoveryPass];
+    dinoDetections = Array.isArray(recoveryPass?.detections) ? recoveryPass.detections : [];
+  }
   const groundingDino = {
     enabled: groundingPasses.some((pass) => pass?.enabled),
     ok: groundingPasses.some((pass) => pass?.ok),
@@ -7787,6 +7807,7 @@ async function analyzeGhostColors(ghostUrl) {
       : null,
     detections: dinoDetections,
     pass_count: groundingPasses.length,
+    recovery_attempted: recoveryAttempted,
   };
   let dinoGarmentRegions = buildDinoSegmentedRegions(dinoDetections);
   let decodedImage = null;
@@ -7860,6 +7881,7 @@ async function analyzeGhostColors(ghostUrl) {
       dino_ok: dinoOk,
       dino_reason: groundingDino?.reason || null,
       dino_detection_count: dinoDetections.length,
+      dino_recovery_attempted: recoveryAttempted,
       dino_garment_region_count: dinoGarmentRegions.length,
       dino_region_count: dinoGarmentRegions.length,
       dino_color_enrichment_count: dinoColorEnrichmentCount,
@@ -7915,7 +7937,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
 
     let analysis;
     try {
-      analysis = await analyzeGhostColors(ghostUrl);
+      analysis = await analyzeGhostColors(ghostUrl, { latencyBudget: transformLatencyBudget });
     } catch (error) {
       return sendStepError(res, 500, "analyze_cloudinary_colors", error);
     }
