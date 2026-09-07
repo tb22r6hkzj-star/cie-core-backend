@@ -7344,6 +7344,8 @@ async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DIN
   }
 
   const boundedTimeoutMs = Math.max(1500, Math.min(REPLICATE_SAM_TIMEOUT_MS, Number(timeoutMs) || REPLICATE_SAM_TIMEOUT_MS));
+  const requestStartedAt = Date.now();
+  const deadlineAt = requestStartedAt + boundedTimeoutMs;
   try {
     const groundingDinoVersion = process.env.REPLICATE_GROUNDING_DINO_VERSION || DEFAULT_REPLICATE_GROUNDING_DINO_VERSION;
     const createUrl = "https://api.replicate.com/v1/predictions";
@@ -7369,7 +7371,7 @@ async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DIN
             query,
           },
         }),
-      }, boundedTimeoutMs);
+      }, Math.max(1, deadlineAt - Date.now()));
     } catch (error) {
       console.error("[GDINO DEBUG] Grounding DINO create request failed", {
         failure_stage: "create",
@@ -7391,17 +7393,16 @@ async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DIN
       return { enabled: true, ok: false, reason: "missing_poll_url", detections: [] };
     }
 
-    const startedAt = Date.now();
     let prediction = createResp;
 
-    while (Date.now() - startedAt < boundedTimeoutMs) {
+    while (Date.now() < deadlineAt) {
       if (["succeeded", "failed", "canceled"].includes(prediction?.status)) break;
       await new Promise((resolve) => setTimeout(resolve, REPLICATE_SAM_POLL_MS));
       let retryAttempt = 0;
       let pollError = null;
       while (retryAttempt < REPLICATE_SAM_POLL_RETRY_MAX) {
         try {
-          const remainingMs = Math.max(1, boundedTimeoutMs - (Date.now() - startedAt));
+          const remainingMs = Math.max(1, deadlineAt - Date.now());
           prediction = await replicateRequest(statusUrl, {
             method: "GET",
             headers: { Authorization: `Bearer ${token}` },
@@ -7435,7 +7436,7 @@ async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DIN
         predictionId: prediction?.id || createResp?.id || null,
         status: prediction?.status || "unknown",
         error: prediction?.error || null,
-        elapsedMs: Date.now() - startedAt,
+        elapsedMs: Date.now() - requestStartedAt,
       });
       return {
         enabled: true,
@@ -7452,7 +7453,7 @@ async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DIN
     console.info("[GDINO DEBUG] Grounding DINO detection succeeded", {
       detectionCount: detections.length,
       predictionId: prediction?.id || null,
-      elapsedMs: Date.now() - startedAt,
+      elapsedMs: Date.now() - requestStartedAt,
     });
 
     return {
@@ -7478,6 +7479,8 @@ async function runYoloWorldDetection(imageUrl, query = DEFAULT_GROUNDING_DINO_QU
   const token = process.env.REPLICATE_API_TOKEN;
   if (!token) return { enabled: false, ok: false, reason: "missing_REPLICATE_API_TOKEN", detections: [] };
   const boundedTimeoutMs = Math.max(1500, Math.min(12000, Number(timeoutMs) || 12000));
+  const requestStartedAt = Date.now();
+  const deadlineAt = requestStartedAt + boundedTimeoutMs;
   try {
     const createResp = await replicateRequest("https://api.replicate.com/v1/predictions", {
       method: "POST",
@@ -7493,15 +7496,14 @@ async function runYoloWorldDetection(imageUrl, query = DEFAULT_GROUNDING_DINO_QU
           return_json: true,
         },
       }),
-    }, boundedTimeoutMs);
+    }, Math.max(1, deadlineAt - Date.now()));
     const statusUrl = createResp?.urls?.get;
     if (!statusUrl) return { enabled: true, ok: false, reason: "missing_poll_url", detections: [] };
-    const startedAt = Date.now();
     let prediction = createResp;
-    while (Date.now() - startedAt < boundedTimeoutMs) {
+    while (Date.now() < deadlineAt) {
       if (["succeeded", "failed", "canceled"].includes(prediction?.status)) break;
       await new Promise((resolve) => setTimeout(resolve, REPLICATE_SAM_POLL_MS));
-      const remainingMs = Math.max(1, boundedTimeoutMs - (Date.now() - startedAt));
+      const remainingMs = Math.max(1, deadlineAt - Date.now());
       prediction = await replicateRequest(statusUrl, {
         method: "GET",
         headers: { Authorization: `Bearer ${token}` },
@@ -7538,6 +7540,12 @@ async function runSamSegmentation(imageUrl, { timeoutMs = REPLICATE_SAM_TIMEOUT_
     };
   }
 
+  const effectiveTimeoutMs = Math.max(
+    2500,
+    Math.min(REPLICATE_SAM_TIMEOUT_MS, Number(timeoutMs) || REPLICATE_SAM_TIMEOUT_MS)
+  );
+  const requestStartedAt = Date.now();
+  const deadlineAt = requestStartedAt + effectiveTimeoutMs;
   try {
     const samVersion = process.env.REPLICATE_SAM_VERSION || DEFAULT_REPLICATE_SAM_VERSION;
     const createUrl = "https://api.replicate.com/v1/predictions";
@@ -7560,7 +7568,7 @@ async function runSamSegmentation(imageUrl, { timeoutMs = REPLICATE_SAM_TIMEOUT_
             image: imageUrl,
           },
         }),
-      });
+      }, Math.max(1, deadlineAt - Date.now()));
     } catch (error) {
       console.error("[SAM DEBUG] SAM create request failed", {
         failure_stage: "create",
@@ -7586,14 +7594,9 @@ async function runSamSegmentation(imageUrl, { timeoutMs = REPLICATE_SAM_TIMEOUT_
       };
     }
 
-    const startedAt = Date.now();
     let prediction = createResp;
 
-    const effectiveTimeoutMs = Math.max(
-      2500,
-      Math.min(REPLICATE_SAM_TIMEOUT_MS, Number(timeoutMs) || REPLICATE_SAM_TIMEOUT_MS)
-    );
-    while (Date.now() - startedAt < effectiveTimeoutMs) {
+    while (Date.now() < deadlineAt) {
       if (["succeeded", "failed", "canceled"].includes(prediction?.status)) break;
       await new Promise((resolve) => setTimeout(resolve, REPLICATE_SAM_POLL_MS));
       let retryAttempt = 0;
@@ -7603,7 +7606,7 @@ async function runSamSegmentation(imageUrl, { timeoutMs = REPLICATE_SAM_TIMEOUT_
           prediction = await replicateRequest(statusUrl, {
             method: "GET",
             headers: { Authorization: `Bearer ${token}` },
-          });
+          }, Math.max(1, deadlineAt - Date.now()));
           pollError = null;
           break;
         } catch (error) {
