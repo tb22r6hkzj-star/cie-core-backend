@@ -61,10 +61,10 @@ test("Replicate provider deadlines include prediction creation and polling", () 
     source.slice(source.indexOf("async function runSamSegmentation"), source.indexOf("function normalizeSamOutput")),
   ];
   for (const providerSource of providerFunctions) {
-    assert.match(providerSource, /const requestStartedAt = Date\\.now\\(\\);/);
-    assert.match(providerSource, /const deadlineAt = requestStartedAt \\+ (?:bounded|effective)TimeoutMs;/);
-    assert.match(providerSource, /while \\(Date\\.now\\(\\) < deadlineAt\\)/);
-    assert.match(providerSource, /Math\\.max\\(1, deadlineAt - Date\\.now\\(\\)\\)/);
+    assert.match(providerSource, /const requestStartedAt = Date\.now\(\);/);
+    assert.match(providerSource, /const deadlineAt = requestStartedAt \+ (?:bounded|effective)TimeoutMs;/);
+    assert.match(providerSource, /while \(Date\.now\(\) < deadlineAt\)/);
+    assert.match(providerSource, /Math\.max\(1, deadlineAt - Date\.now\(\)\)/);
   }
 });
 
