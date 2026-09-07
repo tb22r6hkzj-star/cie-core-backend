@@ -73,6 +73,7 @@ import { evaluateCaptureQualityV1 } from "./intelligence/captureQualityGateV1.js
 import { buildConsumerEvidenceV1 } from "./intelligence/consumerEvidenceV1.js";
 import { createTransformLatencyBudgetV1, shouldRunAccessoryEscalationV1 } from "./intelligence/transformLatencyBudgetV1.js";
 import { buildGroundingDinoQueryPlanV1 } from "./intelligence/groundingDinoQueryPlanV1.js";
+import { parseYoloWorldOutputV1, yoloClassNamesFromQueryV1 } from "./intelligence/yoloWorldFallbackV1.js";
 import {
   cropDecodedImageToPngV1,
   normalizeDinoBboxPrecisionV1,
@@ -6050,6 +6051,9 @@ const DEFAULT_REPLICATE_SAM_MODEL = process.env.REPLICATE_SAM_MODEL || "meta/sam
 const DEFAULT_REPLICATE_GROUNDING_DINO_VERSION =
   process.env.REPLICATE_GROUNDING_DINO_VERSION ||
   "efd10a8ddc57ea28773327e881ce95e20cc1d734c589f7dd01d2036921ed78aa";
+const DEFAULT_REPLICATE_YOLO_WORLD_VERSION =
+  process.env.REPLICATE_YOLO_WORLD_VERSION ||
+  "fd1305d3fc19e81540542f51c2530cf8f393e28cc6ff4976337c3e2b75c7c292";
 const DEFAULT_GROUNDING_DINO_QUERY =
   process.env.GROUNDING_DINO_QUERY ||
   "person. hat. bag. shoes. boots. sneakers. loafer. horsebit loafer. penny loafer. sweater. hoodie. shirt. jacket. pants. shorts. skirt. glasses. belt. waist belt. belt buckle. watch. necklace. chain necklace. pendant. cross pendant. bracelet. earring. stud earring. earrings. ring. brooch. pin. shoe hardware. horsebit shoe hardware. accessory.";
@@ -6353,7 +6357,8 @@ function buildDinoSegmentedRegions(detections = []) {
         accessory_type: mapping.accessory_type || null,
         object_type: mapping.object_type || null,
         confidence,
-        source_type: "grounding_dino",
+        source_type: detection?.source_type || "grounding_dino",
+        detector_provider: detection?.detector_provider || "grounding_dino",
         bbox,
         coverage: bboxArea,
         dominant_hex: null,
@@ -7469,6 +7474,58 @@ async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DIN
   }
 }
 
+async function runYoloWorldDetection(imageUrl, query = DEFAULT_GROUNDING_DINO_QUERY, { timeoutMs = 12000 } = {}) {
+  const token = process.env.REPLICATE_API_TOKEN;
+  if (!token) return { enabled: false, ok: false, reason: "missing_REPLICATE_API_TOKEN", detections: [] };
+  const boundedTimeoutMs = Math.max(1500, Math.min(12000, Number(timeoutMs) || 12000));
+  try {
+    const createResp = await replicateRequest("https://api.replicate.com/v1/predictions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        version: DEFAULT_REPLICATE_YOLO_WORLD_VERSION,
+        input: {
+          input_media: imageUrl,
+          class_names: yoloClassNamesFromQueryV1(query),
+          max_num_boxes: 100,
+          score_thr: 0.05,
+          nms_thr: 0.5,
+          return_json: true,
+        },
+      }),
+    }, boundedTimeoutMs);
+    const statusUrl = createResp?.urls?.get;
+    if (!statusUrl) return { enabled: true, ok: false, reason: "missing_poll_url", detections: [] };
+    const startedAt = Date.now();
+    let prediction = createResp;
+    while (Date.now() - startedAt < boundedTimeoutMs) {
+      if (["succeeded", "failed", "canceled"].includes(prediction?.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, REPLICATE_SAM_POLL_MS));
+      const remainingMs = Math.max(1, boundedTimeoutMs - (Date.now() - startedAt));
+      prediction = await replicateRequest(statusUrl, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+      }, remainingMs);
+    }
+    if (prediction?.status !== "succeeded") {
+      return { enabled: true, ok: false, reason: prediction?.error || "yolo_world_timed_out", detections: [] };
+    }
+    const image = decodeImageRgba(await fetchImageBuffer(imageUrl), imageUrl);
+    const detections = parseYoloWorldOutputV1(prediction?.output, {
+      imageWidth: image?.width,
+      imageHeight: image?.height,
+    });
+    return {
+      enabled: true,
+      ok: detections.length > 0,
+      reason: detections.length ? null : "no_yolo_world_detections",
+      detections,
+    };
+  } catch (error) {
+    return { enabled: true, ok: false, reason: error?.message || "yolo_world_request_error", detections: [] };
+  }
+}
+
 async function runSamSegmentation(imageUrl, { timeoutMs = REPLICATE_SAM_TIMEOUT_MS } = {}) {
   const token = process.env.REPLICATE_API_TOKEN;
   if (!token) {
@@ -7790,14 +7847,18 @@ async function analyzeGhostColors(ghostUrl, { latencyBudget = null } = {}) {
   );
   let dinoDetections = groundingPasses.flatMap((pass) => Array.isArray(pass?.detections) ? pass.detections : []);
   let recoveryAttempted = false;
+  let fallbackProvider = null;
+  let fallbackReason = null;
   if (!dinoDetections.length && latencyBudget?.canRun?.(8000)) {
     recoveryAttempted = true;
     const recoveryTimeoutMs = latencyBudget.providerTimeoutMs({ requestedMs: 12000, maximumMs: 12000 });
-    const recoveryPass = await runGroundingDinoDetection(ghostUrl, DEFAULT_GROUNDING_DINO_QUERY, {
+    const recoveryPass = await runYoloWorldDetection(ghostUrl, DEFAULT_GROUNDING_DINO_QUERY, {
       timeoutMs: recoveryTimeoutMs,
     });
     groundingPasses = [...groundingPasses, recoveryPass];
     dinoDetections = Array.isArray(recoveryPass?.detections) ? recoveryPass.detections : [];
+    fallbackProvider = "yolo_world_xl";
+    fallbackReason = recoveryPass?.reason || null;
   }
   const groundingDino = {
     enabled: groundingPasses.some((pass) => pass?.enabled),
@@ -7808,6 +7869,8 @@ async function analyzeGhostColors(ghostUrl, { latencyBudget = null } = {}) {
     detections: dinoDetections,
     pass_count: groundingPasses.length,
     recovery_attempted: recoveryAttempted,
+    fallback_provider: fallbackProvider,
+    fallback_reason: fallbackReason,
   };
   let dinoGarmentRegions = buildDinoSegmentedRegions(dinoDetections);
   let decodedImage = null;
@@ -7861,7 +7924,7 @@ async function analyzeGhostColors(ghostUrl, { latencyBudget = null } = {}) {
   const detectionSegmentationOk = samOk || dinoGarmentOk;
   const garmentZoneSource = getGarmentZoneSource(samOk ? samRegions : [], dinoGarmentRegions);
   const segmentationProvider = samOk ? "sam" : null;
-  const detectionProvider = dinoOk ? "grounding_dino" : null;
+  const detectionProvider = dinoOk ? (fallbackProvider || "grounding_dino") : null;
 
   return {
     dominantHex,
@@ -7882,6 +7945,8 @@ async function analyzeGhostColors(ghostUrl, { latencyBudget = null } = {}) {
       dino_reason: groundingDino?.reason || null,
       dino_detection_count: dinoDetections.length,
       dino_recovery_attempted: recoveryAttempted,
+      detector_fallback_provider: fallbackProvider,
+      detector_fallback_reason: fallbackReason,
       dino_garment_region_count: dinoGarmentRegions.length,
       dino_region_count: dinoGarmentRegions.length,
       dino_color_enrichment_count: dinoColorEnrichmentCount,

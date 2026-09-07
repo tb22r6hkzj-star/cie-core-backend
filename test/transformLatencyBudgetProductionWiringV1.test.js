@@ -43,11 +43,13 @@ test("response debug exposes transform latency budget snapshot", () => {
   assert.match(source, /transform_latency_budget_v1: transformLatencyBudget\.snapshot\("response"\)/);
 });
 
-test("primary DINO and one zero-result recovery pass share the transform budget", () => {
+test("primary DINO and one YOLO zero-result fallback share the transform budget", () => {
   assert.match(source, /analyzeGhostColors\(ghostUrl, \{ latencyBudget: transformLatencyBudget \}\)/);
   assert.match(source, /requestedMs: 18000, maximumMs: 18000/);
   assert.match(source, /!dinoDetections\.length && latencyBudget\?\.canRun\?\.\(8000\)/);
   assert.match(source, /requestedMs: 12000, maximumMs: 12000/);
+  assert.match(source, /runYoloWorldDetection\(ghostUrl, DEFAULT_GROUNDING_DINO_QUERY/);
+  assert.match(source, /detector_fallback_provider: fallbackProvider/);
   assert.match(source, /dino_recovery_attempted: recoveryAttempted/);
 });
 
