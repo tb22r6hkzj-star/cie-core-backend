@@ -74,6 +74,7 @@ import { buildConsumerEvidenceV1 } from "./intelligence/consumerEvidenceV1.js";
 import { createTransformLatencyBudgetV1, shouldRunAccessoryEscalationV1 } from "./intelligence/transformLatencyBudgetV1.js";
 import { buildGroundingDinoQueryPlanV1 } from "./intelligence/groundingDinoQueryPlanV1.js";
 import { parseYoloWorldOutputV1, yoloClassNamesFromQueryV1 } from "./intelligence/yoloWorldFallbackV1.js";
+import { sanitizeCustomerFacingZonesV1 } from "./intelligence/customerFacingZoneSanitizationV1.js";
 import {
   cropDecodedImageToPngV1,
   normalizeDinoBboxPrecisionV1,
@@ -7858,13 +7859,16 @@ async function analyzeGhostColors(ghostUrl, { latencyBudget = null } = {}) {
   if (!dinoDetections.length && latencyBudget?.canRun?.(8000)) {
     recoveryAttempted = true;
     const recoveryTimeoutMs = latencyBudget.providerTimeoutMs({ requestedMs: 12000, maximumMs: 12000 });
-    const recoveryPass = await runYoloWorldDetection(ghostUrl, DEFAULT_GROUNDING_DINO_QUERY, {
-      timeoutMs: recoveryTimeoutMs,
-    });
-    groundingPasses = [...groundingPasses, recoveryPass];
-    dinoDetections = Array.isArray(recoveryPass?.detections) ? recoveryPass.detections : [];
+    const recoveryPasses = await Promise.all([
+      runYoloWorldDetection(ghostUrl, DEFAULT_GROUNDING_DINO_GARMENT_QUERY, { timeoutMs: recoveryTimeoutMs }),
+      runYoloWorldDetection(ghostUrl, DEFAULT_GROUNDING_DINO_ACCESSORY_QUERY, { timeoutMs: recoveryTimeoutMs }),
+    ]);
+    groundingPasses = [...groundingPasses, ...recoveryPasses];
+    dinoDetections = recoveryPasses.flatMap((pass) => Array.isArray(pass?.detections) ? pass.detections : []);
     fallbackProvider = "yolo_world_xl";
-    fallbackReason = recoveryPass?.reason || null;
+    fallbackReason = recoveryPasses.every((pass) => !pass?.ok)
+      ? recoveryPasses.map((pass) => pass?.reason).filter(Boolean).join("; ") || "all_yolo_world_lanes_failed"
+      : null;
   }
   const groundingDino = {
     enabled: groundingPasses.some((pass) => pass?.enabled),
@@ -8498,6 +8502,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         outfitAnalysis,
       });
     }
+    outfitAnalysis = sanitizeCustomerFacingZonesV1(outfitAnalysis);
     console.info("[EXTERNAL INTELLIGENCE] semantic observer", {
       configured_mode: EXTERNAL_INTELLIGENCE_MODE,
       effective_mode: effectiveExternalIntelligenceMode,
