@@ -48,8 +48,33 @@ test("validated footwear ownership survives a generic low-signal read", () => {
   const footwear = sanitizeCustomerFacingZonesV1(analysis).garment_zones.zones.footwear;
   assert.equal(footwear.hex, "#0F0E10");
   assert.equal(footwear.name, "Graphite Black");
+  assert.equal(footwear.display_label, "Graphite Black");
+  assert.equal(footwear.color_identity.name, "Graphite Black");
+  assert.equal(footwear.garment_identity.primary_identity.name, "Graphite Black");
   assert.equal(footwear.primary_color.name, "Graphite Black");
   assert.equal(footwear.interpretation, "single_color");
   assert.equal(footwear.publication_state, "confirmed");
   assert.equal(footwear.confidence, 63);
+});
+
+test("synchronizes head-to-toe color aliases with the authoritative primary hex", () => {
+  const analysis = { garment_zones: { zones: { lower_garment: {
+    name: "Graphite Black",
+    display_label: "Graphite Black",
+    hex: "#415242",
+    interpretation: "single_color",
+    color_identity: { name: "Desert Tan", translation: "Soft Earth" },
+    garment_identity: { primary_identity: { name: "Graphite Black" }, secondary_identities: [] },
+    primary_color: {
+      hex: "#415242",
+      name: "Muted Forest Green",
+      color_identity: { name: "Muted Forest Green", translation: "Soft Gray" },
+    },
+  } } } };
+  const lower = sanitizeCustomerFacingZonesV1(analysis).garment_zones.zones.lower_garment;
+  assert.equal(lower.name, "Muted Forest Green");
+  assert.equal(lower.display_label, "Muted Forest Green");
+  assert.equal(lower.color_identity.name, "Muted Forest Green");
+  assert.equal(lower.color_identity.translation, "Soft Gray");
+  assert.equal(lower.garment_identity.primary_identity.name, "Muted Forest Green");
 });
