@@ -82,6 +82,29 @@ function restoreOwnedZoneColor(analysis, zoneKey, zone) {
   };
 }
 
+function synchronizeCustomerFacingColorAliases(zone = {}) {
+  const hex = zone?.primary_color?.hex || zone?.dominant_color?.hex || zone?.hex || zone?.dominant_hex;
+  if (!hex || isUncertain(zone)) return zone;
+  const name = getColorName(hex);
+  const sourceIdentity = zone?.primary_color?.color_identity || zone?.dominant_color?.color_identity || {};
+  const colorIdentity = { ...sourceIdentity, name };
+  const primaryIdentity = {
+    ...(zone?.garment_identity?.primary_identity || {}),
+    name,
+    ...(colorIdentity?.translation ? { translation: colorIdentity.translation } : {}),
+  };
+  return {
+    ...zone,
+    name,
+    display_label: name,
+    color_identity: colorIdentity,
+    garment_identity: {
+      ...(zone?.garment_identity || {}),
+      primary_identity: primaryIdentity,
+    },
+  };
+}
+
 export function sanitizeCustomerFacingZonesV1(analysis = {}) {
   const originalZones = analysis?.garment_zones?.zones;
   if (!originalZones || typeof originalZones !== "object") return analysis;
@@ -103,7 +126,7 @@ export function sanitizeCustomerFacingZonesV1(analysis = {}) {
     const withOwnedColor = ["footwear", "bag"].includes(key)
       ? restoreOwnedZoneColor(analysis, key, zone)
       : zone;
-    zones[key] = sanitizeUncertainZone(key, withOwnedColor);
+    zones[key] = sanitizeUncertainZone(key, synchronizeCustomerFacingColorAliases(withOwnedColor));
   }
 
   return {
