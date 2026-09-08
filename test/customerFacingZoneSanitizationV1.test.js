@@ -33,3 +33,21 @@ test("removes inconclusive logo diagnostics but preserves published accessory id
   assert.equal(zones.accessory_watch.name, "Watch");
   assert.equal(zones.accessory_watch.identity_publication_decision, "publish");
 });
+
+test("validated footwear ownership survives a generic low-signal read", () => {
+  const analysis = {
+    piece_color_ownership_v1: { accessory_color_authorities: [{
+      zone: "footwear", label: "shoes", confidence: 63, applied: true,
+      dominant_hex: "#0F0E10", color_authority_source: "piece_color_ownership_v1",
+      region_colors: [{ hex: "#0F0E10", pct: 0.81, ownership_validated: true }],
+    }] },
+    garment_zones: { zones: { footwear: {
+      name: "Luxury Tan", hex: null, interpretation: "unknown", confidence: 18,
+    } } },
+  };
+  const footwear = sanitizeCustomerFacingZonesV1(analysis).garment_zones.zones.footwear;
+  assert.equal(footwear.hex, "#0F0E10");
+  assert.equal(footwear.interpretation, "single_color");
+  assert.equal(footwear.publication_state, "confirmed");
+  assert.equal(footwear.confidence, 63);
+});
