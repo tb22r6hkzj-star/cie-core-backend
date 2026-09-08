@@ -1,3 +1,5 @@
+import { getColorName } from "../engines/labelMapper/index.js";
+
 const COLOR_FIELDS = [
   "hex", "dominant_hex", "dominant_color", "primary_color", "signature_color",
   "support_colors", "secondary_colors", "accent_colors", "detected_colors", "region_colors",
@@ -49,19 +51,29 @@ function restoreOwnedZoneColor(analysis, zoneKey, zone) {
   const authority = strongestOwnedColor(analysis, zoneKey);
   if (!authority) return zone;
   const colors = Array.isArray(authority.region_colors) ? authority.region_colors : [];
-  const primary = colors[0] || { hex: authority.dominant_hex, pct: 1 };
+  const authoritativeName = getColorName(authority.dominant_hex);
+  const primary = {
+    ...(colors[0] || { hex: authority.dominant_hex, pct: 1 }),
+    hex: authority.dominant_hex,
+    name: authoritativeName,
+  };
+  const namedColors = [primary, ...colors.slice(1).map((color) => ({
+    ...color,
+    name: color?.hex ? getColorName(color.hex) : color?.name,
+  }))];
   return {
     ...zone,
+    name: authoritativeName,
     hex: authority.dominant_hex,
     dominant_hex: authority.dominant_hex,
     dominant_color: primary,
     primary_color: primary,
-    object_local_colors: colors,
-    region_colors: colors,
-    detected_colors: colors,
-    support_colors: colors.slice(1),
-    secondary_colors: colors.slice(1),
-    interpretation: colors.length > 1 ? "multi_color" : "single_color",
+    object_local_colors: namedColors,
+    region_colors: namedColors,
+    detected_colors: namedColors,
+    support_colors: namedColors.slice(1),
+    secondary_colors: namedColors.slice(1),
+    interpretation: namedColors.length > 1 ? "multi_color" : "single_color",
     confidence: Math.max(Number(zone?.confidence || 0), Number(authority?.confidence || 0)),
     publication_state: "confirmed",
     publication_decision: "publish",

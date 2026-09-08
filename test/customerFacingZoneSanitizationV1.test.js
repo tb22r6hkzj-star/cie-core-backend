@@ -47,6 +47,8 @@ test("validated footwear ownership survives a generic low-signal read", () => {
   };
   const footwear = sanitizeCustomerFacingZonesV1(analysis).garment_zones.zones.footwear;
   assert.equal(footwear.hex, "#0F0E10");
+  assert.equal(footwear.name, "Graphite Black");
+  assert.equal(footwear.primary_color.name, "Graphite Black");
   assert.equal(footwear.interpretation, "single_color");
   assert.equal(footwear.publication_state, "confirmed");
   assert.equal(footwear.confidence, 63);
