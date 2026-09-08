@@ -101,6 +101,12 @@ function targetedIdentityEligible(entry = {}) {
 function evaluateEntry(entry = {}) {
   const type = normalizeType(entry?.label);
   if (entry?.zone !== "accessory_jewelry" || !JEWELRY_TYPES.has(type)) return null;
+  if (type === "shoe_hardware") {
+    const area = normalizedArea(entry?.geometry || {});
+    const width = Number(entry?.geometry?.width || 0);
+    const height = Number(entry?.geometry?.height || 0);
+    if (area > 0.012 || width > 0.15 || height > 0.07) return null;
+  }
   const confidence = clamp01(entry?.confidence);
   const colors = publishableColors(entry);
   const pixels = entry?.pixel_evidence || {};
