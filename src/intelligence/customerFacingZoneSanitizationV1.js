@@ -39,6 +39,37 @@ function overlapsEvidence(a = {}, b = {}) {
   return (Array.isArray(b?.evidence_ids) ? b.evidence_ids : []).some((id) => left.has(id));
 }
 
+function strongestOwnedColor(analysis = {}, zoneKey = "") {
+  return (analysis?.piece_color_ownership_v1?.accessory_color_authorities || [])
+    .filter((entry) => entry?.zone === zoneKey && entry?.applied === true && entry?.dominant_hex)
+    .sort((a, b) => Number(b?.confidence || 0) - Number(a?.confidence || 0))[0] || null;
+}
+
+function restoreOwnedZoneColor(analysis, zoneKey, zone) {
+  const authority = strongestOwnedColor(analysis, zoneKey);
+  if (!authority) return zone;
+  const colors = Array.isArray(authority.region_colors) ? authority.region_colors : [];
+  const primary = colors[0] || { hex: authority.dominant_hex, pct: 1 };
+  return {
+    ...zone,
+    hex: authority.dominant_hex,
+    dominant_hex: authority.dominant_hex,
+    dominant_color: primary,
+    primary_color: primary,
+    object_local_colors: colors,
+    region_colors: colors,
+    detected_colors: colors,
+    support_colors: colors.slice(1),
+    secondary_colors: colors.slice(1),
+    interpretation: colors.length > 1 ? "multi_color" : "single_color",
+    confidence: Math.max(Number(zone?.confidence || 0), Number(authority?.confidence || 0)),
+    publication_state: "confirmed",
+    publication_decision: "publish",
+    validation_decision: "accepted",
+    color_authority_source: authority.color_authority_source || "piece_color_ownership_v1",
+  };
+}
+
 export function sanitizeCustomerFacingZonesV1(analysis = {}) {
   const originalZones = analysis?.garment_zones?.zones;
   if (!originalZones || typeof originalZones !== "object") return analysis;
@@ -56,7 +87,12 @@ export function sanitizeCustomerFacingZonesV1(analysis = {}) {
     delete zones.accessory_jewelry;
   }
 
-  for (const [key, zone] of Object.entries(zones)) zones[key] = sanitizeUncertainZone(key, zone);
+  for (const [key, zone] of Object.entries(zones)) {
+    const withOwnedColor = ["footwear", "bag"].includes(key)
+      ? restoreOwnedZoneColor(analysis, key, zone)
+      : zone;
+    zones[key] = sanitizeUncertainZone(key, withOwnedColor);
+  }
 
   return {
     ...analysis,

@@ -92,6 +92,19 @@ test("publishes targeted VisionCore watch identity even when color measurement i
   assert.equal(result.color_published_count, 0);
 });
 
+test("rejects a shoe-sized box mislabeled as tiny shoe hardware", () => {
+  const result = buildAccessoryInstancesV1({
+    perceptionV6: { evidence_ledger: [evidence({
+      id: "whole-shoe-hardware",
+      label: "horsebit shoe hardware",
+      confidence: .72,
+      geometry: { x: .31, y: .89, width: .21, height: .09, x2: .52, y2: .98 },
+    })] },
+  });
+  assert.equal(result.detected_count, 0);
+  assert.equal(result.zones.accessory_shoe_hardware, undefined);
+});
+
 test("does not let targeted identity bypass spatial-source or confidence gates", () => {
   const result = buildAccessoryInstancesV1({
     perceptionV6: {

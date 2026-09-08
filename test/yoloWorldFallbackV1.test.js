@@ -21,3 +21,9 @@ test("invalid JSON and dimensions abstain", () => {
   assert.deepEqual(parseYoloWorldOutputV1({ json_str: "not-json" }, { imageWidth: 10, imageHeight: 10 }), []);
   assert.deepEqual(parseYoloWorldOutputV1({ json_str: "{}" }, { imageWidth: 0, imageHeight: 10 }), []);
 });
+
+test("trousers maps to lower garment authority", async () => {
+  const { mapDinoLabel } = await import("../src/engines/ontology/dinoMappings.js");
+  assert.equal(mapDinoLabel("trousers").zone, "lower_garment");
+  assert.equal(mapDinoLabel("trousers").category, "pants");
+});
