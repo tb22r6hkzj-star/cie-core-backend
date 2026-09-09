@@ -1,4 +1,4 @@
-import type { DisplayZone, RawGarmentZone, TransformResponse } from "../types/analysis";
+import type { AnalysisResult, DisplayZone, RawGarmentZone, TransformResponse } from "../types/analysis";
 
 const ZONE_LABELS: Record<string, string> = {
   upper_garment: "Upper Garment",
@@ -48,4 +48,35 @@ export function normalizeTransformResponse(response: TransformResponse): Display
   return Object.entries(zones)
     .filter(([, zone]) => zone.identity_publication_decision !== "withhold")
     .map(([key, zone]) => normalizeZone(key, zone));
+}
+
+export function normalizeAnalysisResult(response: TransformResponse): AnalysisResult {
+  const analysis = response.outfit_analysis;
+  const modes = (analysis?.mode_scores ?? []).map((entry) => {
+    const key = String(entry.mode || "").toLowerCase();
+    const palette = response.palettes?.[key];
+    return {
+      mode: entry.mode || titleCase(key),
+      score: Number(entry.score ?? 0),
+      colors: palette?.named_hexes?.length
+        ? palette.named_hexes
+        : (palette?.hexes ?? []).map((hex) => ({ hex })),
+      reason: palette?.reason ?? null
+    };
+  });
+  return {
+    zones: normalizeTransformResponse(response),
+    outfitScore: Number(analysis?.outfit_score ?? 0),
+    bestMode: analysis?.best_mode ?? null,
+    bestModeScore: Number(analysis?.best_mode_score ?? 0),
+    scoreBreakdown: Object.entries(analysis?.score_breakdown ?? {}).map(([label, value]) => ({
+      label: titleCase(label),
+      value: Number(value)
+    })),
+    whyThisWorks: analysis?.why_this_works ?? null,
+    suggestedAdjustment: analysis?.suggested_adjustment ?? null,
+    dominantHex: response.dominantHex ?? null,
+    dominantName: response.dominantName ?? null,
+    modes
+  };
 }
