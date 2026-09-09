@@ -1,0 +1,11 @@
+node_modules/
+.expo/
+dist/
+dist-test/
+web-build/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+.env
