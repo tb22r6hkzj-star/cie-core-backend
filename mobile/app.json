@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "VisionCore",
+    "slug": "visioncore",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "scheme": "visioncore",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "tech.visioncore.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "VisionCore uses your camera to analyze the colors and pieces in your outfit.",
+        "NSPhotoLibraryUsageDescription": "VisionCore uses your selected outfit photo to create your color analysis."
+      }
+    },
+    "android": {
+      "package": "tech.visioncore.app",
+      "permissions": ["CAMERA", "READ_MEDIA_IMAGES"]
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Choose an outfit photo for VisionCore to analyze.",
+          "cameraPermission": "Take an outfit photo for VisionCore to analyze.",
+          "microphonePermission": false
+        }
+      ]
+    ],
+    "extra": {
+      "apiBaseUrl": "https://cie-core-backend-1.onrender.com"
+    }
+  }
+}
