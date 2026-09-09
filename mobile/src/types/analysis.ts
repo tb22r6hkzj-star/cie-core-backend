@@ -28,11 +28,45 @@ export type RawGarmentZone = {
 };
 
 export type TransformResponse = {
+  dominantHex?: string | null;
+  dominantName?: string | null;
+  palettes?: Record<string, {
+    hexes?: string[];
+    named_hexes?: ColorValue[];
+    reason?: string | null;
+  }>;
   outfit_analysis?: {
+    outfit_score?: number | null;
+    best_mode?: string | null;
+    best_mode_score?: number | null;
+    mode_scores?: Array<{ mode?: string; score?: number }>;
+    score_breakdown?: Record<string, number>;
+    why_this_works?: string | null;
+    suggested_adjustment?: string | null;
     garment_zones?: {
       zones?: Record<string, RawGarmentZone>;
     };
   };
+};
+
+export type ModeResult = {
+  mode: string;
+  score: number;
+  colors: ColorValue[];
+  reason: string | null;
+};
+
+export type AnalysisResult = {
+  zones: DisplayZone[];
+  outfitScore: number;
+  bestMode: string | null;
+  bestModeScore: number;
+  scoreBreakdown: Array<{ label: string; value: number }>;
+  whyThisWorks: string | null;
+  suggestedAdjustment: string | null;
+  dominantHex: string | null;
+  dominantName: string | null;
+  modes: ModeResult[];
 };
 
 export type DisplayZone = {
