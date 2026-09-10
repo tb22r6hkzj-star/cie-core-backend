@@ -6676,6 +6676,8 @@ function extractMaskedRegionColors(baseImage, maskImage, limit = 6, ownership = 
       return {
         hex,
         pct: row.count / pixelCount,
+        pixel_count: row.count,
+        total_owned_pixel_count: pixelCount,
       };
     })
     .filter((c) => !!c.hex)
@@ -7420,17 +7422,20 @@ async function enrichSamRegionsWithMaskedColors(imageUrl, regions = []) {
       competitors,
     });
     const dominantHex = safeHex(regionColors[0]?.hex || region?.dominant_hex || "");
+    const totalOwnedPixelCount = Number(regionColors[0]?.total_owned_pixel_count || 0);
 
     return {
       ...region,
       coverage: round2(Math.max(Number(region?.coverage || 0), Number(decoded.geometry?.coverage || 0))),
       dominant_hex: dominantHex || region?.dominant_hex || null,
       region_colors: regionColors,
+      owned_pixel_count: totalOwnedPixelCount,
       mask_geometry: decoded.geometry,
       mask_color_ownership_v1: {
         applied: true,
         authority: "exclusive_mask_pixel_membership",
         competing_mask_count: competitors.length,
+        measured_pixel_count: totalOwnedPixelCount,
         priority: samOwnershipPriority(region),
         invariant: "one_visible_pixel_has_one_winning_piece_owner",
       },
