@@ -16,6 +16,7 @@ test("request grants OpenAI semantic observation but no color authority", () => 
   assert.match(prompt, /Do not identify the person/i);
   assert.equal(request.input[0].content[1].detail, "high");
   assert.equal(request.text.format.strict, true);
+  assert.equal(request.max_output_tokens, 6000);
   assert.equal(request.store, false);
 });
 
@@ -114,6 +115,26 @@ test("provider failure exposes only safe status and provider codes", async () =>
   assert.equal(result.provider_error_type, "invalid_request_error");
   assert.equal(result.provider_error_code, "invalid_json_schema");
   assert.doesNotMatch(JSON.stringify(result), /must-never-appear|sensitive provider detail/);
+});
+
+test("truncated structured output exposes a safe incomplete reason", async () => {
+  const result = await runOpenAISemanticObserverV1({
+    mode: "assist",
+    apiKey: "test-key",
+    imageUrl: "https://example.test/outfit.jpg",
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        output_text: '{"schema_version":"2",',
+      }),
+    }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure_stage, "response_parse");
+  assert.equal(result.provider_error_code, "max_output_tokens");
+  assert.equal(result.provider_error_type, "response_parse_error");
 });
 
 test("semantic timeout is bounded and still fails open", async () => {
