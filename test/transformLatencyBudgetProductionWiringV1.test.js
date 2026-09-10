@@ -13,10 +13,26 @@ test("transform route uses total latency budget and capped Pixelcut timeout", ()
 
 test("semantic understanding starts early and target-conditioned masks follow localization", () => {
   assert.match(source, /const earlyExternalSemanticPromise = runOpenAISemanticObserverV1\(\{/);
+  assert.match(source, /timeoutMs: EARLY_SEMANTIC_OBSERVER_BUDGET_MS/);
+  assert.match(source, /const earlyTargetSegmentationPromise = earlyExternalSemanticPromise\.then/);
+  assert.match(source, /runTargetConditionedSegmentation\(publicUrl, earlyPlan/);
   assert.match(source, /semanticObservationPromise: earlyExternalSemanticPromise/);
+  assert.match(source, /targetSegmentationPromise: earlyTargetSegmentationPromise/);
   assert.match(source, /buildTargetConditionedSegmentationPlanV1\(\{/);
   assert.match(source, /runTargetConditionedSegmentation\(ghostUrl, segmentationPlan/);
   assert.doesNotMatch(source, /const samPromise = runSamSegmentation\(ghostUrl/);
+});
+
+test("semantic masks run against the full-resolution original while legacy work continues", () => {
+  const semanticStart = source.indexOf("const earlyExternalSemanticPromise");
+  const maskStart = source.indexOf("const earlyTargetSegmentationPromise");
+  const pixelcutStart = source.indexOf("ghostUrl = await callPixelcutRemoveBg", semanticStart);
+  assert.ok(semanticStart > 0);
+  assert.ok(maskStart > semanticStart);
+  assert.ok(pixelcutStart > maskStart);
+  assert.match(source, /VISIONCORE_EARLY_SEMANTIC_TIMEOUT_MS/);
+  assert.match(source, /VISIONCORE_EARLY_TARGET_SEGMENTATION_TIMEOUT_MS/);
+  assert.match(source, /early_target_conditioned_segmentation: !!earlyTargetSegmentation\?\.ok/);
 });
 
 test("target-conditioned masks stay color-neutral and publish only measured mask pixels", () => {
