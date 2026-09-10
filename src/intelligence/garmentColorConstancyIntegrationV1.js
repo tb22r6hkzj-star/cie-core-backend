@@ -16,6 +16,25 @@ function safeHex(value) {
   }
 }
 
+function exactMeasuredRatio(sample = {}, region = {}) {
+  const pixelCount = Number(sample?.pixel_count);
+  const totalOwnedPixelCount = Number(
+    sample?.total_owned_pixel_count ?? region?.owned_pixel_count
+  );
+  if (
+    Number.isFinite(pixelCount) && pixelCount >= 0 &&
+    Number.isFinite(totalOwnedPixelCount) && totalOwnedPixelCount > 0
+  ) {
+    return Math.max(0, Math.min(1, pixelCount / totalOwnedPixelCount));
+  }
+
+  const measuredRatio = Number(sample?.measured_ratio);
+  if (Number.isFinite(measuredRatio) && measuredRatio >= 0) {
+    return Math.max(0, Math.min(1, measuredRatio > 1 ? measuredRatio / 100 : measuredRatio));
+  }
+  return null;
+}
+
 function ownedAccentSamples(samples = [], intrinsic = {}) {
   return (Array.isArray(intrinsic?.samples) ? intrinsic.samples : [])
     .map((row, index) => ({ row, sample: samples[index] }))
@@ -26,7 +45,7 @@ function ownedAccentSamples(samples = [], intrinsic = {}) {
     .filter((sample) => safeHex(sample?.hex));
 }
 
-function buildPublishableIntrinsicPalette(intrinsic = {}, samples = []) {
+function buildPublishableIntrinsicPalette(intrinsic = {}, samples = [], region = {}) {
   if (!intrinsic?.available || !intrinsic?.stable_material_identity || !intrinsic?.intrinsic_hex) return null;
   const sample = intrinsic?.intrinsic_sample || {};
   const accents = ownedAccentSamples(samples, intrinsic);
@@ -34,29 +53,41 @@ function buildPublishableIntrinsicPalette(intrinsic = {}, samples = []) {
     (sum, accent) => sum + Math.max(0, Number(accent?.pct ?? accent?.percentage ?? 0)),
     0
   ));
-  const primaryShare = Math.max(0.55, 1 - accentShare);
+  const inferredPrimaryShare = Math.max(0.55, 1 - accentShare);
+  const measuredPrimaryShare = exactMeasuredRatio(sample, region);
+  const primaryShare = measuredPrimaryShare ?? inferredPrimaryShare;
   return [{
     ...sample,
     hex: intrinsic.intrinsic_hex,
     pct: primaryShare,
     percentage: primaryShare,
     display_pct: primaryShare,
+    measured_ratio: measuredPrimaryShare ?? sample?.measured_ratio,
     source: "garment_color_constancy_v1",
     measurement_source: sample?.measurement_source || sample?.source || "measured_intrinsic_medoid",
     ownership_state: "owned",
     traceable_to_pixels: sample?.traceable_to_pixels !== false,
     measurement_authority: "intrinsic_material_medoid",
     intrinsic_material_identity: true,
-  }, ...accents.map((accent) => ({
-    ...accent,
-    hex: safeHex(accent.hex),
-    source: "garment_owned_accent_v1",
-    measurement_source: accent?.measurement_source || accent?.source || "validated_mask_accent",
-    ownership_state: "owned",
-    ownership_validated: true,
-    measurement_authority: "independent_owned_accent",
-    intrinsic_material_identity: false,
-  }))];
+  }, ...accents.map((accent) => {
+    const measuredAccentShare = exactMeasuredRatio(accent, region);
+    return {
+      ...accent,
+      hex: safeHex(accent.hex),
+      ...(measuredAccentShare === null ? {} : {
+        pct: measuredAccentShare,
+        percentage: measuredAccentShare,
+        display_pct: measuredAccentShare,
+        measured_ratio: measuredAccentShare,
+      }),
+      source: "garment_owned_accent_v1",
+      measurement_source: accent?.measurement_source || accent?.source || "validated_mask_accent",
+      ownership_state: "owned",
+      ownership_validated: true,
+      measurement_authority: "independent_owned_accent",
+      intrinsic_material_identity: false,
+    };
+  })];
 }
 
 export function applyGarmentColorConstancyIntegrationV1(region = {}, { mode = "shadow" } = {}) {
@@ -104,7 +135,7 @@ export function applyGarmentColorConstancyIntegrationV1(region = {}, { mode = "s
     intrinsic?.stable_material_identity &&
     intrinsic?.intrinsic_hex
   );
-  const publishablePalette = canPromote ? buildPublishableIntrinsicPalette(intrinsic, samples) : null;
+  const publishablePalette = canPromote ? buildPublishableIntrinsicPalette(intrinsic, samples, region) : null;
 
   return {
     ...region,
@@ -136,6 +167,7 @@ export function applyGarmentColorConstancyIntegrationV1(region = {}, { mode = "s
           customer_facing_palette_uses_intrinsic_material_identity_when_stable: true,
           same_material_light_shadow_variants_do_not_publish_as_separate_colors: true,
           independently_owned_chromatic_accents_survive_constancy: true,
+          exact_pixel_ratios_are_not_renormalized: true,
         },
       },
     },
