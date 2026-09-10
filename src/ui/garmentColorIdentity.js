@@ -69,9 +69,14 @@ function mergeDisplayColorFamilies(rows = []) {
   for (const row of rows) {
     const key = String(row.primaryLabel || row.hex || "unknown").trim().toLowerCase();
     const ratio = readColorRatio(row.rawColor);
+    const hasExactMeasurement = Number.isFinite(Number(row.rawColor?.pixel_count)) && (
+      Number.isFinite(Number(row.rawColor?.total_owned_pixel_count)) ||
+      Number.isFinite(Number(row.rawColor?.measured_ratio))
+    );
     const existing = groups.get(key);
     if (existing) {
       existing._displayRatio += ratio;
+      existing._hasExactMeasurement ||= hasExactMeasurement;
       if (ratio > existing._topRatio) {
         existing.hex = row.hex;
         existing.translation = row.translation;
@@ -80,7 +85,7 @@ function mergeDisplayColorFamilies(rows = []) {
       }
       continue;
     }
-    groups.set(key, { ...row, _displayRatio: ratio, _topRatio: ratio });
+    groups.set(key, { ...row, _displayRatio: ratio, _topRatio: ratio, _hasExactMeasurement: hasExactMeasurement });
   }
   return Array.from(groups.values());
 }
@@ -89,10 +94,14 @@ function normalizeDisplayPaletteRows(rows = []) {
   const mergedRows = mergeDisplayColorFamilies(rows);
   const totalRatio = mergedRows.reduce((sum, row) => sum + Number(row._displayRatio || 0), 0);
   return mergedRows
-    .map(({ _displayRatio, _topRatio, ...row }) => ({
+    .map(({ _displayRatio, _topRatio, _hasExactMeasurement, ...row }) => ({
       ...row,
-      percentage: totalRatio > 0 ? normalizeColorPercentage(_displayRatio / totalRatio) : null,
-      display_pct: totalRatio > 0 ? _displayRatio / totalRatio : null,
+      percentage: totalRatio > 0
+        ? normalizeColorPercentage(_hasExactMeasurement ? _displayRatio : _displayRatio / totalRatio)
+        : null,
+      display_pct: totalRatio > 0
+        ? (_hasExactMeasurement ? _displayRatio : _displayRatio / totalRatio)
+        : null,
     }))
     .sort((a, b) => Number(b.display_pct || 0) - Number(a.display_pct || 0));
 }
