@@ -85,3 +85,31 @@ test("non-upper regions are not modified", () => {
   const result = applyUpperGarmentPurityV1({ decodedImage: img, regions: [lower] });
   assert.deepEqual(result.regions[0], lower);
 });
+
+test("validated white shirt mask cannot be overwritten by a pink outerwear detector box", () => {
+  const img = image(100, 100, "#BE4175");
+  const protectedShirt = upperRegion({
+    dominant_hex: "#EFEDEE",
+    region_colors: [{
+      hex: "#EFEDEE",
+      pct: 1,
+      source: "sam_mask_interior",
+      ownership_state: "owned",
+      ownership_validated: true,
+    }],
+    color_debug: {
+      piece_color_ownership_v1: {
+        applied: true,
+        measurement_source: "sam_mask_interior",
+      },
+    },
+  });
+
+  const result = applyUpperGarmentPurityV1({ decodedImage: img, regions: [protectedShirt] });
+  const region = result.regions[0];
+  assert.equal(region.dominant_hex, "#EFEDEE");
+  assert.equal(region.region_colors[0].hex, "#EFEDEE");
+  assert.equal(region.region_colors.some((color) => color.hex === "#BE4175"), false);
+  assert.equal(region.color_debug.upper_garment_purity_v1.reason, "validated_mask_color_authority_preserved");
+  assert.equal(region.color_debug.garment_tone_stability_v1.reason, "validated_mask_color_authority_preserved");
+});
