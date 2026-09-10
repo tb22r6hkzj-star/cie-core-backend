@@ -192,6 +192,40 @@ test("semantic SAM garments publish their exclusive mask palette without a same-
   assert.equal(measured.region_colors.every((color) => color.ownership_validated === true), true);
 });
 
+test("target-conditioned masks validate unfamiliar garment names without a fixed vocabulary entry", () => {
+  const img = image();
+  const garmentBox = { x: 0.20, y: 0.12, width: 0.60, height: 0.70 };
+  const garmentMask = {
+    ...samRegion("sam_romper", "body_garment", garmentBox, "structured romper", [
+      { hex: "#315E72", pct: 1 },
+    ]),
+    target_conditioned_mask_v1: { applied: true, semantic_instance_key: "romper_1" },
+    mask_color_ownership_v1: { applied: true },
+  };
+
+  const result = applyPieceColorOwnershipV1({ decodedImage: img, regions: [garmentMask] });
+  assert.equal(result.regions[0].dominant_hex, "#315E72");
+  assert.equal(result.regions[0].color_debug.piece_color_ownership_v1.applied, true);
+  assert.equal(result.summary.validated_sam_region_count, 1);
+});
+
+test("target-conditioned accessory masks publish their own measured pixels", () => {
+  const img = image();
+  const pendantBox = { x: 0.46, y: 0.20, width: 0.08, height: 0.12 };
+  const pendantMask = {
+    ...samRegion("sam_pendant", "accessory_jewelry", pendantBox, "unusual pendant", [
+      { hex: "#C8C4BD", pct: 1 },
+    ]),
+    target_conditioned_mask_v1: { applied: true, semantic_instance_key: "pendant_1" },
+    mask_color_ownership_v1: { applied: true },
+  };
+
+  const result = applyPieceColorOwnershipV1({ decodedImage: img, regions: [pendantMask] });
+  assert.equal(result.regions[0].dominant_hex, "#C8C4BD");
+  assert.equal(result.regions[0].color_debug.piece_color_ownership_v1.target_type, "accessory");
+  assert.equal(result.regions[0].color_debug.piece_color_ownership_v1.measurement_source, "exclusive_sam_mask_pixels");
+});
+
 test("oversized accessory detections cannot carve away more than the ownership safety limit", () => {
   const img = image();
   const shirtBox = { x: 0.20, y: 0.12, width: 0.60, height: 0.48 };
