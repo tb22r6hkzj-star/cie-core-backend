@@ -139,7 +139,7 @@ export function buildTargetConditionedSegmentationPlanV1({ dinoRegions = [], sem
 
   return {
     version: "target_conditioned_segmentation_plan_v1",
-    targets: targets.slice(0, 12),
+    targets: targets.slice(0, 8),
     scene_graph: graph,
     doctrine: "understand_then_localize_then_mask_then_measure",
   };

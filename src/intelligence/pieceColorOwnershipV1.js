@@ -193,7 +193,7 @@ function isSemanticallyIdentifiedSamGarment(region = {}) {
   if (normalizeConfidence(region?.confidence) < MIN_SAM_VALIDATOR_CONFIDENCE) return false;
   const label = String(region?.segment_label || region?.label || "").trim();
   if (!label || /^segment_?\d+$/i.test(label)) return false;
-  return region?.target_conditioned_mask_v1?.applied === true || GARMENT_SEMANTIC_PATTERN.test(label);
+  return (region?.target_conditioned_mask_v1?.applied === true && region?.target_conditioned_mask_v1?.spatially_validated === true) || GARMENT_SEMANTIC_PATTERN.test(label);
 }
 
 function buildValidatedSamCandidates(targetRegion, targetBox, regions = [], boxes = new Map()) {

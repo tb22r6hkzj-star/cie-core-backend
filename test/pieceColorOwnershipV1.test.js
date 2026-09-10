@@ -199,7 +199,7 @@ test("target-conditioned masks validate unfamiliar garment names without a fixed
     ...samRegion("sam_romper", "body_garment", garmentBox, "structured romper", [
       { hex: "#315E72", pct: 1 },
     ]),
-    target_conditioned_mask_v1: { applied: true, semantic_instance_key: "romper_1" },
+    target_conditioned_mask_v1: { applied: true, spatially_validated: true, semantic_instance_key: "romper_1" },
     mask_color_ownership_v1: { applied: true },
   };
 
@@ -216,7 +216,7 @@ test("target-conditioned accessory masks publish their own measured pixels", () 
     ...samRegion("sam_pendant", "accessory_jewelry", pendantBox, "unusual pendant", [
       { hex: "#C8C4BD", pct: 1 },
     ]),
-    target_conditioned_mask_v1: { applied: true, semantic_instance_key: "pendant_1" },
+    target_conditioned_mask_v1: { applied: true, spatially_validated: true, semantic_instance_key: "pendant_1" },
     mask_color_ownership_v1: { applied: true },
   };
 
