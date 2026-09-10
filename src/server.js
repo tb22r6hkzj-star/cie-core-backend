@@ -7735,7 +7735,7 @@ async function runSamSegmentation(imageUrl, { timeoutMs = REPLICATE_SAM_TIMEOUT_
         predictionId: prediction?.id || createResp?.id || null,
         status: prediction?.status || "unknown",
         error: prediction?.error || null,
-        elapsedMs: Date.now() - startedAt,
+        elapsedMs: Date.now() - requestStartedAt,
       });
       return {
         enabled: true,
@@ -7763,7 +7763,7 @@ async function runSamSegmentation(imageUrl, { timeoutMs = REPLICATE_SAM_TIMEOUT_
     console.info("[SAM DEBUG] SAM segmentation succeeded", {
       regionCount: enrichedRegions.length,
       predictionId: prediction?.id || null,
-      elapsedMs: Date.now() - startedAt,
+      elapsedMs: Date.now() - requestStartedAt,
     });
 
     return {
