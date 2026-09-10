@@ -142,3 +142,37 @@ test("external shadow mode ceilings a separately configured assist mode", () => 
   assert.equal(resolveTargetedAccessoryReanalysisModeV1({ externalMode: "off", configuredMode: "assist" }), "off");
   assert.equal(resolveTargetedAccessoryReanalysisModeV1({ externalMode: "assist", configuredMode: "assist" }), "assist");
 });
+
+test("semantic eyewear mismatch receives one focused detector pass and stops once eyewear is published", () => {
+  const semantic = {
+    piece: "eyewear",
+    semantic_label: "glasses",
+    semantic_subtype: "eyeglasses",
+    instance_key: "eyewear_1",
+    semantic_confidence: 0.97,
+    action: "request_targeted_reanalysis",
+  };
+  const missing = buildTargetedAccessoryReanalysisPlanV1({
+    mode: "assist",
+    reconciliation: { candidates: [semantic] },
+    outfitAnalysis: { garment_zones: { zones: {} }, accessory_instances_v1: { instances: [] } },
+  });
+  assert.equal(missing.execution_allowed, true);
+  assert.equal(missing.detector_pass_budget, 1);
+  assert.deepEqual(missing.targets.map((target) => target.type), ["eyewear"]);
+  assert.equal(missing.query, "glasses. eyeglasses. eyewear.");
+
+  const recovered = filterTargetedAccessoryDetectionsV1({
+    plan: missing,
+    detections: [{ label: "glasses", confidence: 0.61, bbox: { x_min: 0.39, y_min: 0.06, x_max: 0.61, y_max: 0.16 } }],
+  });
+  assert.equal(recovered.accepted.length, 1);
+  assert.equal(recovered.accepted[0].targeted_type, "eyewear");
+
+  const satisfied = buildTargetedAccessoryReanalysisPlanV1({
+    mode: "assist",
+    reconciliation: { candidates: [semantic] },
+    outfitAnalysis: { garment_zones: { zones: { eyewear: { interpretation: "metallic", hex: "#A6A2A0" } } } },
+  });
+  assert.equal(satisfied.execution_allowed, false);
+});
