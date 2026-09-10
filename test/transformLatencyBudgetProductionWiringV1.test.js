@@ -80,4 +80,17 @@ test("Replicate provider deadlines include prediction creation and polling", () 
   }
 });
 
+
+test("SAM lifecycle telemetry uses its declared request clock", () => {
+  const samProviderSource = source.slice(
+    source.indexOf("async function runSamSegmentation"),
+    source.indexOf("function normalizeSamOutput")
+  );
+  assert.match(samProviderSource, /const requestStartedAt = Date\.now\(\);/);
+  assert.doesNotMatch(samProviderSource, /Date\.now\(\) - startedAt/);
+  assert.equal(
+    (samProviderSource.match(/Date\.now\(\) - requestStartedAt/g) || []).length,
+    2
+  );
+});
 // This file is intentionally part of the wiring workflow trigger set.
