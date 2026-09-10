@@ -49,6 +49,42 @@ export const OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1 = Object.freeze({
   },
 });
 
+export const OPENAI_SEGMENTATION_SCENE_SCHEMA_V1 = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  required: ["schema_version", "overall_confidence", "claims"],
+  properties: {
+    schema_version: { type: "string", enum: ["1"] },
+    overall_confidence: { type: "number" },
+    claims: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["action", "piece", "subtype", "instance_key", "visible_count", "component_of", "zone", "pattern", "material_cue", "layer_role", "overlaps_instance_keys", "occlusion", "unusual_detail", "segmentation_prompt", "reason", "confidence"],
+        properties: {
+          action: { type: "string", enum: ["support", "contradict", "request_targeted_reanalysis", "abstain"] },
+          piece: { type: ["string", "null"] },
+          subtype: { type: ["string", "null"] },
+          instance_key: { type: ["string", "null"] },
+          visible_count: { type: ["integer", "null"] },
+          component_of: { type: ["string", "null"] },
+          zone: { type: ["string", "null"] },
+          pattern: { type: ["string", "null"] },
+          material_cue: { type: ["string", "null"] },
+          layer_role: { type: "string", enum: ["inner", "middle", "outer", "standalone", "accessory", "unknown"] },
+          overlaps_instance_keys: { type: "array", items: { type: "string" } },
+          occlusion: { type: "string", enum: ["none", "partial", "heavy", "unknown"] },
+          unusual_detail: { type: ["string", "null"] },
+          segmentation_prompt: { type: ["string", "null"] },
+          reason: { type: ["string", "null"] },
+          confidence: { type: "number" },
+        },
+      },
+    },
+  },
+});
+
 function semanticPrompt(visionCoreEvidence = {}) {
   return [
     "You are a semantic observer inside VisionCore, not the final authority.",
@@ -68,8 +104,23 @@ function semanticPrompt(visionCoreEvidence = {}) {
   ].join("\n");
 }
 
-export function buildOpenAISemanticRequestV1({ imageUrl, visionCoreEvidence = {}, model = "gpt-5.6-luna" } = {}) {
+function segmentationScenePrompt(visionCoreEvidence = {}) {
+  return [
+    "You are VisionCore's semantic scene-understanding stage.",
+    "Inventory every clearly visible garment and each distinct fashion accessory as a separate stable instance.",
+    "Recognize unfamiliar garment types, layered or overlapping pieces, partial occlusion, and tiny or unusual fashion details.",
+    "Keep pendants, chains, earrings, watches, bracelets, rings, belts, bags, shoe hardware, and each visible garment separate.",
+    "Record component_of relationships, layer_role, overlaps_instance_keys, occlusion, pattern, and material cues.",
+    "Provide a short segmentation_prompt that identifies only the physical item and contains no color name.",
+    "Do not identify the person or infer protected, demographic, medical, religious, or socioeconomic traits.",
+    "Do not calculate or provide any hex, RGB, LAB, percentage, score, or publication decision. VisionCore measures pixels after masking.",
+    `VisionCore evidence: ${JSON.stringify(visionCoreEvidence)}`,
+  ].join("\n");
+}
+
+export function buildOpenAISemanticRequestV1({ imageUrl, visionCoreEvidence = {}, model = "gpt-5.6-luna", profile = "full" } = {}) {
   if (!imageUrl) throw new Error("VisionCore semantic observer requires imageUrl");
+  const sceneGraphProfile = profile === "segmentation_scene";
   return {
     model,
     store: false,
@@ -77,21 +128,21 @@ export function buildOpenAISemanticRequestV1({ imageUrl, visionCoreEvidence = {}
     input: [{
       role: "user",
       content: [
-        { type: "input_text", text: semanticPrompt(visionCoreEvidence) },
+        { type: "input_text", text: sceneGraphProfile ? segmentationScenePrompt(visionCoreEvidence) : semanticPrompt(visionCoreEvidence) },
         { type: "input_image", image_url: imageUrl, detail: "high" },
       ],
     }],
     text: {
       format: {
         type: "json_schema",
-        name: "visioncore_semantic_observation_v2",
+        name: sceneGraphProfile ? "visioncore_segmentation_scene_v1" : "visioncore_semantic_observation_v2",
         strict: true,
-        schema: OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1,
+        schema: sceneGraphProfile ? OPENAI_SEGMENTATION_SCENE_SCHEMA_V1 : OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1,
       },
     },
     // A complete garment, layered scene graph, and multi-accessory inventory
     // can be large because strict JSON must emit every required field.
-    max_output_tokens: 6000,
+    max_output_tokens: sceneGraphProfile ? 3600 : 6000,
   };
 }
 
@@ -129,6 +180,7 @@ export async function runOpenAISemanticObserverV1({
   fetchImpl = globalThis.fetch,
   cache = null,
   cacheKey = null,
+  profile = "full",
 } = {}) {
   const resolvedMode = normalizeExternalIntelligenceMode(mode);
   if (resolvedMode === "off") return { ok: true, skipped: true, reason: "external_intelligence_off", handoff: evaluateExternalSemanticHandoffV1({ mode: "off", visionCoreDecision }) };
@@ -136,7 +188,7 @@ export async function runOpenAISemanticObserverV1({
   if (cacheKey && cache?.has(cacheKey)) return { ...cache.get(cacheKey), cached: true };
   if (typeof fetchImpl !== "function") throw new Error("VisionCore semantic observer requires fetch");
 
-  const request = buildOpenAISemanticRequestV1({ imageUrl, visionCoreEvidence, model });
+  const request = buildOpenAISemanticRequestV1({ imageUrl, visionCoreEvidence, model, profile });
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), semanticTimeoutMs(timeoutMs));
   const startedAt = Date.now();
