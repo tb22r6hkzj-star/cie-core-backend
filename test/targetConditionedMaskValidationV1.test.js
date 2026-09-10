@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateTargetConditionedMaskRegionsV1 } from "../src/intelligence/targetConditionedMaskValidationV1.js";
+import {
+  validateTargetConditionedMaskMeasurementsV1,
+  validateTargetConditionedMaskRegionsV1,
+} from "../src/intelligence/targetConditionedMaskValidationV1.js";
 
 function region(id, zone, bbox, coverage) {
   return {
@@ -49,4 +52,30 @@ test("rejects masks without independent detector geometry", () => {
   });
   assert.equal(result.validated_count, 0);
   assert.ok(result.evaluations[0].reasons.includes("detector_box_missing"));
+});
+
+test("remeasurement rejects masks with too few exclusive owned pixels", () => {
+  const spatial = validateTargetConditionedMaskRegionsV1({
+    regions: [region("shoe", "footwear", { x: 0.3, y: 0.8, w: 0.2, h: 0.08 }, 0.016)],
+    plan: plan("shoe", "footwear", { x_min: 0.28, y_min: 0.78, x_max: 0.52, y_max: 0.9 }),
+  });
+  const result = validateTargetConditionedMaskMeasurementsV1({
+    validation: spatial,
+    regions: [{ ...spatial.regions[0], owned_pixel_count: 2 }],
+  });
+  assert.equal(result.validated_count, 0);
+  assert.ok(result.evaluations[0].reasons.includes("insufficient_owned_pixel_count"));
+});
+
+test("remeasurement preserves masks with enough exclusive pixels", () => {
+  const spatial = validateTargetConditionedMaskRegionsV1({
+    regions: [region("jacket", "outerwear", { x: 0.2, y: 0.1, w: 0.5, h: 0.4 }, 0.2)],
+    plan: plan("jacket", "outerwear", { x_min: 0.18, y_min: 0.08, x_max: 0.74, y_max: 0.55 }),
+  });
+  const result = validateTargetConditionedMaskMeasurementsV1({
+    validation: spatial,
+    regions: [{ ...spatial.regions[0], owned_pixel_count: 25000 }],
+  });
+  assert.equal(result.validated_count, 1);
+  assert.equal(result.evaluations[0].authority, "validated_spatial_and_pixel_mask");
 });
