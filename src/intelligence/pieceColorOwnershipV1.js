@@ -437,6 +437,62 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
     const targetZone = String(region?.zone || "");
     const isDinoTarget = DINO_SOURCE_TYPES.has(region?.source_type);
     const targetBox = boxes.get(region);
+    const isCanonicalSamGarment =
+      GARMENT_TARGET_ZONES.has(targetZone) &&
+      isSemanticallyIdentifiedSamGarment(region) &&
+      region?.mask_color_ownership_v1?.applied === true;
+    if (isCanonicalSamGarment) {
+      const validator = {
+        validator: "exclusive_sam_mask_pixel_membership_v1",
+        sam_region_id: region?.id || region?.region_id || null,
+        sam_segment_label: region?.segment_label || region?.label || null,
+        target_zone: targetZone,
+        validated: true,
+        authority_owner: "visioncore",
+        doctrine: "one_visible_pixel_has_one_winning_piece_owner",
+      };
+      const ownedCandidates = (Array.isArray(region?.region_colors) ? region.region_colors : [])
+        .map((color) => ({
+          ...color,
+          hex: safeHex(color?.hex),
+          source: "exclusive_sam_mask_pixels",
+          measurement_source: "exclusive_sam_mask_pixels",
+          ownership_state: "owned",
+          ownership_validated: true,
+          ownership_validation: validator,
+          confidence: normalizeConfidence(region?.confidence),
+          traceable_to_pixels: true,
+        }))
+        .filter((color) => !!color.hex);
+      const authority = selectMeasuredColorAuthorityV1(ownedCandidates);
+      const publishableColors = authority.publishable.map((color) => ({
+        ...color,
+        measurement_authority: authority.selected?.hex === color.hex ? "selected" : "supporting",
+      }));
+      if (!publishableColors.length) return region;
+      measuredRegionCount += 1;
+      validatedSamRegionCount += 1;
+      return {
+        ...region,
+        dominant_hex: publishableColors[0].hex,
+        region_colors: publishableColors,
+        color_debug: {
+          ...(region?.color_debug || {}),
+          piece_color_ownership_v1: {
+            applied: true,
+            target_type: "garment",
+            authority: "exclusive_mask_pixel_membership",
+            owned_dominant_hex: publishableColors[0].hex,
+            owned_region_colors: publishableColors,
+            ownership_claims: [],
+            sam_ownership_validators: [validator],
+            measurement_source: "exclusive_sam_mask_pixels",
+            measurement_authority_v1: authority,
+            doctrine: "one_visible_pixel_has_one_winning_piece_owner_then_publish",
+          },
+        },
+      };
+    }
     if (!ALL_TARGET_ZONES.has(targetZone) || !isDinoTarget || !targetBox) return region;
 
     const isGarmentTarget = GARMENT_TARGET_ZONES.has(targetZone);
@@ -594,7 +650,8 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
         target_zones: [...ALL_TARGET_ZONES],
         garment_target_zones: [...GARMENT_TARGET_ZONES],
         accessory_target_zones: [...ACCESSORY_TARGET_ZONES],
-        dino_targets_only: true,
+        dino_targets_only: false,
+        semantic_sam_garment_targets: true,
         minimum_piece_confidence: MIN_PIECE_CONFIDENCE,
         minimum_sam_validator_confidence: MIN_SAM_VALIDATOR_CONFIDENCE,
         minimum_sam_target_overlap: MIN_SAM_TARGET_OVERLAP,
@@ -615,6 +672,7 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
         dino_bbox_does_not_own_color_authority: true,
         generic_sam_masks_do_not_validate_ownership: true,
         validated_sam_mask_pixels_can_own_color_authority: true,
+        exclusive_sam_mask_pixels_are_direct_color_authority: true,
         nested_accessory_interior_stability_can_validate_ownership: true,
         unstable_accessory_measurements_must_abstain: true,
       },

@@ -3428,11 +3428,31 @@ function inferGarmentZones(normalizedColors = [], colorRoles = [], visualIntelli
         )
       : {};
 
+    const canonicalOwnedRegion = (isGarmentZoneKey(zoneKey) ? zoneRegions : [])
+      .filter((region) => region?.color_debug?.piece_color_ownership_v1?.applied === true)
+      .sort((a, b) => {
+        const aMask = a?.mask_color_ownership_v1?.applied === true ? 1 : 0;
+        const bMask = b?.mask_color_ownership_v1?.applied === true ? 1 : 0;
+        return bMask - aMask || Number(b?.confidence || 0) - Number(a?.confidence || 0);
+      })[0] || null;
+    const canonicalOwnedColors = canonicalOwnedRegion?.color_debug?.piece_color_ownership_v1?.owned_region_colors || [];
+
     zones[zoneKey] = {
       ...(zoneData || {}),
       ...zoneRead,
       signature_color: signatureColor,
       ...accessoryDisplayMetadata,
+      ...(canonicalOwnedColors.length ? {
+        canonical_color_authority_v1: {
+          applied: true,
+          zone: zoneKey,
+          region_id: canonicalOwnedRegion?.id || canonicalOwnedRegion?.region_id || null,
+          source: canonicalOwnedRegion?.color_debug?.piece_color_ownership_v1?.measurement_source || "validated_pixel_membership",
+          dominant_hex: safeHex(canonicalOwnedColors[0]?.hex || canonicalOwnedRegion?.dominant_hex || ""),
+          region_colors: canonicalOwnedColors,
+          invariant: "all_customer_facing_color_aliases_derive_from_one_owned_palette",
+        },
+      } : {}),
     };
 
     const headwearDebugValues = buildHeadwearDebugValues(zones[zoneKey]);
@@ -6544,7 +6564,43 @@ function createMaskStrengthReader(maskImage = {}) {
   return (idx) => resolveOpaqueMaskStrengthV1(data[idx], data[idx + 1], data[idx + 2], backgroundIntensity);
 }
 
-function extractMaskedRegionColors(baseImage, maskImage, limit = 6) {
+function maskOwnsPixel(maskImage, x, y, targetWidth, targetHeight, strengthReader = null) {
+  const width = Number(maskImage?.width || 0);
+  const height = Number(maskImage?.height || 0);
+  if (!width || !height || !targetWidth || !targetHeight) return false;
+  const mx = Math.max(0, Math.min(width - 1, Math.floor((x / targetWidth) * width)));
+  const my = Math.max(0, Math.min(height - 1, Math.floor((y / targetHeight) * height)));
+  const readStrength = strengthReader || createMaskStrengthReader(maskImage);
+  return readStrength((my * width + mx) * 4) >= 25;
+}
+
+function samOwnershipPriority(region = {}) {
+  const priorities = {
+    accessory_jewelry: 70,
+    bag: 65,
+    outerwear: 60,
+    footwear: 55,
+    upper_garment: 50,
+    lower_garment: 50,
+    body_garment: 40,
+  };
+  return Number(priorities[String(region?.zone || "")] || 20);
+}
+
+function competingMaskWins(target = {}, competitor = {}) {
+  const targetPriority = samOwnershipPriority(target.region);
+  const competitorPriority = samOwnershipPriority(competitor.region);
+  if (competitorPriority !== targetPriority) return competitorPriority > targetPriority;
+  const targetConfidence = Number(target.region?.confidence || 0);
+  const competitorConfidence = Number(competitor.region?.confidence || 0);
+  if (competitorConfidence !== targetConfidence) return competitorConfidence > targetConfidence;
+  const targetArea = Number(target.geometry?.pixel_count || Number.MAX_SAFE_INTEGER);
+  const competitorArea = Number(competitor.geometry?.pixel_count || Number.MAX_SAFE_INTEGER);
+  if (competitorArea !== targetArea) return competitorArea < targetArea;
+  return String(competitor.region?.id || "") < String(target.region?.id || "");
+}
+
+function extractMaskedRegionColors(baseImage, maskImage, limit = 6, ownership = {}) {
   const baseW = Number(baseImage?.width || 0);
   const baseH = Number(baseImage?.height || 0);
   const maskW = Number(maskImage?.width || 0);
@@ -6559,6 +6615,14 @@ function extractMaskedRegionColors(baseImage, maskImage, limit = 6) {
     for (let mx = 0; mx < maskW; mx += 1) {
       const mIdx = (my * maskW + mx) * 4;
       if (maskStrengthAt(mIdx) < 25) continue;
+
+      const competitors = Array.isArray(ownership?.competitors) ? ownership.competitors : [];
+      const target = ownership?.target || null;
+      const claimedByHigherAuthority = target && competitors.some((competitor) =>
+        competingMaskWins(target, competitor) &&
+        maskOwnsPixel(competitor.maskImage, mx, my, maskW, maskH, competitor.strengthReader)
+      );
+      if (claimedByHigherAuthority) continue;
 
       const bx = Math.max(0, Math.min(baseW - 1, Math.floor((mx / maskW) * baseW)));
       const by = Math.max(0, Math.min(baseH - 1, Math.floor((my / maskH) * baseH)));
@@ -7307,29 +7371,53 @@ async function enrichSamRegionsWithMaskedColors(imageUrl, regions = []) {
     return regions;
   }
 
-  return Promise.all(
-    regions.map(async (region) => {
-      if (!region?.mask_url) return region;
+  const decodedMasks = await Promise.all(regions.map(async (region) => {
+    if (!region?.mask_url) return null;
+    try {
+      const maskBuffer = await fetchImageBuffer(region.mask_url);
+      const maskImage = decodeImageRgba(maskBuffer, region.mask_url);
+      return {
+        region,
+        maskImage,
+        geometry: extractMaskGeometry(maskImage),
+        strengthReader: createMaskStrengthReader(maskImage),
+      };
+    } catch {
+      return null;
+    }
+  }));
+  const availableMasks = decodedMasks.filter(Boolean);
 
-      try {
-        const maskBuffer = await fetchImageBuffer(region.mask_url);
-        const maskImage = decodeImageRgba(maskBuffer, region.mask_url);
-        const regionColors = extractMaskedRegionColors(baseImage, maskImage, 6);
-        const maskGeometry = extractMaskGeometry(maskImage);
-        const dominantHex = safeHex(regionColors[0]?.hex || region?.dominant_hex || "");
+  return regions.map((region, index) => {
+    const decoded = decodedMasks[index];
+    if (!decoded) return region;
+    const competitors = availableMasks.filter((candidate) =>
+      candidate !== decoded &&
+      candidate.region?.zone &&
+      candidate.region.zone !== "unknown" &&
+      candidate.region.zone !== region?.zone
+    );
+    const regionColors = extractMaskedRegionColors(baseImage, decoded.maskImage, 6, {
+      target: decoded,
+      competitors,
+    });
+    const dominantHex = safeHex(regionColors[0]?.hex || region?.dominant_hex || "");
 
-        return {
-          ...region,
-          coverage: round2(Math.max(Number(region?.coverage || 0), Number(maskGeometry?.coverage || 0))),
-          dominant_hex: dominantHex || region?.dominant_hex || null,
-          region_colors: regionColors,
-          mask_geometry: maskGeometry,
-        };
-      } catch {
-        return region;
-      }
-    })
-  );
+    return {
+      ...region,
+      coverage: round2(Math.max(Number(region?.coverage || 0), Number(decoded.geometry?.coverage || 0))),
+      dominant_hex: dominantHex || region?.dominant_hex || null,
+      region_colors: regionColors,
+      mask_geometry: decoded.geometry,
+      mask_color_ownership_v1: {
+        applied: true,
+        authority: "exclusive_mask_pixel_membership",
+        competing_mask_count: competitors.length,
+        priority: samOwnershipPriority(region),
+        invariant: "one_visible_pixel_has_one_winning_piece_owner",
+      },
+    };
+  });
 }
 
 async function runGroundingDinoDetection(imageUrl, query = DEFAULT_GROUNDING_DINO_QUERY, { timeoutMs = REPLICATE_SAM_TIMEOUT_MS } = {}) {
@@ -8854,4 +8942,11 @@ if (process.env.NODE_ENV !== "test") {
 }
 
 
-export { buildOutfitAnalysis, inferZoneColorRead, inferGarmentZones, MARKET_PERCEPTION_V6_MODE, extractDinoBboxRegionColors };
+export {
+  buildOutfitAnalysis,
+  inferZoneColorRead,
+  inferGarmentZones,
+  MARKET_PERCEPTION_V6_MODE,
+  extractDinoBboxRegionColors,
+  extractMaskedRegionColors,
+};

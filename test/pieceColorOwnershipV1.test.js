@@ -172,6 +172,26 @@ test("generic unlabeled SAM masks cannot validate garment ownership", () => {
   assert.equal(measured.color_debug.piece_color_ownership_v1.sam_ownership_validators.length, 0);
 });
 
+test("semantic SAM garments publish their exclusive mask palette without a same-zone DINO region", () => {
+  const img = image();
+  const shirtBox = { x: 0.20, y: 0.12, width: 0.60, height: 0.48 };
+  const shirtMask = {
+    ...samRegion("sam_shirt", "upper_garment", shirtBox, "shirt", [
+      { hex: "#EFEDEE", pct: 0.84 },
+      { hex: "#E15F9E", pct: 0.16 },
+    ]),
+    mask_color_ownership_v1: { applied: true },
+  };
+
+  const result = applyPieceColorOwnershipV1({ decodedImage: img, regions: [shirtMask] });
+  const measured = result.regions[0];
+
+  assert.equal(measured.dominant_hex, "#EFEDEE");
+  assert.equal(measured.color_debug.piece_color_ownership_v1.applied, true);
+  assert.equal(measured.color_debug.piece_color_ownership_v1.measurement_source, "exclusive_sam_mask_pixels");
+  assert.equal(measured.region_colors.every((color) => color.ownership_validated === true), true);
+});
+
 test("oversized accessory detections cannot carve away more than the ownership safety limit", () => {
   const img = image();
   const shirtBox = { x: 0.20, y: 0.12, width: 0.60, height: 0.48 };

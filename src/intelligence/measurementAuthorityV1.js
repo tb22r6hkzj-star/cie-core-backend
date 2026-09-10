@@ -1,6 +1,7 @@
 import chroma from "chroma-js";
 
 const SOURCE_PRIORITY = {
+  exclusive_sam_mask_pixels: 120,
   accessory_positive_mask_pixels: 110,
   sam_mask_interior: 100,
   sam_mask: 95,
@@ -103,7 +104,7 @@ function normalizeMeasurement(candidate = {}) {
   const traceable = Boolean(
     candidate?.traceable_to_pixels === true ||
     pixelCount > 0 ||
-    ["accessory_positive_mask_pixels", "sam_mask_interior", "sam_mask", "owned_interior_pixels", "dino_bbox_interior", "dino_bbox"].includes(source)
+    ["exclusive_sam_mask_pixels", "accessory_positive_mask_pixels", "sam_mask_interior", "sam_mask", "owned_interior_pixels", "dino_bbox_interior", "dino_bbox"].includes(source)
   );
 
   const positivelyOwned = ["owned", "outfit", "positive", "confirmed"].includes(ownershipState);

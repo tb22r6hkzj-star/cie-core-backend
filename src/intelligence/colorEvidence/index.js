@@ -177,6 +177,13 @@ function applyV3PublishedColor(zone, publication) {
   return true;
 }
 
+function hasCanonicalOwnedPalette(region = {}) {
+  const ownership = region?.color_debug?.piece_color_ownership_v1;
+  return ownership?.applied === true &&
+    Array.isArray(ownership?.owned_region_colors) &&
+    ownership.owned_region_colors.length > 0;
+}
+
 export function attachColorEvidenceToZones({ zones = {}, regions = [], decodedImage = null } = {}) {
   const out = { ...zones };
   for (const zoneKey of ["upper_garment", "lower_garment", "body_garment", "outerwear"]) {
@@ -188,7 +195,10 @@ export function attachColorEvidenceToZones({ zones = {}, regions = [], decodedIm
       primary_color: sourceZone?.primary_color ? { ...sourceZone.primary_color } : sourceZone?.primary_color,
     };
     const candidates = regions.filter((r) => r?.zone === zoneKey);
-    const region = candidates.sort((a, b) => Number(b?.confidence || 0) - Number(a?.confidence || 0))[0];
+    const region = candidates.sort((a, b) => {
+      const authorityDelta = Number(hasCanonicalOwnedPalette(b)) - Number(hasCanonicalOwnedPalette(a));
+      return authorityDelta || Number(b?.confidence || 0) - Number(a?.confidence || 0);
+    })[0];
     const bbox = region?.bounding_box || region?.bbox || region?.mask_geometry?.bbox;
     const evidence = analyzeRegionColorEvidence({ decodedImage, bbox, expectedHex: zone?.hex || zone?.dominant_color?.hex });
     const clusters = buildV3RegionClusters(region, zone);
@@ -199,7 +209,8 @@ export function attachColorEvidenceToZones({ zones = {}, regions = [], decodedIm
       currentResolution: getCurrentZoneResolution(zone),
     });
 
-    const published = applyV3PublishedColor(zone, publication);
+    const canonicalAuthorityLocked = hasCanonicalOwnedPalette(region);
+    const published = canonicalAuthorityLocked ? false : applyV3PublishedColor(zone, publication);
     const evidenceWithV3 = {
       ...evidence,
       color_evidence_v3: publication.fusion,
@@ -209,6 +220,7 @@ export function attachColorEvidenceToZones({ zones = {}, regions = [], decodedIm
         source: publication.source,
         hex: publication.hex,
         applied_to_zone: published,
+        blocked_by_canonical_ownership: canonicalAuthorityLocked,
       },
     };
 
@@ -222,6 +234,7 @@ export function attachColorEvidenceToZones({ zones = {}, regions = [], decodedIm
         source: publication.source,
         hex: publication.hex,
         applied_to_zone: published,
+        blocked_by_canonical_ownership: canonicalAuthorityLocked,
       },
       scene_context_candidates: evidence.scene_context_candidates || [],
     };
