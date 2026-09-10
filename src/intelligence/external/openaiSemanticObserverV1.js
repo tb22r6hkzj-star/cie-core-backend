@@ -89,9 +89,9 @@ export function buildOpenAISemanticRequestV1({ imageUrl, visionCoreEvidence = {}
         schema: OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1,
       },
     },
-    // A complete garment plus multi-accessory inventory can exceed 1,200
-    // tokens and truncate otherwise valid strict JSON.
-    max_output_tokens: 2400,
+    // A complete garment, layered scene graph, and multi-accessory inventory
+    // can be large because strict JSON must emit every required field.
+    max_output_tokens: 6000,
   };
 }
 
@@ -164,7 +164,16 @@ export async function runOpenAISemanticObserverV1({
     }
     const payload = await response.json();
     failureStage = "response_parse";
-    const raw = JSON.parse(responseText(payload) || "{}");
+    let raw;
+    try {
+      raw = JSON.parse(responseText(payload) || "{}");
+    } catch (error) {
+      error.providerErrorCode = String(
+        payload?.incomplete_details?.reason || (payload?.status === "incomplete" ? "response_incomplete" : "invalid_structured_output")
+      ).slice(0, 80);
+      error.providerErrorType = "response_parse_error";
+      throw error;
+    }
     failureStage = "observation_sanitize";
     const observation = sanitizeExternalSemanticObservation({ provider: "openai", model, ...raw });
     const estimatedCostUsd = estimateModelCost(model, payload?.usage);
