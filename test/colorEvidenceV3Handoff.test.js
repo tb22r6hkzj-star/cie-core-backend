@@ -153,3 +153,33 @@ test("market regression: finalized green lower garment remains the consumer prim
   assert.equal(consumer.hex, "#4E604F");
   assert.notEqual(consumer.source, "local_cluster_fallback");
 });
+
+test("V3 remains diagnostic and cannot overwrite canonical owned mask colors", () => {
+  const zones = {
+    upper_garment: {
+      hex: "#EFEDEE",
+      dominant_color: { hex: "#EFEDEE" },
+      primary_color: { hex: "#EFEDEE" },
+      confidence: 92,
+      publication_decision: "publish",
+    },
+  };
+  const ownedRegion = {
+    ...region("upper_garment", "#D92975", 0.8),
+    color_debug: { piece_color_ownership_v1: {
+      applied: true,
+      owned_region_colors: [{ hex: "#EFEDEE", pct: 1, ownership_validated: true }],
+    } },
+  };
+
+  const attached = attachColorEvidenceToZones({
+    zones,
+    regions: [ownedRegion],
+    decodedImage: solidImage("#D92975"),
+  });
+
+  assert.equal(attached.upper_garment.hex, "#EFEDEE");
+  assert.equal(attached.upper_garment.primary_color.hex, "#EFEDEE");
+  assert.equal(attached.upper_garment.color_publication_v3.applied_to_zone, false);
+  assert.equal(attached.upper_garment.color_publication_v3.blocked_by_canonical_ownership, true);
+});
