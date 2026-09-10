@@ -188,6 +188,13 @@ function mergeClusters(sampled) {
     }));
 }
 
+function hasValidatedMaskColorAuthority(region = {}) {
+  const ownership = region?.color_debug?.piece_color_ownership_v1;
+  return ownership?.applied === true &&
+    ownership?.measurement_source === "sam_mask_interior" &&
+    (region?.region_colors || []).some((color) => color?.ownership_validated === true);
+}
+
 export function applyLowerGarmentPurityV2({ decodedImage = null, regions = [] } = {}) {
   if (!decodedImage?.data || !Array.isArray(regions) || !regions.length) {
     return {
@@ -203,6 +210,19 @@ export function applyLowerGarmentPurityV2({ decodedImage = null, regions = [] } 
   const out = regions.map((region) => {
     if (String(region?.zone || "") !== LOWER_ZONE) return region;
     if (!DINO_SOURCE_TYPES.has(region?.source_type)) return region;
+    if (hasValidatedMaskColorAuthority(region)) {
+      return {
+        ...region,
+        color_debug: {
+          ...(region?.color_debug || {}),
+          lower_garment_purity_v2: {
+            applied: false,
+            reason: "validated_mask_color_authority_preserved",
+            authority: "sam_mask_interior",
+          },
+        },
+      };
+    }
     const bbox = normalizeBox(region, width, height);
     if (!bbox) return region;
 
