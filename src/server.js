@@ -662,11 +662,23 @@ function isGarmentZoneKey(zoneKey) {
 function compactColorRead(color) {
   const safe = safeHex(color?.hex || color?.base);
   if (!safe) return null;
+  const pixelCount = Number(color?.pixel_count);
+  const totalOwnedPixelCount = Number(color?.total_owned_pixel_count);
+  const measuredRatio = Number(color?.measured_ratio);
+  const exactRatio = Number.isFinite(pixelCount) && pixelCount >= 0 && Number.isFinite(totalOwnedPixelCount) && totalOwnedPixelCount > 0
+    ? Math.max(0, Math.min(1, pixelCount / totalOwnedPixelCount))
+    : Number.isFinite(measuredRatio) && measuredRatio >= 0
+      ? normalizeColorPct(measuredRatio)
+      : null;
   const read = {
     hex: safe,
     name: color?.name || getColorName(safe),
-    pct: round2(color?.pct || 0),
+    pct: exactRatio ?? round2(color?.pct || 0),
   };
+  for (const key of ["measured_ratio", "pixel_count", "total_owned_pixel_count"]) {
+    const value = Number(color?.[key]);
+    if (Number.isFinite(value)) read[key] = value;
+  }
   if (color?.display_pct !== undefined) {
     read.display_pct = round2(normalizeColorPct(color.display_pct));
     read.percentage = formatColorPct(read.display_pct);
@@ -886,7 +898,7 @@ function mergeColorSummaryFamilies(colors = []) {
         : 0;
       return withColorIdentity({
         ...color,
-        display_pct: round2(displayPct),
+        display_pct: _hasExactMeasurement ? displayPct : round2(displayPct),
         percentage: formatColorPct(displayPct),
       });
     })
@@ -899,6 +911,7 @@ function mergeColorReadSummaryFamilies(colors = []) {
 
 function mergeClusterSummaryFamilies(clusters = []) {
   return mergeColorSummaryFamilies((clusters || []).map((c) => ({
+    ...c,
     hex: c?.base || c?.hex,
     name: c?.name || getDominantClusterInputName(c) || getColorSummaryName(c),
     pct: c?.pct,
@@ -2241,27 +2254,36 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
   if (preservedAccessoryColor) {
     displayLabel = preservedAccessoryColor.name;
   }
+  const summaryColorReadClusters = garmentPublicationAuthority.applied
+    ? mergeColorSummaryFamilies(regionColors)
+    : mergeClusterSummaryFamilies(colorReadClusters);
+  const authoritativeGarmentPrimary = garmentPublicationAuthority.applied
+    ? summaryColorReadClusters[0] || null
+    : null;
   const dominantColor = preservedAccessoryColor || withColorIdentity({
-    hex: dominantReadCluster.base,
-    name: getColorName(dominantReadCluster.base),
-    pct: round2(dominantReadCluster.pct),
+    ...(authoritativeGarmentPrimary || {}),
+    hex: authoritativeGarmentPrimary?.hex || dominantReadCluster.base,
+    name: authoritativeGarmentPrimary?.name || getColorName(dominantReadCluster.base),
+    pct: authoritativeGarmentPrimary?.pct ?? round2(dominantReadCluster.pct),
   });
-  const summaryColorReadClusters = mergeClusterSummaryFamilies(colorReadClusters);
   const supportColors = summaryColorReadClusters.slice(1, 4).map((c) => withColorIdentity({
+    ...c,
     hex: c.hex,
     name: c.name,
-    pct: round2(c.pct),
+    pct: c.pct,
   }));
   const accentColors = summaryColorReadClusters.slice(4, 6).map((c) => withColorIdentity({
+    ...c,
     hex: c.hex,
     name: c.name,
-    pct: round2(c.pct),
+    pct: c.pct,
   }));
   const summaryPrimaryColor = preservedAccessoryColor || (summaryColorReadClusters[0]
     ? withColorIdentity({
+        ...summaryColorReadClusters[0],
         hex: summaryColorReadClusters[0].hex,
         name: summaryColorReadClusters[0].name,
-        pct: round2(summaryColorReadClusters[0].pct),
+        pct: summaryColorReadClusters[0].pct,
       })
     : dominantColor);
   const rawDinoPrimaryColor = useRawDinoMulticolorRead
