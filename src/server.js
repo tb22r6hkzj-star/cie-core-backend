@@ -49,7 +49,10 @@ import { buildAccessoryInstancesV1 } from "./intelligence/accessoryInstancesV1.j
 import { attachColorEvidenceToZones } from "./intelligence/colorEvidence/index.js";
 import { applyPieceColorOwnershipV1 } from "./intelligence/pieceColorOwnershipV1.js";
 import { buildTargetConditionedSegmentationPlanV1 } from "./intelligence/semanticMaskOrchestrationV1.js";
-import { validateTargetConditionedMaskRegionsV1 } from "./intelligence/targetConditionedMaskValidationV1.js";
+import {
+  validateTargetConditionedMaskMeasurementsV1,
+  validateTargetConditionedMaskRegionsV1,
+} from "./intelligence/targetConditionedMaskValidationV1.js";
 import { applyLowerGarmentPurityV2 } from "./intelligence/lowerGarmentPurityV2.js";
 import { applyUpperGarmentPurityV1 } from "./intelligence/upperGarmentPurityV1.js";
 import { buildPublishedGarmentZonesV2 } from "./intelligence/publishedGarmentZonesV2.js";
@@ -7887,6 +7890,7 @@ async function runTargetConditionedSegmentation(imageUrl, plan, { timeoutMs = 16
     reason: regions.length ? null : results.map((result) => result?.reason).filter(Boolean).join("; ") || "no_target_masks",
     regions,
     plan,
+    measurement_image_url: imageUrl,
     results: results.map((result) => ({
       ok: !!result?.ok,
       reason: result?.reason || null,
@@ -8143,7 +8147,14 @@ async function analyzeGhostColors(ghostUrl, {
     sam = await runSamSegmentation(ghostUrl, { timeoutMs: fallbackTimeoutMs });
   }
   if (sam?.results) {
-    const validation = validateTargetConditionedMaskRegionsV1({ regions: sam?.regions || [], plan: segmentationPlan });
+    const spatialValidation = validateTargetConditionedMaskRegionsV1({ regions: sam?.regions || [], plan: segmentationPlan });
+    const remeasuredRegions = spatialValidation.validated_count
+      ? await enrichSamRegionsWithMaskedColors(sam?.measurement_image_url || ghostUrl, spatialValidation.regions)
+      : [];
+    const validation = validateTargetConditionedMaskMeasurementsV1({
+      validation: spatialValidation,
+      regions: remeasuredRegions,
+    });
     sam = {
       ...sam,
       ok: validation.validated_count > 0,

@@ -9,6 +9,17 @@ const ZONE_COVERAGE_BOUNDS = Object.freeze({
   bag: [0.0001, 0.35],
 });
 
+const MIN_OWNED_PIXEL_COUNT = Object.freeze({
+  upper_garment: 100,
+  lower_garment: 100,
+  body_garment: 100,
+  outerwear: 100,
+  footwear: 20,
+  accessory_jewelry: 8,
+  belt: 10,
+  bag: 20,
+});
+
 function normalizedBox(box = null) {
   if (!box) return null;
   const x = Number(box.x ?? box.x_min ?? box.left);
@@ -95,5 +106,44 @@ export function validateTargetConditionedMaskRegionsV1({ regions = [], plan = {}
     evaluations,
     validated_count: validatedRegions.length,
     rejected_count: evaluations.length - validatedRegions.length,
+  };
+}
+
+export function validateTargetConditionedMaskMeasurementsV1({ validation = {}, regions = [] } = {}) {
+  const measuredById = new Map((Array.isArray(regions) ? regions : []).map((region) => [String(region?.id || ""), region]));
+  const evaluations = (Array.isArray(validation?.evaluations) ? validation.evaluations : []).map((evaluation) => {
+    const region = measuredById.get(String(evaluation?.region_id || "")) || null;
+    const measuredPixelCount = Number(region?.owned_pixel_count || region?.mask_color_ownership_v1?.measured_pixel_count || 0);
+    const minimumOwnedPixelCount = Number(MIN_OWNED_PIXEL_COUNT[evaluation?.zone] || 20);
+    const insufficient = evaluation?.validated === true && measuredPixelCount < minimumOwnedPixelCount;
+    return {
+      ...evaluation,
+      validated: evaluation?.validated === true && !insufficient,
+      reasons: insufficient ? [...(evaluation?.reasons || []), "insufficient_owned_pixel_count"] : (evaluation?.reasons || []),
+      measured_pixel_count: measuredPixelCount,
+      minimum_owned_pixel_count: minimumOwnedPixelCount,
+      authority: evaluation?.validated === true && !insufficient ? "validated_spatial_and_pixel_mask" : "rejected_before_pixel_authority",
+    };
+  });
+  const acceptedIds = new Set(evaluations.filter((evaluation) => evaluation.validated).map((evaluation) => String(evaluation.region_id)));
+  const acceptedRegions = (Array.isArray(regions) ? regions : [])
+    .filter((region) => acceptedIds.has(String(region?.id || "")))
+    .map((region) => {
+      const evaluation = evaluations.find((row) => String(row.region_id) === String(region?.id || ""));
+      return {
+        ...region,
+        target_conditioned_mask_v1: {
+          ...(region?.target_conditioned_mask_v1 || {}),
+          spatially_validated: true,
+          spatial_validation: evaluation,
+        },
+      };
+    });
+  return {
+    version: "target_conditioned_mask_validation_v1",
+    regions: acceptedRegions,
+    evaluations,
+    validated_count: acceptedRegions.length,
+    rejected_count: evaluations.length - acceptedRegions.length,
   };
 }
