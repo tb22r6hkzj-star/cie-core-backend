@@ -188,12 +188,12 @@ function expandBox(box, targetBox, amount = 0.008) {
 }
 
 function isSemanticallyIdentifiedSamGarment(region = {}) {
-  if (region?.source_type !== "sam_segment" || !GARMENT_TARGET_ZONES.has(String(region?.zone || ""))) return false;
+  if (region?.source_type !== "sam_segment" || !ALL_TARGET_ZONES.has(String(region?.zone || ""))) return false;
   if (!region?.mask_url || !region?.mask_geometry) return false;
   if (normalizeConfidence(region?.confidence) < MIN_SAM_VALIDATOR_CONFIDENCE) return false;
   const label = String(region?.segment_label || region?.label || "").trim();
   if (!label || /^segment_?\d+$/i.test(label)) return false;
-  return GARMENT_SEMANTIC_PATTERN.test(label);
+  return region?.target_conditioned_mask_v1?.applied === true || GARMENT_SEMANTIC_PATTERN.test(label);
 }
 
 function buildValidatedSamCandidates(targetRegion, targetBox, regions = [], boxes = new Map()) {
@@ -438,7 +438,7 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
     const isDinoTarget = DINO_SOURCE_TYPES.has(region?.source_type);
     const targetBox = boxes.get(region);
     const isCanonicalSamGarment =
-      GARMENT_TARGET_ZONES.has(targetZone) &&
+      ALL_TARGET_ZONES.has(targetZone) &&
       isSemanticallyIdentifiedSamGarment(region) &&
       region?.mask_color_ownership_v1?.applied === true;
     if (isCanonicalSamGarment) {
@@ -480,7 +480,7 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
           ...(region?.color_debug || {}),
           piece_color_ownership_v1: {
             applied: true,
-            target_type: "garment",
+            target_type: ACCESSORY_TARGET_ZONES.has(targetZone) ? "accessory" : "garment",
             authority: "exclusive_mask_pixel_membership",
             owned_dominant_hex: publishableColors[0].hex,
             owned_region_colors: publishableColors,

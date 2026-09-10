@@ -11,10 +11,24 @@ test("transform route uses total latency budget and capped Pixelcut timeout", ()
   assert.match(source, /providerTimeoutMs\(\{ requestedMs: PIXELCUT_TIMEOUT_MS, maximumMs: 18000 \}\)/);
 });
 
-test("SAM starts in parallel with DINO", () => {
-  assert.match(source, /requestedMs: 30000, maximumMs: 30000/);
-  assert.match(source, /const samPromise = runSamSegmentation\(ghostUrl, \{ timeoutMs: primarySamTimeoutMs \}\);/);
-  assert.match(source, /const sam = await samPromise;/);
+test("semantic understanding starts early and target-conditioned masks follow localization", () => {
+  assert.match(source, /const earlyExternalSemanticPromise = runOpenAISemanticObserverV1\(\{/);
+  assert.match(source, /semanticObservationPromise: earlyExternalSemanticPromise/);
+  assert.match(source, /buildTargetConditionedSegmentationPlanV1\(\{/);
+  assert.match(source, /runTargetConditionedSegmentation\(ghostUrl, segmentationPlan/);
+  assert.doesNotMatch(source, /const samPromise = runSamSegmentation\(ghostUrl/);
+});
+
+test("target-conditioned masks stay color-neutral and publish only measured mask pixels", () => {
+  const targetProvider = source.slice(
+    source.indexOf("async function runTargetConditionedSamMask"),
+    source.indexOf("async function runTargetConditionedSegmentation")
+  );
+  assert.match(targetProvider, /mask_prompt: String\(target\?\.prompt/);
+  assert.match(targetProvider, /const maskUrl = outputs\[2\]/);
+  assert.match(targetProvider, /external_color_authority: false/);
+  assert.match(source, /authority: "exclusive_mask_pixel_membership"/);
+  assert.match(source, /transform_latency_budget_exhausted_before_target_segmentation/);
 });
 
 test("optional external intelligence and accessory escalation obey remaining budget", () => {
@@ -56,7 +70,7 @@ test("response debug exposes transform latency budget snapshot", () => {
 });
 
 test("primary DINO and split YOLO zero-result fallback lanes share the transform budget", () => {
-  assert.match(source, /analyzeGhostColors\(ghostUrl, \{ latencyBudget: transformLatencyBudget \}\)/);
+  assert.match(source, /analyzeGhostColors\(ghostUrl, \{[\s\S]*?latencyBudget: transformLatencyBudget,[\s\S]*?semanticObservationPromise: earlyExternalSemanticPromise/);
   assert.match(source, /requestedMs: 18000, maximumMs: 18000/);
   assert.match(source, /!dinoDetections\.length && latencyBudget\?\.canRun\?\.\(8000\)/);
   assert.match(source, /requestedMs: 12000, maximumMs: 12000/);
@@ -84,7 +98,7 @@ test("Replicate provider deadlines include prediction creation and polling", () 
 test("SAM lifecycle telemetry uses its declared request clock", () => {
   const samProviderSource = source.slice(
     source.indexOf("async function runSamSegmentation"),
-    source.indexOf("function normalizeSamOutput")
+    source.indexOf("async function runTargetConditionedSamMask")
   );
   assert.match(samProviderSource, /const requestStartedAt = Date\.now\(\);/);
   assert.doesNotMatch(samProviderSource, /Date\.now\(\) - startedAt/);

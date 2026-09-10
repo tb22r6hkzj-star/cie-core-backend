@@ -48,6 +48,7 @@ import { analyzePerceptionV6 } from "./intelligence/perceptionV6/index.js";
 import { buildAccessoryInstancesV1 } from "./intelligence/accessoryInstancesV1.js";
 import { attachColorEvidenceToZones } from "./intelligence/colorEvidence/index.js";
 import { applyPieceColorOwnershipV1 } from "./intelligence/pieceColorOwnershipV1.js";
+import { buildTargetConditionedSegmentationPlanV1 } from "./intelligence/semanticMaskOrchestrationV1.js";
 import { applyLowerGarmentPurityV2 } from "./intelligence/lowerGarmentPurityV2.js";
 import { applyUpperGarmentPurityV1 } from "./intelligence/upperGarmentPurityV1.js";
 import { buildPublishedGarmentZonesV2 } from "./intelligence/publishedGarmentZonesV2.js";
@@ -6069,6 +6070,8 @@ const DEFAULT_REPLICATE_SAM_VERSION =
   process.env.REPLICATE_SAM_VERSION ||
   "b88dc2ea8f814e5f4af2bac79f2414079800b5035b065d4eab99c857ab67e125";
 const DEFAULT_REPLICATE_SAM_MODEL = process.env.REPLICATE_SAM_MODEL || "meta/sam-2";
+const TARGET_CONDITIONED_SAM_VERSION = process.env.REPLICATE_TARGET_CONDITIONED_SAM_VERSION ||
+  "ee871c19efb1941f55f66a3d7d960428c8a5afcb77449547fe8e5a3ab9ebc21c";
 const DEFAULT_REPLICATE_GROUNDING_DINO_VERSION =
   process.env.REPLICATE_GROUNDING_DINO_VERSION ||
   "efd10a8ddc57ea28773327e881ce95e20cc1d734c589f7dd01d2036921ed78aa";
@@ -6584,7 +6587,13 @@ function samOwnershipPriority(region = {}) {
     lower_garment: 50,
     body_garment: 40,
   };
-  return Number(priorities[String(region?.zone || "")] || 20);
+  const layerBonus = {
+    outer: 3,
+    middle: 2,
+    standalone: 1,
+    inner: 0,
+  }[region?.target_conditioned_mask_v1?.layer_role] || 0;
+  return Number(priorities[String(region?.zone || "")] || 20) + layerBonus;
 }
 
 function competingMaskWins(target = {}, competitor = {}) {
@@ -7391,12 +7400,13 @@ async function enrichSamRegionsWithMaskedColors(imageUrl, regions = []) {
   return regions.map((region, index) => {
     const decoded = decodedMasks[index];
     if (!decoded) return region;
-    const competitors = availableMasks.filter((candidate) =>
-      candidate !== decoded &&
-      candidate.region?.zone &&
-      candidate.region.zone !== "unknown" &&
-      candidate.region.zone !== region?.zone
-    );
+    const semanticInstanceKey = region?.target_conditioned_mask_v1?.semantic_instance_key || null;
+    const competitors = availableMasks.filter((candidate) => {
+      if (candidate === decoded || !candidate.region?.zone || candidate.region.zone === "unknown") return false;
+      if (candidate.region.zone !== region?.zone) return true;
+      const candidateSemanticInstanceKey = candidate.region?.target_conditioned_mask_v1?.semantic_instance_key || null;
+      return Boolean(semanticInstanceKey && candidateSemanticInstanceKey && semanticInstanceKey !== candidateSemanticInstanceKey);
+    });
     const regionColors = extractMaskedRegionColors(baseImage, decoded.maskImage, 6, {
       target: decoded,
       competitors,
@@ -7786,6 +7796,91 @@ async function runSamSegmentation(imageUrl, { timeoutMs = REPLICATE_SAM_TIMEOUT_
   }
 }
 
+async function runTargetConditionedSamMask(imageUrl, target, { timeoutMs = 16000 } = {}) {
+  const token = process.env.REPLICATE_API_TOKEN;
+  if (!token) return { enabled: false, ok: false, reason: "missing_REPLICATE_API_TOKEN", target };
+  const effectiveTimeoutMs = Number.isFinite(Number(timeoutMs)) ? Math.max(1, Number(timeoutMs)) : 16000;
+  const requestStartedAt = Date.now();
+  const deadlineAt = requestStartedAt + effectiveTimeoutMs;
+  try {
+    let prediction = await replicateRequest("https://api.replicate.com/v1/predictions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        version: TARGET_CONDITIONED_SAM_VERSION,
+        input: {
+          image: imageUrl,
+          mask_prompt: String(target?.prompt || target?.label || "garment"),
+          negative_mask_prompt: "",
+          adjustment_factor: -2,
+        },
+      }),
+    }, Math.max(1, deadlineAt - Date.now()));
+    const statusUrl = prediction?.urls?.get;
+    if (!statusUrl) return { enabled: true, ok: false, reason: "missing_poll_url", target };
+    while (Date.now() < deadlineAt && !["succeeded", "failed", "canceled"].includes(prediction?.status)) {
+      await new Promise((resolve) => setTimeout(resolve, REPLICATE_SAM_POLL_MS));
+      prediction = await replicateRequest(statusUrl, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+      }, Math.max(1, deadlineAt - Date.now()));
+    }
+    if (prediction?.status !== "succeeded") {
+      return { enabled: true, ok: false, reason: prediction?.error || prediction?.status || "target_mask_timeout", target };
+    }
+    const outputs = Array.isArray(prediction?.output) ? prediction.output : [];
+    const maskUrl = outputs[2] || null;
+    if (!maskUrl) return { enabled: true, ok: false, reason: "target_mask_missing", target };
+    return {
+      enabled: true,
+      ok: true,
+      reason: null,
+      target,
+      region: {
+        id: target.id,
+        segment_label: target.label,
+        label: target.label,
+        zone: target.zone,
+        confidence: Math.round(Math.max(0.7, Number(target.confidence || 0)) * 100),
+        mask_url: maskUrl,
+        source_type: "sam_segment",
+        target_conditioned_mask_v1: {
+          applied: true,
+          prompt: target.prompt,
+          detector_region_id: target.detector_region_id,
+          semantic_instance_key: target.semantic_instance_key,
+          layer_role: target.layer_role,
+          authority: "spatial_mask_only",
+          external_color_authority: false,
+        },
+      },
+      elapsed_ms: Date.now() - requestStartedAt,
+    };
+  } catch (error) {
+    return { enabled: true, ok: false, reason: error?.message || "target_mask_request_error", target };
+  }
+}
+
+async function runTargetConditionedSegmentation(imageUrl, plan, { timeoutMs = 16000 } = {}) {
+  const targets = Array.isArray(plan?.targets) ? plan.targets : [];
+  if (!targets.length) return { enabled: true, ok: false, reason: "no_segmentation_targets", regions: [], results: [] };
+  const results = await Promise.all(targets.map((target) => runTargetConditionedSamMask(imageUrl, target, { timeoutMs })));
+  const rawRegions = results.filter((result) => result?.ok && result?.region).map((result) => result.region);
+  const regions = rawRegions.length ? await enrichSamRegionsWithMaskedColors(imageUrl, rawRegions) : [];
+  return {
+    enabled: true,
+    ok: regions.length > 0,
+    reason: regions.length ? null : results.map((result) => result?.reason).filter(Boolean).join("; ") || "no_target_masks",
+    regions,
+    results: results.map((result) => ({
+      ok: !!result?.ok,
+      reason: result?.reason || null,
+      target: result?.target || null,
+      elapsed_ms: result?.elapsed_ms || null,
+    })),
+  };
+}
+
 /* =========================
    IMAGE OPS
 ========================= */
@@ -7892,7 +7987,7 @@ async function callPixelcutRemoveBg(imageUrl, timeoutMs = PIXELCUT_TIMEOUT_MS) {
   }
 }
 
-async function analyzeGhostColors(ghostUrl, { latencyBudget = null } = {}) {
+async function analyzeGhostColors(ghostUrl, { latencyBudget = null, semanticObservationPromise = null } = {}) {
   const res = await cloudinary.uploader.upload(ghostUrl, {
     folder: "cie/ghost",
     resource_type: "image",
@@ -7924,10 +8019,6 @@ async function analyzeGhostColors(ghostUrl, { latencyBudget = null } = {}) {
     })
     .filter((x) => !!x.hex);
 
-  const primarySamTimeoutMs = latencyBudget?.providerTimeoutMs
-    ? latencyBudget.providerTimeoutMs({ requestedMs: 30000, maximumMs: 30000 })
-    : REPLICATE_SAM_TIMEOUT_MS;
-  const samPromise = runSamSegmentation(ghostUrl, { timeoutMs: primarySamTimeoutMs });
   const configuredSingleQuery = String(process.env.GROUNDING_DINO_QUERY || "").trim();
   const groundingQueryPlan = buildGroundingDinoQueryPlanV1({
     configuredPrimaryQuery: configuredSingleQuery,
@@ -8014,7 +8105,21 @@ async function analyzeGhostColors(ghostUrl, { latencyBudget = null } = {}) {
     detectionCount: dinoDetections.length,
   });
 
-  const sam = await samPromise;
+  const externalSemantic = semanticObservationPromise ? await semanticObservationPromise : null;
+  const segmentationPlan = buildTargetConditionedSegmentationPlanV1({
+    dinoRegions: dinoGarmentRegions,
+    semanticHandoff: externalSemantic?.handoff || {},
+  });
+  const targetSamTimeoutMs = latencyBudget?.providerTimeoutMs
+    ? latencyBudget.providerTimeoutMs({ requestedMs: 16000, maximumMs: 16000 })
+    : 16000;
+  let sam = latencyBudget && !latencyBudget.canRun(2500)
+    ? { enabled: true, ok: false, reason: "transform_latency_budget_exhausted_before_target_segmentation", regions: [], results: [] }
+    : await runTargetConditionedSegmentation(ghostUrl, segmentationPlan, { timeoutMs: targetSamTimeoutMs });
+  if (!sam?.ok && latencyBudget?.canRun?.(5000)) {
+    const fallbackTimeoutMs = latencyBudget.providerTimeoutMs({ requestedMs: 10000, maximumMs: 10000 });
+    sam = await runSamSegmentation(ghostUrl, { timeoutMs: fallbackTimeoutMs });
+  }
   const samRegions = Array.isArray(sam?.regions) ? sam.regions : [];
   const samOk = !!sam?.ok && samRegions.length > 0;
   const dinoOk = !!groundingDino?.ok && dinoDetections.length > 0;
@@ -8032,11 +8137,16 @@ async function analyzeGhostColors(ghostUrl, { latencyBudget = null } = {}) {
     segmentedRegions: samOk ? samRegions : dinoGarmentRegions,
     dinoGarmentRegions,
     dino_debug: dinoDebug,
+    externalSemantic,
+    semantic_scene_graph_v1: segmentationPlan.scene_graph,
+    target_conditioned_segmentation_plan_v1: segmentationPlan,
     pipeline: {
       sam_enabled: !!sam?.enabled,
       sam_ok: samOk,
       sam_reason: sam?.reason || null,
-      sam_version: process.env.REPLICATE_SAM_MODEL || DEFAULT_REPLICATE_SAM_MODEL,
+      sam_version: sam?.results ? `target_conditioned:${TARGET_CONDITIONED_SAM_VERSION}` : (process.env.REPLICATE_SAM_MODEL || DEFAULT_REPLICATE_SAM_MODEL),
+      target_conditioned_segmentation: !!sam?.results,
+      target_conditioned_results: sam?.results || [],
       sam_throttled: isReplicateThrottleError(sam?.reason),
       dino_enabled: !!groundingDino?.enabled,
       dino_ok: dinoOk,
@@ -8088,6 +8198,23 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       return sendStepError(res, 500, "upload_cloudinary", error);
     }
 
+    // Semantic understanding starts before background removal and detector work.
+    // It may name unfamiliar pieces, layers, and tiny details, but remains unable
+    // to provide numeric color or publication authority.
+    const earlyExternalSemanticPromise = runOpenAISemanticObserverV1({
+      mode: EXTERNAL_INTELLIGENCE_MODE,
+      imageUrl: publicUrl,
+      visionCoreEvidence: {
+        pipeline_version: "visioncore_semantic_mask_orchestration_v1",
+        phase: "pre_measurement_scene_understanding",
+      },
+      visionCoreDecision: {},
+      model: OPENAI_SEMANTIC_MODEL,
+      timeoutMs: EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS,
+      cache: externalSemanticCache,
+      cacheKey: `${publicUrl}:visioncore_semantic_mask_orchestration_v1:${OPENAI_SEMANTIC_MODEL}`,
+    });
+
     let ghostUrl;
     try {
       ghostUrl = await callPixelcutRemoveBg(
@@ -8100,7 +8227,10 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
 
     let analysis;
     try {
-      analysis = await analyzeGhostColors(ghostUrl, { latencyBudget: transformLatencyBudget });
+      analysis = await analyzeGhostColors(ghostUrl, {
+        latencyBudget: transformLatencyBudget,
+        semanticObservationPromise: earlyExternalSemanticPromise,
+      });
     } catch (error) {
       return sendStepError(res, 500, "analyze_cloudinary_colors", error);
     }
@@ -8176,14 +8306,16 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
     const externalObserverMinimumRemainingMs = localAccessoryRecoveryRequired
       ? EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS + accessoryReanalysisMinimumRemainingMs
       : EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS;
-    const effectiveExternalIntelligenceMode = captureQuality?.disposition === "retake" ||
-      !transformLatencyBudget.canRun(externalObserverMinimumRemainingMs)
-      ? "off"
-      : EXTERNAL_INTELLIGENCE_MODE;
+    const earlySemanticAvailable = Boolean(analysis?.externalSemantic);
+    const effectiveExternalIntelligenceMode = earlySemanticAvailable
+      ? EXTERNAL_INTELLIGENCE_MODE
+      : captureQuality?.disposition === "retake" || !transformLatencyBudget.canRun(externalObserverMinimumRemainingMs)
+        ? "off"
+        : EXTERNAL_INTELLIGENCE_MODE;
     const accessoryRecoveryPrioritizedOverExternalObserver = Boolean(
       localAccessoryRecoveryRequired && effectiveExternalIntelligenceMode === "off"
     );
-    const externalSemantic = await runOpenAISemanticObserverV1({
+    const externalSemantic = analysis?.externalSemantic || await runOpenAISemanticObserverV1({
       mode: effectiveExternalIntelligenceMode,
       imageUrl: publicUrl,
       visionCoreEvidence: buildExternalSemanticEvidence(outfitAnalysis),
@@ -8638,6 +8770,8 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         },
         pipeline: {
           ...analysis.pipeline,
+          semantic_scene_graph_v1: analysis.semantic_scene_graph_v1,
+          target_conditioned_segmentation_plan_v1: analysis.target_conditioned_segmentation_plan_v1,
           lower_sampling_version: LOWER_SAMPLING_VERSION,
           transform_latency_budget_v1: transformLatencyBudget.snapshot("response"),
         },

@@ -10,14 +10,14 @@ export const OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1 = Object.freeze({
   additionalProperties: false,
   required: ["schema_version", "overall_confidence", "claims"],
   properties: {
-    schema_version: { type: "string", enum: ["1"] },
+    schema_version: { type: "string", enum: ["2"] },
     overall_confidence: { type: "number" },
     claims: {
       type: "array",
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["action", "piece", "subtype", "instance_key", "visible_count", "component_of", "zone", "pattern", "perceived_color_family", "color_appearance_cue", "lighting_cue", "color_confidence", "material_cue", "ownership_hypothesis", "reason", "confidence"],
+        required: ["action", "piece", "subtype", "instance_key", "visible_count", "component_of", "zone", "pattern", "perceived_color_family", "color_appearance_cue", "lighting_cue", "color_confidence", "material_cue", "ownership_hypothesis", "layer_role", "overlaps_instance_keys", "occlusion", "unusual_detail", "segmentation_prompt", "reason", "confidence"],
         properties: {
           action: { type: "string", enum: ["support", "contradict", "request_targeted_reanalysis", "abstain"] },
           piece: { type: ["string", "null"] },
@@ -36,6 +36,11 @@ export const OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1 = Object.freeze({
           color_confidence: { type: "number" },
           material_cue: { type: ["string", "null"] },
           ownership_hypothesis: { type: ["string", "null"] },
+          layer_role: { type: "string", enum: ["inner", "middle", "outer", "standalone", "accessory", "unknown"] },
+          overlaps_instance_keys: { type: "array", items: { type: "string" } },
+          occlusion: { type: "string", enum: ["none", "partial", "heavy", "unknown"] },
+          unusual_detail: { type: ["string", "null"] },
+          segmentation_prompt: { type: ["string", "null"] },
           reason: { type: ["string", "null"] },
           confidence: { type: "number" },
         },
@@ -52,6 +57,8 @@ function semanticPrompt(visionCoreEvidence = {}) {
     "Use precise subtypes when visible, such as horsebit loafer, penny loafer, sneaker, chain necklace, cross pendant, stud earring, bracelet, watch, or horsebit shoe hardware.",
     "Use action=support when you independently observe an item, even when VisionCore did not list it. Use contradict only when VisionCore appears to list an item that is not visibly present.",
     "Identify garment/accessory types, body zones, patterns, material cues, perceived color families, lighting cues, and possible ownership conflicts.",
+    "Model the outfit as a scene graph: state each piece's layer_role, which instance keys it overlaps, its occlusion, and any tiny or unusual fashion detail.",
+    "Provide a short segmentation_prompt that uniquely describes the visible physical item without mentioning its color.",
     "Do not identify the person or infer protected, demographic, medical, religious, or socioeconomic traits.",
     "For each visible piece, independently suggest only one broad perceived_color_family from the schema and a short color_appearance_cue. Use unclear when lighting, reflection, transparency, or occlusion makes the family unreliable.",
     "Do not use VisionCore's color conclusion to form the suggestion. VisionCore will independently measure object-local pixels and reconcile your categorical hypothesis afterward.",
@@ -77,7 +84,7 @@ export function buildOpenAISemanticRequestV1({ imageUrl, visionCoreEvidence = {}
     text: {
       format: {
         type: "json_schema",
-        name: "visioncore_semantic_observation_v1",
+        name: "visioncore_semantic_observation_v2",
         strict: true,
         schema: OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1,
       },

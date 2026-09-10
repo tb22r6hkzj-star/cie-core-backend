@@ -75,6 +75,11 @@ function sanitizeClaim(claim = {}) {
     color_confidence: clampConfidence(claim?.color_confidence),
     material_cue: cleanText(claim?.material_cue, 120),
     ownership_hypothesis: cleanText(claim?.ownership_hypothesis),
+    layer_role: ["inner", "middle", "outer", "standalone", "accessory", "unknown"].includes(claim?.layer_role) ? claim.layer_role : "unknown",
+    overlaps_instance_keys: (Array.isArray(claim?.overlaps_instance_keys) ? claim.overlaps_instance_keys : []).slice(0, 12).map((value) => cleanText(value, 80)).filter(Boolean),
+    occlusion: ["none", "partial", "heavy", "unknown"].includes(claim?.occlusion) ? claim.occlusion : "unknown",
+    unusual_detail: cleanText(claim?.unusual_detail, 160),
+    segmentation_prompt: cleanText(claim?.segmentation_prompt, 120),
     reason: cleanText(claim?.reason),
     confidence: clampConfidence(claim?.confidence),
   };
