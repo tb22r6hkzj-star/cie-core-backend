@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { sanitizeCustomerFacingZonesV1 } from "../src/intelligence/customerFacingZoneSanitizationV1.js";
+import { getColorName as getName } from "../src/engines/labelMapper/index.js";
 
 test("removes a legacy accessory alias when its canonical instance owns the same evidence", () => {
   const analysis = { garment_zones: { zones: {
@@ -77,4 +78,25 @@ test("synchronizes head-to-toe color aliases with the authoritative primary hex"
   assert.equal(lower.color_identity.name, "Muted Forest Green");
   assert.equal(lower.color_identity.translation, "Soft Gray");
   assert.equal(lower.garment_identity.primary_identity.name, "Muted Forest Green");
+});
+
+test("regenerates every published nested color name from its own authoritative hex", () => {
+  const analysis = { garment_zones: { zones: { outerwear: {
+    name: "stale zone name",
+    hex: "#BE4175",
+    interpretation: "single_color",
+    primary_color: { hex: "#BE4175", name: "stale primary" },
+    dominant_color: { hex: "#BE4175", name: "stale dominant" },
+    signature_color: { hex: "#E15F9E", name: "stale signature" },
+    region_colors: [{ hex: "#BE4175", name: "stale region" }],
+    detected_colors: [{ hex: "#E15F9E", name: "stale detected" }],
+  } } } };
+  const outerwear = sanitizeCustomerFacingZonesV1(analysis).garment_zones.zones.outerwear;
+
+  assert.equal(outerwear.name, getName("#BE4175"));
+  assert.equal(outerwear.primary_color.name, getName("#BE4175"));
+  assert.equal(outerwear.dominant_color.name, getName("#BE4175"));
+  assert.equal(outerwear.signature_color.name, getName("#E15F9E"));
+  assert.equal(outerwear.region_colors[0].name, getName("#BE4175"));
+  assert.equal(outerwear.detected_colors[0].name, getName("#E15F9E"));
 });

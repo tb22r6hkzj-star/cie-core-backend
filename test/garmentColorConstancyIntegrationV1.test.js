@@ -101,3 +101,21 @@ test("batch integration preserves region count", () => {
   const rows = applyGarmentColorConstancyToRegionsV1([brownShirt, { zone: "background", dominant_hex: "#111111" }], { mode: "shadow" });
   assert.equal(rows.length, 2);
 });
+
+test("stable denim primary preserves an independently owned pink applique", () => {
+  const result = applyGarmentColorConstancyIntegrationV1({
+    zone: "lower_garment",
+    dominant_hex: "#6D7D93",
+    region_colors: [
+      { hex: "#6D7D93", pct: 0.91, ownership_state: "owned", ownership_validated: true, pixel_count: 910 },
+      { hex: "#E15F9E", pct: 0.09, ownership_state: "owned", ownership_validated: true, pixel_count: 90 },
+    ],
+  }, { mode: "assist" });
+
+  assert.equal(result.color_debug.garment_color_constancy_v1.applied, true);
+  assert.equal(result.region_colors.length, 2);
+  assert.equal(result.region_colors[0].hex, "#6D7D93");
+  assert.equal(result.region_colors[0].pct, 0.91);
+  assert.equal(result.region_colors[1].hex, "#E15F9E");
+  assert.equal(result.region_colors[1].measurement_authority, "independent_owned_accent");
+});

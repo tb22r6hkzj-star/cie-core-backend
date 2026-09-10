@@ -30,6 +30,55 @@ function sourcePriority(source) {
   return SOURCE_PRIORITY[String(source || "unknown")] ?? SOURCE_PRIORITY.unknown;
 }
 
+function measurementRatio(candidate = {}) {
+  const value = Number(candidate?.pct ?? candidate?.percentage ?? candidate?.display_pct ?? 0);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return clamp01(value > 1 ? value / 100 : value);
+}
+
+function measurementMass(candidate = {}) {
+  const pixels = Math.max(0, Number(candidate?.pixel_count || 0));
+  return pixels > 0 ? pixels : measurementRatio(candidate);
+}
+
+function mergeEquivalentMeasurements(candidates = [], maximumDeltaE = 8) {
+  const groups = [];
+  for (const candidate of candidates) {
+    const match = groups.find((group) => (
+      group.source === candidate.source &&
+      group.ownership_validated === candidate.ownership_validated &&
+      chroma.distance(group.hex, candidate.hex, "lab") <= maximumDeltaE
+    ));
+    if (!match) {
+      groups.push({ ...candidate, merged_hexes: [candidate.hex], merged_measurement_count: 1 });
+      continue;
+    }
+
+    const previousPixelCount = Math.max(0, Number(match.pixel_count || 0));
+    const previousRatio = measurementRatio(match);
+    const candidatePixelCount = Math.max(0, Number(candidate.pixel_count || 0));
+    const candidateRatio = measurementRatio(candidate);
+    if (measurementMass(candidate) > measurementMass(match)) {
+      const aggregate = {
+        pixel_count: previousPixelCount,
+        pct: previousRatio,
+        percentage: previousRatio,
+        merged_hexes: match.merged_hexes,
+        merged_measurement_count: match.merged_measurement_count,
+      };
+      Object.assign(match, candidate, aggregate);
+    }
+    match.pixel_count = previousPixelCount + candidatePixelCount;
+    match.pct = clamp01(previousRatio + candidateRatio);
+    match.percentage = match.pct;
+    match.measured_ratio = match.pct;
+    match.merged_hexes = [...new Set([...(match.merged_hexes || []), candidate.hex])];
+    match.merged_measurement_count = Number(match.merged_measurement_count || 1) + 1;
+    match.quality_score = Math.max(Number(match.quality_score || 0), Number(candidate.quality_score || 0));
+  }
+  return groups;
+}
+
 function explicitOwnershipValidation(candidate = {}) {
   if (candidate?.ownership_validated === true) return true;
   if (candidate?.ownership_validation?.validated === true) return true;
@@ -83,6 +132,8 @@ function normalizeMeasurement(candidate = {}) {
     traceable_to_pixels: traceable,
     positively_owned: positivelyOwned,
     ownership_validated: ownershipValidated,
+    source_priority: sourcePriority(source),
+    measured_ratio: measurementRatio(candidate),
     quality_score: qualityScore,
   };
 }
@@ -107,14 +158,18 @@ export function selectMeasuredColorAuthorityV1(candidates = []) {
     .map(normalizeMeasurement)
     .filter(Boolean);
 
-  const publishable = normalized
+  const eligible = normalized
     .filter((candidate) => candidate.traceable_to_pixels)
     .filter((candidate) => candidate.positively_owned)
     .filter((candidate) => candidate.ownership_validated)
-    .filter((candidate) => candidate.source !== "global_palette")
+    .filter((candidate) => candidate.source !== "global_palette");
+
+  const publishable = mergeEquivalentMeasurements(eligible)
     .sort((a, b) => {
-      if (b.quality_score !== a.quality_score) return b.quality_score - a.quality_score;
+      if (b.source_priority !== a.source_priority) return b.source_priority - a.source_priority;
       if (b.pixel_count !== a.pixel_count) return b.pixel_count - a.pixel_count;
+      if (b.measured_ratio !== a.measured_ratio) return b.measured_ratio - a.measured_ratio;
+      if (b.quality_score !== a.quality_score) return b.quality_score - a.quality_score;
       return b.confidence - a.confidence;
     });
 
@@ -135,6 +190,8 @@ export function selectMeasuredColorAuthorityV1(candidates = []) {
       unvalidated_measurements_must_abstain: true,
       global_palette_can_publish_garment_truth: false,
       higher_purity_spatial_measurement_wins: true,
+      equivalent_owned_clusters_are_merged_before_selection: true,
+      largest_owned_pixel_mass_wins_within_authority_tier: true,
       reasoning_cannot_invent_replacement_hex: true,
     },
   };

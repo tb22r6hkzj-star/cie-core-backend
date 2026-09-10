@@ -82,11 +82,28 @@ function restoreOwnedZoneColor(analysis, zoneKey, zone) {
   };
 }
 
+function synchronizeColorObject(color) {
+  if (!color?.hex) return color;
+  const name = getColorName(color.hex);
+  return {
+    ...color,
+    name,
+    color_identity: {
+      ...(color?.color_identity || {}),
+      name,
+    },
+  };
+}
+
+function synchronizeColorList(colors) {
+  return Array.isArray(colors) ? colors.map(synchronizeColorObject) : colors;
+}
+
 function synchronizeCustomerFacingColorAliases(zone = {}) {
-  const hex = zone?.primary_color?.hex || zone?.dominant_color?.hex || zone?.hex || zone?.dominant_hex;
-  if (!hex || isUncertain(zone)) return zone;
-  const name = getColorName(hex);
-  const sourceIdentity = zone?.primary_color?.color_identity || zone?.dominant_color?.color_identity || {};
+  const primaryHex = zone?.primary_color?.hex || zone?.dominant_color?.hex || zone?.hex || zone?.dominant_hex;
+  if (!primaryHex || isUncertain(zone)) return zone;
+  const name = getColorName(primaryHex);
+  const sourceIdentity = zone?.primary_color?.color_identity || zone?.dominant_color?.color_identity || zone?.color_identity || {};
   const colorIdentity = { ...sourceIdentity, name };
   const primaryIdentity = {
     ...(zone?.garment_identity?.primary_identity || {}),
@@ -98,6 +115,15 @@ function synchronizeCustomerFacingColorAliases(zone = {}) {
     name,
     display_label: name,
     color_identity: colorIdentity,
+    dominant_color: synchronizeColorObject(zone?.dominant_color),
+    primary_color: synchronizeColorObject(zone?.primary_color),
+    signature_color: synchronizeColorObject(zone?.signature_color),
+    support_colors: synchronizeColorList(zone?.support_colors),
+    secondary_colors: synchronizeColorList(zone?.secondary_colors),
+    accent_colors: synchronizeColorList(zone?.accent_colors),
+    detected_colors: synchronizeColorList(zone?.detected_colors),
+    region_colors: synchronizeColorList(zone?.region_colors),
+    object_local_colors: synchronizeColorList(zone?.object_local_colors),
     garment_identity: {
       ...(zone?.garment_identity || {}),
       primary_identity: primaryIdentity,

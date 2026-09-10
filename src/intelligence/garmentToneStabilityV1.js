@@ -206,6 +206,24 @@ export function applyGarmentToneStabilityV1({ decodedImage = null, regions = [] 
     if (!TARGET_ZONES.has(String(region?.zone || ""))) return region;
     if (!DINO_SOURCE_TYPES.has(region?.source_type)) return region;
 
+    const ownership = region?.color_debug?.piece_color_ownership_v1;
+    const hasValidatedMaskAuthority = ownership?.applied === true &&
+      ownership?.measurement_source === "sam_mask_interior" &&
+      (region?.region_colors || []).some((color) => color?.ownership_validated === true);
+    if (hasValidatedMaskAuthority) {
+      return {
+        ...region,
+        color_debug: {
+          ...(region?.color_debug || {}),
+          garment_tone_stability_v1: {
+            applied: false,
+            reason: "validated_mask_color_authority_preserved",
+            authority: "sam_mask_interior",
+          },
+        },
+      };
+    }
+
     const bbox = region?.bounding_box || region?.bbox || region?.mask_geometry?.bbox || null;
     const analysis = analyzeGarmentToneStabilityV1({ decodedImage, bbox });
     if (!analysis?.available || !analysis?.stable || !analysis?.stable_hex) {

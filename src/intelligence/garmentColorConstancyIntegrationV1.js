@@ -1,3 +1,4 @@
+import chroma from "chroma-js";
 import { estimateGarmentIntrinsicColorV1 } from "./garmentColorConstancyV1.js";
 
 const GARMENT_ZONES = new Set(["upper_garment", "lower_garment", "body_garment", "outerwear"]);
@@ -7,22 +8,55 @@ function normalizeMode(mode) {
   return ["off", "shadow", "assist"].includes(value) ? value : "shadow";
 }
 
-function buildPublishableIntrinsicPalette(intrinsic = {}) {
+function safeHex(value) {
+  try {
+    return chroma(value).hex().toUpperCase();
+  } catch {
+    return null;
+  }
+}
+
+function ownedAccentSamples(samples = [], intrinsic = {}) {
+  return (Array.isArray(intrinsic?.samples) ? intrinsic.samples : [])
+    .map((row, index) => ({ row, sample: samples[index] }))
+    .filter(({ row }) => row?.same_material_family === false)
+    .map(({ sample }) => sample)
+    .filter((sample) => sample?.ownership_validated === true)
+    .filter((sample) => Number(sample?.pct ?? sample?.percentage ?? 0) >= 0.04)
+    .filter((sample) => safeHex(sample?.hex));
+}
+
+function buildPublishableIntrinsicPalette(intrinsic = {}, samples = []) {
   if (!intrinsic?.available || !intrinsic?.stable_material_identity || !intrinsic?.intrinsic_hex) return null;
   const sample = intrinsic?.intrinsic_sample || {};
+  const accents = ownedAccentSamples(samples, intrinsic);
+  const accentShare = Math.min(0.45, accents.reduce(
+    (sum, accent) => sum + Math.max(0, Number(accent?.pct ?? accent?.percentage ?? 0)),
+    0
+  ));
+  const primaryShare = Math.max(0.55, 1 - accentShare);
   return [{
     ...sample,
     hex: intrinsic.intrinsic_hex,
-    pct: 1,
-    percentage: 1,
-    display_pct: 1,
+    pct: primaryShare,
+    percentage: primaryShare,
+    display_pct: primaryShare,
     source: "garment_color_constancy_v1",
     measurement_source: sample?.measurement_source || sample?.source || "measured_intrinsic_medoid",
     ownership_state: "owned",
     traceable_to_pixels: sample?.traceable_to_pixels !== false,
     measurement_authority: "intrinsic_material_medoid",
     intrinsic_material_identity: true,
-  }];
+  }, ...accents.map((accent) => ({
+    ...accent,
+    hex: safeHex(accent.hex),
+    source: "garment_owned_accent_v1",
+    measurement_source: accent?.measurement_source || accent?.source || "validated_mask_accent",
+    ownership_state: "owned",
+    ownership_validated: true,
+    measurement_authority: "independent_owned_accent",
+    intrinsic_material_identity: false,
+  }))];
 }
 
 export function applyGarmentColorConstancyIntegrationV1(region = {}, { mode = "shadow" } = {}) {
@@ -70,7 +104,7 @@ export function applyGarmentColorConstancyIntegrationV1(region = {}, { mode = "s
     intrinsic?.stable_material_identity &&
     intrinsic?.intrinsic_hex
   );
-  const publishablePalette = canPromote ? buildPublishableIntrinsicPalette(intrinsic) : null;
+  const publishablePalette = canPromote ? buildPublishableIntrinsicPalette(intrinsic, samples) : null;
 
   return {
     ...region,
@@ -101,6 +135,7 @@ export function applyGarmentColorConstancyIntegrationV1(region = {}, { mode = "s
           raw_measurements_remain_debug_evidence: true,
           customer_facing_palette_uses_intrinsic_material_identity_when_stable: true,
           same_material_light_shadow_variants_do_not_publish_as_separate_colors: true,
+          independently_owned_chromatic_accents_survive_constancy: true,
         },
       },
     },
