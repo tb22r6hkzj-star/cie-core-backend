@@ -7,6 +7,7 @@ import {
   collectDetectedRegionColors,
   buildGarmentZoneColorDisplay,
   buildVisionCoreColorCardSections,
+  buildRegionPaletteDisplay,
 } from "../src/ui/garmentColorIdentity.js";
 
 const expectedSectionTitles = [
@@ -38,6 +39,21 @@ test("detected colors preserve original order and trace percentages", () => {
       ["Rich Brown", "Trace"],
     ]
   );
+});
+
+test("region palette display never renormalizes an exact retained pixel measurement to 100%", () => {
+  const rows = buildRegionPaletteDisplay([{
+    hex: "#6F7E91",
+    name: "Muted Blue",
+    pct: 74974 / 193223,
+    measured_ratio: 74974 / 193223,
+    pixel_count: 74974,
+    total_owned_pixel_count: 193223,
+  }]);
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].percentage, "39%");
+  assert.equal(rows[0].display_pct, 74974 / 193223);
 });
 
 test("single-color and multicolor displays include detected colors and ordered card sections", () => {
