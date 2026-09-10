@@ -745,11 +745,26 @@ function formatColorPct(pct = 0) {
 function compactRegionColor(color) {
   const hex = safeHex(color?.hex || color?.base);
   if (!hex) return null;
-  const pct = round2(normalizeColorPct(color?.pct));
+  const pixelCount = Number(color?.pixel_count);
+  const totalOwnedPixelCount = Number(color?.total_owned_pixel_count);
+  const measuredRatio = Number(color?.measured_ratio);
+  const hasPixelRatio = Number.isFinite(pixelCount) && pixelCount >= 0 && Number.isFinite(totalOwnedPixelCount) && totalOwnedPixelCount > 0;
+  const exactRatio = hasPixelRatio
+    ? Math.max(0, Math.min(1, pixelCount / totalOwnedPixelCount))
+    : Number.isFinite(measuredRatio) && measuredRatio >= 0
+      ? normalizeColorPct(measuredRatio)
+      : null;
+  const pct = exactRatio ?? round2(normalizeColorPct(color?.pct));
   return withColorIdentity({
     hex,
     name: color?.name || getColorName(hex),
     pct,
+    ...(exactRatio === null ? {} : {
+      display_pct: exactRatio,
+      measured_ratio: exactRatio,
+    }),
+    ...(Number.isFinite(pixelCount) ? { pixel_count: pixelCount } : {}),
+    ...(Number.isFinite(totalOwnedPixelCount) ? { total_owned_pixel_count: totalOwnedPixelCount } : {}),
     percentage: formatColorPct(pct),
   });
 }
@@ -848,8 +863,10 @@ function mergeColorSummaryFamilies(colors = []) {
     const key = compact.name.toLowerCase();
     const existing = groups.get(key);
     const pct = normalizeColorPct(compact.pct);
+    const hasExactMeasurement = Number.isFinite(Number(compact?.measured_ratio));
     if (existing) {
       existing.pct = round2(normalizeColorPct(existing.pct) + pct);
+      existing._hasExactMeasurement ||= hasExactMeasurement;
       existing.percentage = formatColorPct(existing.pct);
       if (pct > Number(existing._topPct || 0)) {
         existing.hex = compact.hex;
@@ -857,14 +874,16 @@ function mergeColorSummaryFamilies(colors = []) {
         existing._topPct = pct;
       }
     } else {
-      groups.set(key, { ...compact, pct, percentage: formatColorPct(pct), _topPct: pct });
+      groups.set(key, { ...compact, pct, percentage: formatColorPct(pct), _topPct: pct, _hasExactMeasurement: hasExactMeasurement });
     }
   }
   const mergedColors = Array.from(groups.values());
   const totalPct = mergedColors.reduce((sum, color) => sum + normalizeColorPct(color?.pct), 0);
   return mergedColors
-    .map(({ _topPct, ...color }) => {
-      const displayPct = totalPct > 0 ? normalizeColorPct(color.pct) / totalPct : 0;
+    .map(({ _topPct, _hasExactMeasurement, ...color }) => {
+      const displayPct = totalPct > 0
+        ? (_hasExactMeasurement ? normalizeColorPct(color.pct) : normalizeColorPct(color.pct) / totalPct)
+        : 0;
       return withColorIdentity({
         ...color,
         display_pct: round2(displayPct),
