@@ -151,6 +151,14 @@ export const TARGETED_ACCESSORY_REANALYSIS_MODE = normalizeTargetedAccessoryRean
   "assist"
 );
 const EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS = 8000;
+const EARLY_SEMANTIC_OBSERVER_BUDGET_MS = Math.max(
+  EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS,
+  Number(process.env.VISIONCORE_EARLY_SEMANTIC_TIMEOUT_MS) || 25000
+);
+const EARLY_TARGET_SEGMENTATION_BUDGET_MS = Math.max(
+  5000,
+  Number(process.env.VISIONCORE_EARLY_TARGET_SEGMENTATION_TIMEOUT_MS) || 18000
+);
 const ACCESSORY_REANALYSIS_BUDGET_MS = 10000;
 const ACCESSORY_MICRO_CROP_SAM_TIMEOUT_MS = 15000;
 const externalSemanticCache = new Map();
@@ -7863,7 +7871,7 @@ async function runTargetConditionedSamMask(imageUrl, target, { timeoutMs = 16000
 
 async function runTargetConditionedSegmentation(imageUrl, plan, { timeoutMs = 16000 } = {}) {
   const targets = Array.isArray(plan?.targets) ? plan.targets : [];
-  if (!targets.length) return { enabled: true, ok: false, reason: "no_segmentation_targets", regions: [], results: [] };
+  if (!targets.length) return { enabled: true, ok: false, reason: "no_segmentation_targets", regions: [], results: [], plan };
   const results = await Promise.all(targets.map((target) => runTargetConditionedSamMask(imageUrl, target, { timeoutMs })));
   const rawRegions = results.filter((result) => result?.ok && result?.region).map((result) => result.region);
   const regions = rawRegions.length ? await enrichSamRegionsWithMaskedColors(imageUrl, rawRegions) : [];
@@ -7872,6 +7880,7 @@ async function runTargetConditionedSegmentation(imageUrl, plan, { timeoutMs = 16
     ok: regions.length > 0,
     reason: regions.length ? null : results.map((result) => result?.reason).filter(Boolean).join("; ") || "no_target_masks",
     regions,
+    plan,
     results: results.map((result) => ({
       ok: !!result?.ok,
       reason: result?.reason || null,
@@ -7987,7 +7996,11 @@ async function callPixelcutRemoveBg(imageUrl, timeoutMs = PIXELCUT_TIMEOUT_MS) {
   }
 }
 
-async function analyzeGhostColors(ghostUrl, { latencyBudget = null, semanticObservationPromise = null } = {}) {
+async function analyzeGhostColors(ghostUrl, {
+  latencyBudget = null,
+  semanticObservationPromise = null,
+  targetSegmentationPromise = null,
+} = {}) {
   const res = await cloudinary.uploader.upload(ghostUrl, {
     folder: "cie/ghost",
     resource_type: "image",
@@ -8110,12 +8123,15 @@ async function analyzeGhostColors(ghostUrl, { latencyBudget = null, semanticObse
     dinoRegions: dinoGarmentRegions,
     semanticHandoff: externalSemantic?.handoff || {},
   });
+  const earlyTargetSegmentation = targetSegmentationPromise ? await targetSegmentationPromise : null;
   const targetSamTimeoutMs = latencyBudget?.providerTimeoutMs
     ? latencyBudget.providerTimeoutMs({ requestedMs: 16000, maximumMs: 16000 })
     : 16000;
-  let sam = latencyBudget && !latencyBudget.canRun(2500)
-    ? { enabled: true, ok: false, reason: "transform_latency_budget_exhausted_before_target_segmentation", regions: [], results: [] }
-    : await runTargetConditionedSegmentation(ghostUrl, segmentationPlan, { timeoutMs: targetSamTimeoutMs });
+  let sam = earlyTargetSegmentation?.ok
+    ? earlyTargetSegmentation
+    : latencyBudget && !latencyBudget.canRun(2500)
+      ? earlyTargetSegmentation || { enabled: true, ok: false, reason: "transform_latency_budget_exhausted_before_target_segmentation", regions: [], results: [] }
+      : await runTargetConditionedSegmentation(ghostUrl, segmentationPlan, { timeoutMs: targetSamTimeoutMs });
   if (!sam?.ok && latencyBudget?.canRun?.(5000)) {
     const fallbackTimeoutMs = latencyBudget.providerTimeoutMs({ requestedMs: 10000, maximumMs: 10000 });
     sam = await runSamSegmentation(ghostUrl, { timeoutMs: fallbackTimeoutMs });
@@ -8146,6 +8162,7 @@ async function analyzeGhostColors(ghostUrl, { latencyBudget = null, semanticObse
       sam_reason: sam?.reason || null,
       sam_version: sam?.results ? `target_conditioned:${TARGET_CONDITIONED_SAM_VERSION}` : (process.env.REPLICATE_SAM_MODEL || DEFAULT_REPLICATE_SAM_MODEL),
       target_conditioned_segmentation: !!sam?.results,
+      early_target_conditioned_segmentation: !!earlyTargetSegmentation?.ok,
       target_conditioned_results: sam?.results || [],
       sam_throttled: isReplicateThrottleError(sam?.reason),
       dino_enabled: !!groundingDino?.enabled,
@@ -8210,10 +8227,28 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       },
       visionCoreDecision: {},
       model: OPENAI_SEMANTIC_MODEL,
-      timeoutMs: EXTERNAL_SEMANTIC_OBSERVER_BUDGET_MS,
+      timeoutMs: EARLY_SEMANTIC_OBSERVER_BUDGET_MS,
       cache: externalSemanticCache,
       cacheKey: `${publicUrl}:visioncore_semantic_mask_orchestration_v1:${OPENAI_SEMANTIC_MODEL}`,
     });
+    const earlyTargetSegmentationPromise = earlyExternalSemanticPromise.then(async (externalSemantic) => {
+      if (!externalSemantic?.ok || externalSemantic?.skipped) {
+        return { enabled: true, ok: false, reason: externalSemantic?.reason || "semantic_observation_unavailable", regions: [], results: [] };
+      }
+      const earlyPlan = buildTargetConditionedSegmentationPlanV1({
+        dinoRegions: [],
+        semanticHandoff: externalSemantic.handoff || {},
+      });
+      return runTargetConditionedSegmentation(publicUrl, earlyPlan, {
+        timeoutMs: EARLY_TARGET_SEGMENTATION_BUDGET_MS,
+      });
+    }).catch((error) => ({
+      enabled: true,
+      ok: false,
+      reason: error?.message || "early_target_segmentation_failed",
+      regions: [],
+      results: [],
+    }));
 
     let ghostUrl;
     try {
@@ -8230,6 +8265,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       analysis = await analyzeGhostColors(ghostUrl, {
         latencyBudget: transformLatencyBudget,
         semanticObservationPromise: earlyExternalSemanticPromise,
+        targetSegmentationPromise: earlyTargetSegmentationPromise,
       });
     } catch (error) {
       return sendStepError(res, 500, "analyze_cloudinary_colors", error);
