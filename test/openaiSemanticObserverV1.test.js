@@ -28,6 +28,19 @@ test("request schema preserves distinct accessory instances and precise subtypes
   }
 });
 
+test("request schema captures layers, overlap, occlusion, and unusual details without color math", () => {
+  const request = buildOpenAISemanticRequestV1({ imageUrl: "https://example.test/outfit.jpg" });
+  const claim = request.text.format.schema.properties.claims.items;
+  for (const field of ["layer_role", "overlaps_instance_keys", "occlusion", "unusual_detail", "segmentation_prompt"]) {
+    assert.ok(claim.required.includes(field));
+    assert.ok(claim.properties[field]);
+  }
+  const prompt = request.input[0].content[0].text;
+  assert.match(prompt, /scene graph/i);
+  assert.match(prompt, /tiny or unusual fashion detail/i);
+  assert.match(prompt, /segmentation_prompt.*without mentioning its color/i);
+});
+
 test("request schema permits only categorical color hypotheses", () => {
   const request = buildOpenAISemanticRequestV1({ imageUrl: "https://example.test/outfit.jpg" });
   const claim = request.text.format.schema.properties.claims.items;
