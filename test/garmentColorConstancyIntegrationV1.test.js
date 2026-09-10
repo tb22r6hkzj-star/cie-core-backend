@@ -51,6 +51,34 @@ test("assist mode promotes one stable measured intrinsic color into the publisha
   assert.equal(result.color_debug.garment_color_constancy_v1.raw_region_colors.length, 3);
 });
 
+test("assist mode preserves the exact owned-pixel ratio instead of rewriting a retained color to 100%", () => {
+  const result = applyGarmentColorConstancyIntegrationV1({
+    zone: "lower_garment",
+    dominant_hex: "#6F7E91",
+    owned_pixel_count: 193223,
+    region_colors: [
+      {
+        hex: "#6F7E91",
+        pct: 74974 / 193223,
+        measured_ratio: 74974 / 193223,
+        pixel_count: 74974,
+        total_owned_pixel_count: 193223,
+        ownership_state: "owned",
+        ownership_validated: true,
+      },
+    ],
+  }, { mode: "assist" });
+
+  const expected = 74974 / 193223;
+  assert.equal(result.color_debug.garment_color_constancy_v1.applied, true);
+  assert.equal(result.region_colors.length, 1);
+  assert.equal(result.region_colors[0].pixel_count, 74974);
+  assert.equal(result.region_colors[0].pct, expected);
+  assert.equal(result.region_colors[0].percentage, expected);
+  assert.equal(result.region_colors[0].display_pct, expected);
+  assert.equal(result.region_colors[0].measured_ratio, expected);
+});
+
 test("assist mode cannot promote samples that lack explicit ownership", () => {
   const result = applyGarmentColorConstancyIntegrationV1({
     ...brownShirt,
