@@ -42,6 +42,23 @@ test("request schema captures layers, overlap, occlusion, and unusual details wi
   assert.match(prompt, /segmentation_prompt.*without mentioning its color/i);
 });
 
+test("early segmentation profile is compact and contains no semantic color fields", () => {
+  const request = buildOpenAISemanticRequestV1({
+    imageUrl: "https://example.test/outfit.jpg",
+    profile: "segmentation_scene",
+  });
+  const claim = request.text.format.schema.properties.claims.items;
+  for (const required of ["piece", "subtype", "instance_key", "visible_count", "component_of", "layer_role", "overlaps_instance_keys", "occlusion", "unusual_detail", "segmentation_prompt"]) {
+    assert.ok(claim.required.includes(required));
+  }
+  for (const excluded of ["perceived_color_family", "color_appearance_cue", "lighting_cue", "color_confidence", "ownership_hypothesis"]) {
+    assert.equal(claim.properties[excluded], undefined);
+  }
+  assert.equal(request.max_output_tokens, 3600);
+  assert.match(request.input[0].content[0].text, /contains no color name/i);
+  assert.match(request.input[0].content[0].text, /VisionCore measures pixels after masking/i);
+});
+
 test("request schema permits only categorical color hypotheses", () => {
   const request = buildOpenAISemanticRequestV1({ imageUrl: "https://example.test/outfit.jpg" });
   const claim = request.text.format.schema.properties.claims.items;
