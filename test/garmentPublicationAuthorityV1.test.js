@@ -38,6 +38,39 @@ test("unowned DINO shades cannot force a garment into multicolor publication", (
   assert.equal(result._debug.garment_publication_authority_v1.suppressed_unowned_color_count, 4);
 });
 
+test("customer-facing garment fields preserve exact mask pixel ratios", () => {
+  const exactRatio = 74978 / 205845;
+  const palette = [{
+    hex: "#6F7E91",
+    pct: exactRatio,
+    percentage: exactRatio,
+    display_pct: exactRatio,
+    measured_ratio: exactRatio,
+    pixel_count: 74978,
+    total_owned_pixel_count: 205845,
+    source: "garment_color_constancy_v1",
+    ownership_state: "owned",
+    ownership_validated: true,
+    intrinsic_material_identity: true,
+  }];
+  const result = inferZoneColorRead(
+    "lower_garment",
+    { hex: "#6F7E91", name: "Muted Blue", pct: exactRatio, score: 90, confidence: 90 },
+    [],
+    palette,
+    true,
+    { zoneColorSource: "target_conditioned_sam_mask" }
+  );
+
+  for (const color of [result.dominant_color, result.primary_color, result.region_colors[0], result.detected_colors[0]]) {
+    assert.equal(color.pct, exactRatio);
+    assert.equal(color.pixel_count, 74978);
+    assert.equal(color.total_owned_pixel_count, 205845);
+  }
+  assert.equal(result.region_colors[0].display_pct, exactRatio);
+  assert.equal(result.region_colors[0].percentage, "36%");
+});
+
 test("a spatially owned garment-body secondary remains eligible for publication", () => {
   const palette = [
     { hex: "#60321E", pct: 0.62, source: "upper_garment_purity_v1", body_share: 0.72, boundary_share: 0.08, underarm_share: 0.05, spatial_penalty: 1 },
