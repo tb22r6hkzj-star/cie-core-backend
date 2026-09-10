@@ -126,3 +126,17 @@ test("reasoning cannot invent replacement hex is a permanent policy", () => {
   assert.equal(result.policy.unvalidated_measurements_must_abstain, true);
   assert.equal(result.doctrine, "measure_twice_publish_once");
 });
+
+test("equivalent pale footwear clusters merge and largest owned mass wins within its authority tier", () => {
+  const result = selectMeasuredColorAuthorityV1([
+    { hex: "#A3A09F", pct: 0.19, pixel_count: 190, source: "owned_interior_pixels", ownership_state: "owned", ownership_validated: true, confidence: 0.8 },
+    { hex: "#C3BEC0", pct: 0.34, pixel_count: 340, source: "owned_interior_pixels", ownership_state: "owned", ownership_validated: true, confidence: 0.8 },
+    { hex: "#C0BBBB", pct: 0.13, pixel_count: 130, source: "owned_interior_pixels", ownership_state: "owned", ownership_validated: true, confidence: 0.8 },
+    { hex: "#7D8796", pct: 0.14, pixel_count: 140, source: "owned_interior_pixels", ownership_state: "owned", ownership_validated: true, confidence: 0.8 },
+  ]);
+
+  assert.equal(result.selected?.hex, "#C3BEC0");
+  assert.ok(result.selected?.merged_measurement_count >= 2);
+  assert.ok(result.selected?.pixel_count >= 470);
+  assert.equal(result.policy.largest_owned_pixel_mass_wins_within_authority_tier, true);
+});
