@@ -44,6 +44,8 @@ test("target-conditioned masks stay color-neutral and publish only measured mask
   assert.match(targetProvider, /mask_prompt: String\(target\?\.prompt/);
   assert.match(targetProvider, /const maskUrl = outputs\[2\]/);
   assert.match(targetProvider, /external_color_authority: false/);
+  assert.match(source, /pixel_count: row\.count/);
+  assert.match(source, /measured_pixel_count: totalOwnedPixelCount/);
   assert.match(source, /authority: "exclusive_mask_pixel_membership"/);
   assert.match(source, /transform_latency_budget_exhausted_before_target_segmentation/);
 });

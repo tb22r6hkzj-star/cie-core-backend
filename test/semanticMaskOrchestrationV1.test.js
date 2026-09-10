@@ -50,6 +50,15 @@ test("compound fashion names use token boundaries instead of substring collision
   assert.equal(normalizeSemanticGarmentZoneV1("wallet or trouser chain"), "accessory_jewelry");
 });
 
+test("piece identity can recover a zone when an unfamiliar subtype alone cannot", () => {
+  const graph = buildSemanticSceneGraphV1(handoff([claim({
+    piece: "short-sleeve shirt",
+    subtype: "crew-neck undershirt",
+    zone: "torso",
+  })]));
+  assert.equal(graph.pieces[0].zone, "upper_garment");
+});
+
 test("overlapping garments remain separate targets even inside the same zone", () => {
   const claims = [
     claim({

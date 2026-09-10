@@ -46,7 +46,7 @@ export function buildSemanticSceneGraphV1(handoff = {}) {
       instance_key: claim?.instance_key || `semantic_piece_${index + 1}`,
       piece: claim?.piece || null,
       subtype: claim?.subtype || null,
-      zone: normalizeSemanticGarmentZoneV1(claim?.subtype || claim?.piece, claim?.zone),
+      zone: normalizeSemanticGarmentZoneV1([claim?.subtype, claim?.piece].filter(Boolean).join(" "), claim?.zone),
       layer_role: claim?.layer_role || "unknown",
       overlaps_instance_keys: Array.isArray(claim?.overlaps_instance_keys) ? claim.overlaps_instance_keys : [],
       occlusion: claim?.occlusion || "unknown",
@@ -139,7 +139,7 @@ export function buildTargetConditionedSegmentationPlanV1({ dinoRegions = [], sem
 
   return {
     version: "target_conditioned_segmentation_plan_v1",
-    targets: targets.slice(0, 8),
+    targets: targets.slice(0, 12),
     scene_graph: graph,
     doctrine: "understand_then_localize_then_mask_then_measure",
   };
