@@ -50,6 +50,13 @@ const TARGETS = Object.freeze({
     maxArea: 0.06,
     confidenceFloor: 0.3,
   },
+  eyewear: {
+    query: ["glasses", "eyeglasses", "eyewear"],
+    labels: ["glasses", "eyeglasses", "eyewear", "sunglasses"],
+    y: [0.01, 0.36],
+    maxArea: 0.09,
+    confidenceFloor: 0.26,
+  },
 });
 
 const DISCOVERY_TYPES = Object.freeze(["watch", "earrings"]);
@@ -78,6 +85,7 @@ export function inferTargetedAccessoryTypeV1(candidate = {}) {
     .filter(Boolean)
     .join(" ");
   if (/shoe.*(hardware|bit)|horsebit|metal.*shoe.*bit/.test(value)) return "shoe_hardware";
+  if (/eyewear|eye_glasses|eyeglasses|glasses|sunglasses/.test(value)) return "eyewear";
   if (/pendant/.test(value)) return "pendant";
   if (/chain/.test(value)) return "chain";
   if (/earring|ear_stud/.test(value)) return "earrings";
@@ -93,6 +101,10 @@ function publishedAccessoryCounts(outfitAnalysis = {}) {
     const type = token(instance?.accessory_type || instance?.object_type || instance?.label);
     if (!TARGETS[type]) continue;
     counts[type] = (counts[type] || 0) + 1;
+  }
+  const eyewear = outfitAnalysis?.garment_zones?.zones?.eyewear;
+  if (eyewear && eyewear?.interpretation !== "unknown" && (eyewear?.primary_color?.hex || eyewear?.hex)) {
+    counts.eyewear = Math.max(1, counts.eyewear || 0);
   }
   return counts;
 }
