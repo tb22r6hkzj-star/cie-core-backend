@@ -8227,6 +8227,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       },
       visionCoreDecision: {},
       model: OPENAI_SEMANTIC_MODEL,
+      profile: "segmentation_scene",
       timeoutMs: EARLY_SEMANTIC_OBSERVER_BUDGET_MS,
       cache: externalSemanticCache,
       cacheKey: `${publicUrl}:visioncore_semantic_mask_orchestration_v1:${OPENAI_SEMANTIC_MODEL}`,
