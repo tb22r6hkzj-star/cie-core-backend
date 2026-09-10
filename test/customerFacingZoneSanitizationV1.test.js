@@ -100,3 +100,31 @@ test("regenerates every published nested color name from its own authoritative h
   assert.equal(outerwear.region_colors[0].name, getName("#BE4175"));
   assert.equal(outerwear.detected_colors[0].name, getName("#E15F9E"));
 });
+
+test("canonical garment authority rewrites every public alias and preserves a real owned accent", () => {
+  const analysis = { garment_zones: { zones: { lower_garment: {
+    name: "stale",
+    hex: "#111111",
+    interpretation: "single_color",
+    primary_color: { hex: "#111111" },
+    support_colors: [{ hex: "#FFFFFF" }],
+    canonical_color_authority_v1: {
+      applied: true,
+      source: "exclusive_sam_mask_pixels",
+      dominant_hex: "#6D7D93",
+      region_colors: [
+        { hex: "#6D7D93", pct: 0.84 },
+        { hex: "#E15F9E", pct: 0.16 },
+      ],
+    },
+  } } } };
+
+  const lower = sanitizeCustomerFacingZonesV1(analysis).garment_zones.zones.lower_garment;
+  assert.equal(lower.hex, "#6D7D93");
+  assert.equal(lower.primary_color.hex, "#6D7D93");
+  assert.equal(lower.dominant_color.hex, "#6D7D93");
+  assert.deepEqual(lower.support_colors.map((color) => color.hex), ["#E15F9E"]);
+  assert.deepEqual(lower.detected_colors.map((color) => color.hex), ["#6D7D93", "#E15F9E"]);
+  assert.equal(lower.interpretation, "multi_color");
+  assert.equal(lower.color_authority_source, "exclusive_sam_mask_pixels");
+});
