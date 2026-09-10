@@ -86,3 +86,27 @@ test("non-lower garment regions are unchanged", () => {
   assert.equal(result.regions[0], upper);
   assert.equal(result.summary.corrected_region_count, 0);
 });
+
+test("validated denim mask and owned pink applique survive bbox purity and constancy", () => {
+  const protectedDenim = lowerRegion({
+    dominant_hex: "#6D7D93",
+    region_colors: [
+      { hex: "#6D7D93", pct: 0.91, pixel_count: 910, source: "sam_mask_interior", ownership_state: "owned", ownership_validated: true },
+      { hex: "#E15F9E", pct: 0.09, pixel_count: 90, source: "sam_mask_interior", ownership_state: "owned", ownership_validated: true },
+    ],
+    color_debug: {
+      piece_color_ownership_v1: {
+        applied: true,
+        measurement_source: "sam_mask_interior",
+      },
+    },
+  });
+  const decodedImage = image(100, 140, () => BLACK);
+  const result = applyLowerGarmentPurityV2({ decodedImage, regions: [protectedDenim] });
+  const zone = result.regions[0];
+
+  assert.equal(zone.dominant_hex, "#6D7D93");
+  assert.deepEqual(zone.region_colors.map((color) => color.hex), ["#6D7D93", "#E15F9E"]);
+  assert.equal(zone.color_debug.lower_garment_purity_v2.reason, "validated_mask_color_authority_preserved");
+  assert.equal(zone.color_debug.garment_color_constancy_v1.applied, true);
+});
