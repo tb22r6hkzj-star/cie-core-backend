@@ -44,6 +44,12 @@ test("unfamiliar one-piece garments become general semantic mask targets", () =>
   assert.equal(plan.targets[0].unusual_detail, "asymmetric waist panel");
 });
 
+test("compound fashion names use token boundaries instead of substring collisions", () => {
+  assert.equal(normalizeSemanticGarmentZoneV1("low-top sneakers"), "footwear");
+  assert.equal(normalizeSemanticGarmentZoneV1("cropped top"), "upper_garment");
+  assert.equal(normalizeSemanticGarmentZoneV1("wallet or trouser chain"), "accessory_jewelry");
+});
+
 test("overlapping garments remain separate targets even inside the same zone", () => {
   const claims = [
     claim({

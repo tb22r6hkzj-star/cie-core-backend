@@ -21,14 +21,15 @@ function colorNeutralPrompt(value) {
 
 export function normalizeSemanticGarmentZoneV1(value, fallback = null) {
   const token = clean(value).replace(/[^a-z0-9]+/g, "_");
-  if (/jacket|coat|outerwear|blazer|cardigan|vest/.test(token)) return "outerwear";
-  if (/shirt|blouse|top|tee|t_shirt|polo|sweater|hoodie/.test(token)) return "upper_garment";
-  if (/pants|trouser|jeans|shorts|skirt/.test(token)) return "lower_garment";
-  if (/dress|jumpsuit|romper|one_piece/.test(token)) return "body_garment";
-  if (/shoe|sneaker|boot|loafer|heel|sandal|footwear/.test(token)) return "footwear";
-  if (/necklace|pendant|earring|bracelet|watch|ring|brooch|jewelry|jewellery/.test(token)) return "accessory_jewelry";
-  if (/handbag|purse|clutch|satchel|tote|backpack|\bbag\b/.test(token)) return "bag";
-  if (/\bbelt\b|waist_belt/.test(token)) return "belt";
+  const hasToken = (pattern) => new RegExp(`(?:^|_)(?:${pattern})(?:_|$)`).test(token);
+  if (hasToken("necklace|pendant|earrings?|bracelets?|watch|rings?|brooch|jewel(?:ry|lery)|chains?")) return "accessory_jewelry";
+  if (hasToken("handbag|purse|clutch|satchel|tote|backpack|bag")) return "bag";
+  if (hasToken("belt")) return "belt";
+  if (hasToken("shoes?|sneakers?|boots?|loafers?|heels?|sandals?|footwear")) return "footwear";
+  if (hasToken("jackets?|coats?|outerwear|blazers?|cardigans?|vests?")) return "outerwear";
+  if (hasToken("dress|jumpsuit|romper|one_piece")) return "body_garment";
+  if (hasToken("shirts?|blouses?|tops?|tee|t_shirt|polo|sweaters?|hoodies?")) return "upper_garment";
+  if (hasToken("pants|trousers?|jeans|shorts|skirts?")) return "lower_garment";
   return SEGMENTATION_ZONES.has(fallback) ? fallback : null;
 }
 
