@@ -49,6 +49,7 @@ import { buildAccessoryInstancesV1 } from "./intelligence/accessoryInstancesV1.j
 import { attachColorEvidenceToZones } from "./intelligence/colorEvidence/index.js";
 import { applyPieceColorOwnershipV1 } from "./intelligence/pieceColorOwnershipV1.js";
 import { buildTargetConditionedSegmentationPlanV1 } from "./intelligence/semanticMaskOrchestrationV1.js";
+import { validateTargetConditionedMaskRegionsV1 } from "./intelligence/targetConditionedMaskValidationV1.js";
 import { applyLowerGarmentPurityV2 } from "./intelligence/lowerGarmentPurityV2.js";
 import { applyUpperGarmentPurityV1 } from "./intelligence/upperGarmentPurityV1.js";
 import { buildPublishedGarmentZonesV2 } from "./intelligence/publishedGarmentZonesV2.js";
@@ -8141,6 +8142,16 @@ async function analyzeGhostColors(ghostUrl, {
     const fallbackTimeoutMs = latencyBudget.providerTimeoutMs({ requestedMs: 10000, maximumMs: 10000 });
     sam = await runSamSegmentation(ghostUrl, { timeoutMs: fallbackTimeoutMs });
   }
+  if (sam?.results) {
+    const validation = validateTargetConditionedMaskRegionsV1({ regions: sam?.regions || [], plan: segmentationPlan });
+    sam = {
+      ...sam,
+      ok: validation.validated_count > 0,
+      reason: validation.validated_count ? null : "no_spatially_validated_target_masks",
+      regions: validation.regions,
+      target_conditioned_validation_v1: validation,
+    };
+  }
   const samRegions = Array.isArray(sam?.regions) ? sam.regions : [];
   const samOk = !!sam?.ok && samRegions.length > 0;
   const dinoOk = !!groundingDino?.ok && dinoDetections.length > 0;
@@ -8169,6 +8180,7 @@ async function analyzeGhostColors(ghostUrl, {
       target_conditioned_segmentation: !!sam?.results,
       early_target_conditioned_segmentation: !!earlyTargetSegmentation?.ok,
       target_conditioned_results: sam?.results || [],
+      target_conditioned_validation_v1: sam?.target_conditioned_validation_v1 || null,
       sam_throttled: isReplicateThrottleError(sam?.reason),
       dino_enabled: !!groundingDino?.enabled,
       dino_ok: dinoOk,
