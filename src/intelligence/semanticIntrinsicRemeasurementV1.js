@@ -225,6 +225,11 @@ function publicationPalette(region = {}) {
     traceable_to_pixels: true,
     intrinsic_material_identity: true,
   };
+  // Illuminant normalization means the lower neutral clusters are shadowed
+  // observations of the same material, not independent material colors. Keep
+  // them on the measured region for diagnostics, but do not advertise a solid
+  // white shoe as customer-facing multicolor footwear.
+  if (primary?.calibrated_not_raw_pixel === true) return [primary];
   return [primary, ...colors.filter((color) => safeHex(color?.hex) !== dominantHex)].slice(0, 6);
 }
 
