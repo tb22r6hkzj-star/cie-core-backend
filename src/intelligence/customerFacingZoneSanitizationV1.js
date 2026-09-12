@@ -76,7 +76,10 @@ function restoreOwnedZoneColor(analysis, zoneKey, zone) {
     support_colors: namedColors.slice(1),
     secondary_colors: namedColors.slice(1),
     interpretation: namedColors.length > 1 ? "multi_color" : "single_color",
-    confidence: Math.max(Number(zone?.confidence || 0), Number(authority?.confidence || 0)),
+    confidence: Math.max(
+      confidence100(zone?.confidence) || 0,
+      confidence100(authority?.confidence) || 0,
+    ),
     publication_state: publicationStateForConfidence(zone, authority?.confidence),
     publication_decision: "publish",
     validation_decision: "accepted",

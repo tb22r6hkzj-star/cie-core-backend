@@ -229,3 +229,20 @@ test("restored color authority cannot label low-confidence evidence confirmed", 
   assert.equal(analysis.garment_zones.zones.footwear.publication_state, "unknown");
   assert.notEqual(analysis.garment_zones.zones.footwear.publication_state, "confirmed");
 });
+
+test("restored ownership normalizes mixed confidence scales before publication", () => {
+  const analysis = sanitizeCustomerFacingZonesV1({
+    garment_zones: { zones: { footwear: {
+      confidence: 14,
+      interpretation: "single_color",
+      primary_color: { hex: "#EFEDEE" },
+    } } },
+    piece_color_ownership_v1: { accessory_color_authorities: [{
+      zone: "footwear", applied: true, confidence: 0.97, dominant_hex: "#EFEDEE",
+      region_colors: [{ hex: "#EFEDEE", pct: 1 }],
+    }] },
+  });
+  const footwear = analysis.garment_zones.zones.footwear;
+  assert.equal(footwear.confidence, 97);
+  assert.equal(footwear.publication_state, "confirmed");
+});
