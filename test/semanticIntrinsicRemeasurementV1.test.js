@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applySemanticIntrinsicRemeasurementV1 } from "../src/intelligence/semanticIntrinsicRemeasurementV1.js";
+import {
+  applySemanticIntrinsicPublicationV1,
+  applySemanticIntrinsicRemeasurementV1,
+} from "../src/intelligence/semanticIntrinsicRemeasurementV1.js";
 import { applyPieceColorOwnershipV1 } from "../src/intelligence/pieceColorOwnershipV1.js";
+import { sanitizeCustomerFacingZonesV1 } from "../src/intelligence/customerFacingZoneSanitizationV1.js";
 
 function handoff(overrides = {}) {
   return {
@@ -130,4 +134,51 @@ test("validated intrinsic remeasurement survives downstream mask authority selec
   assert.equal(owned.regions[0].dominant_hex, "#EFEDEE");
   assert.equal(owned.regions[0].region_colors[0].measurement_authority, "selected");
   assert.equal(owned.regions[0].region_colors[0].measurement_source, "exclusive_sam_mask_pixels_intrinsic_remeasurement");
+});
+
+test("final publication cannot restore a stale graphite footwear authority over intrinsic white", () => {
+  const remeasured = applySemanticIntrinsicRemeasurementV1({
+    regions: [{
+      ...footwearRegion(),
+      confidence: 0.8,
+      label: "sneakers",
+    }],
+    semanticHandoff: handoff(),
+  });
+  const staleAnalysis = {
+    garment_zones: { zones: { footwear: {
+      name: "Graphite",
+      hex: "#A3A09F",
+      dominant_hex: "#A3A09F",
+      primary_color: { hex: "#A3A09F", pct: 0.58 },
+      dominant_color: { hex: "#A3A09F", pct: 0.58 },
+      interpretation: "single_color",
+      confidence: 58,
+    } } },
+    piece_color_ownership_v1: { accessory_color_authorities: [{
+      id: "stale_shoe",
+      zone: "footwear",
+      confidence: 0.99,
+      applied: true,
+      dominant_hex: "#A3A09F",
+      region_colors: [{ hex: "#A3A09F", pct: 0.58 }],
+      color_authority_source: "piece_color_ownership_v1",
+    }] },
+    garment_analysis: { detected_items: [{ type: "footwear", primary_color: { hex: "#A3A09F" } }] },
+  };
+
+  const published = applySemanticIntrinsicPublicationV1({
+    outfitAnalysis: staleAnalysis,
+    regions: remeasured.regions,
+    summary: remeasured.summary,
+  });
+  const sanitized = sanitizeCustomerFacingZonesV1(published);
+  const footwear = sanitized.garment_zones.zones.footwear;
+  assert.equal(footwear.hex, "#EFEDEE");
+  assert.equal(footwear.dominant_hex, "#EFEDEE");
+  assert.equal(footwear.primary_color.hex, "#EFEDEE");
+  assert.equal(footwear.name, "Soft White");
+  assert.equal(footwear.semantic_intrinsic_publication_v1.authority_owner, "visioncore");
+  assert.equal(sanitized.piece_color_ownership_v1.accessory_color_authorities[0].dominant_hex, "#EFEDEE");
+  assert.equal(sanitized.garment_analysis.detected_items[0].primary_color.hex, "#EFEDEE");
 });
