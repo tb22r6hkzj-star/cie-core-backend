@@ -49,6 +49,7 @@ import { buildAccessoryInstancesV1 } from "./intelligence/accessoryInstancesV1.j
 import { attachColorEvidenceToZones } from "./intelligence/colorEvidence/index.js";
 import { applyPieceColorOwnershipV1 } from "./intelligence/pieceColorOwnershipV1.js";
 import { buildTargetConditionedSegmentationPlanV1 } from "./intelligence/semanticMaskOrchestrationV1.js";
+import { mergeExternalSemanticHandoffsV1 } from "./intelligence/external/semanticHandoffMergeV1.js";
 import {
   validateTargetConditionedMaskMeasurementsV1,
   validateTargetConditionedMaskRegionsV1,
@@ -80,6 +81,9 @@ import { resolveMaskStrengthV1, resolveOpaqueMaskStrengthV1 } from "./intelligen
 import { normalizeExternalIntelligenceMode } from "./intelligence/visionCoreExternalIntelligencePolicyV1.js";
 import { evaluateCaptureQualityV1 } from "./intelligence/captureQualityGateV1.js";
 import { buildConsumerEvidenceV1 } from "./intelligence/consumerEvidenceV1.js";
+import { buildAppearanceMeasurementSynthesesV1 } from "./intelligence/appearanceMeasurementSynthesisV1.js";
+import { executeRuntimeSecondPassV1 } from "./intelligence/runtimeSecondPassV1.js";
+import { segmentationZoneForPieceV1 } from "./intelligence/pieceOntologyV1.js";
 import { createTransformLatencyBudgetV1, shouldRunAccessoryEscalationV1 } from "./intelligence/transformLatencyBudgetV1.js";
 import { buildGroundingDinoQueryPlanV1 } from "./intelligence/groundingDinoQueryPlanV1.js";
 import { parseYoloWorldOutputV1, yoloClassNamesFromQueryV1 } from "./intelligence/yoloWorldFallbackV1.js";
@@ -8452,7 +8456,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       localAccessoryRecoveryRequired && effectiveExternalIntelligenceMode === "off"
     );
     const earlyColorSemantic = await earlyColorLightingPromise;
-    const externalSemantic = earlyColorSemantic?.ok ? earlyColorSemantic : analysis?.externalSemantic || await runOpenAISemanticObserverV1({
+    const rawExternalSemantic = earlyColorSemantic?.ok ? earlyColorSemantic : analysis?.externalSemantic || await runOpenAISemanticObserverV1({
       mode: effectiveExternalIntelligenceMode,
       imageUrl: publicUrl,
       visionCoreEvidence: buildExternalSemanticEvidence(outfitAnalysis),
@@ -8465,10 +8469,60 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       cache: externalSemanticCache,
       cacheKey: `${publicUrl}:visioncore_external_handoff_v1:${OPENAI_SEMANTIC_MODEL}`,
     });
+    const externalSemantic = {
+      ...rawExternalSemantic,
+      handoff: mergeExternalSemanticHandoffsV1({
+        sceneHandoff: analysis?.externalSemantic?.handoff || {},
+        colorHandoff: rawExternalSemantic?.handoff || {},
+      }),
+    };
     let semanticReconciliation = reconcileExternalSemanticsV1({
       handoff: externalSemantic?.handoff,
       outfitAnalysis,
     });
+    const secondPassSyntheses = buildAppearanceMeasurementSynthesesV1(semanticReconciliation);
+    const secondPassBudgetMs = Math.max(0, Math.min(8000, transformLatencyBudget.remainingMs()));
+    let secondPassRemeasurementPromise = null;
+    const runtimeSecondPass = await executeRuntimeSecondPassV1({
+      syntheses: secondPassSyntheses,
+      imageUrl: publicUrl,
+      totalBudgetMs: secondPassBudgetMs,
+      remeasureVisionCore: async ({ piece, instance_key: instanceKey }) => {
+        const zone = segmentationZoneForPieceV1(piece, piece);
+        secondPassRemeasurementPromise ||= enrichSamRegionsWithMaskedColors(publicUrl, segmentedRegions);
+        const remeasuredRegions = await secondPassRemeasurementPromise;
+        const candidates = remeasuredRegions.filter((region) => {
+          if (region?.zone !== zone) return false;
+          const regionInstanceKey = region?.target_conditioned_mask_v1?.semantic_instance_key || null;
+          return !instanceKey || !regionInstanceKey || regionInstanceKey === instanceKey;
+        });
+        if (!candidates.length) return { available: false, piece, instance_key: instanceKey, regions: [] };
+        return { available: candidates.length > 0, piece, instance_key: instanceKey, regions: candidates };
+      },
+    });
+    const secondPassRegions = runtimeSecondPass.results
+      .flatMap((entry) => entry?.visioncore_remeasurement?.result?.regions || []);
+    if (secondPassRegions.length) {
+      const replacementById = new Map(secondPassRegions
+        .filter((region) => region?.id)
+        .map((region) => [region.id, region]));
+      segmentedRegions = segmentedRegions.map((region) => replacementById.get(region?.id) || region);
+      analysis.segmentedRegions = segmentedRegions;
+      outfitAnalysis = buildOutfitAnalysis({
+        dominantHex: analysis.dominantHex,
+        topColors: analysis.topColors,
+        segmentedRegions,
+        decodedImage: analysis.decodedImage,
+        perception_v6_mode: MARKET_PERCEPTION_V6_MODE,
+        dinoGarmentRegions: analysis.dinoGarmentRegions,
+        pipeline: analysis.pipeline,
+      });
+      outfitAnalysis = { ...outfitAnalysis, capture_quality_v1: captureQuality };
+      semanticReconciliation = reconcileExternalSemanticsV1({
+        handoff: externalSemantic?.handoff,
+        outfitAnalysis,
+      });
+    }
     const semanticIntrinsicRemeasurement = applySemanticIntrinsicRemeasurementV1({
       regions: segmentedRegions,
       semanticHandoff: externalSemantic?.handoff,
@@ -8896,6 +8950,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       external_intelligence: {
         ...(outfitAnalysis?.external_intelligence || {}),
         semantic_reconciliation: semanticReconciliation,
+        runtime_second_pass_v1: runtimeSecondPass,
         semantic_intrinsic_remeasurement_v1: outfitAnalysis?.piece_color_ownership_v1?.semantic_intrinsic_publication_v1?.remeasurement_summary
           || semanticIntrinsicRemeasurement.summary,
       },
@@ -8972,6 +9027,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           failure_stage: externalSemantic.failure_stage || null,
           disposition: externalSemantic?.handoff?.disposition || null,
           semantic_reconciliation: semanticReconciliation,
+          runtime_second_pass_v1: runtimeSecondPass,
           semantic_intrinsic_remeasurement_v1: semanticIntrinsicRemeasurement.summary,
           accessory_intelligence_lane: accessoryIntelligenceLane,
           targeted_accessory_reanalysis: targetedAccessoryReanalysis,

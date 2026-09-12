@@ -56,7 +56,8 @@ export async function executeRuntimeSecondPassV1({
     let newMeasurement = null;
     if (plan.remeasure_visioncore) {
       const call = await boundedCall(remeasureVisionCore, {
-        piece: plan.piece,
+          piece: plan.piece,
+          instance_key: plan.instance_key,
         imageUrl,
         attempt: attempt + 1,
         preserve_original: true,
@@ -70,7 +71,8 @@ export async function executeRuntimeSecondPassV1({
       const remainingAfterMeasurement = Math.max(0, totalBudgetMs - elapsedAfterMeasurement);
       if (remainingAfterMeasurement >= 500) {
         entry.semantic_reassessment = await boundedCall(reassessSemantic, {
-          piece: plan.piece,
+        piece: plan.piece,
+        instance_key: plan.instance_key,
           imageUrl,
           attempt: attempt + 1,
           measurement_context: newMeasurement,

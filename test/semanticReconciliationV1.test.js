@@ -31,6 +31,9 @@ test("normalizes common garment and accessory names", () => {
   assert.equal(normalizeSemanticPieceV1("gold watch"), "watch");
   assert.equal(normalizeSemanticPieceV1("ear studs"), "earrings");
   assert.equal(normalizeSemanticPieceV1("finger ring"), "ring");
+  assert.equal(normalizeSemanticPieceV1("puffer jacket"), "outerwear");
+  assert.equal(normalizeSemanticPieceV1("structured romper"), "body_garment");
+  assert.equal(normalizeSemanticPieceV1("side bag"), "bag");
 });
 
 test("semantic-only belt remains unpublished pending spatial confirmation", () => {

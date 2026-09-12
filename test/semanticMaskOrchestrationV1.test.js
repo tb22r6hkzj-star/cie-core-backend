@@ -145,3 +145,26 @@ test("weak detector guesses do not become pixel-ownership targets", () => {
   });
   assert.equal(plan.targets.length, 0);
 });
+
+test("coverage-aware scheduling retains every represented zone before duplicate instances", () => {
+  const claims = Array.from({ length: 12 }, (_, index) => claim({
+    piece: "necklace",
+    subtype: "chain necklace",
+    instance_key: `necklace_${index + 1}`,
+    zone: "neck",
+    layer_role: "accessory",
+    segmentation_prompt: `necklace chain instance ${index + 1}`,
+    confidence: 0.99 - index / 100,
+  }));
+  claims.push(
+    claim({ piece: "side bag", subtype: "crossbody bag", instance_key: "bag_1", segmentation_prompt: "crossbody bag", confidence: 0.7 }),
+    claim({ piece: "eyewear", subtype: "glasses", instance_key: "eyewear_1", segmentation_prompt: "eyeglass frames", confidence: 0.7 }),
+    claim({ piece: "pants", subtype: "jeans", instance_key: "pants_1", segmentation_prompt: "jeans garment", confidence: 0.7 })
+  );
+  const plan = buildTargetConditionedSegmentationPlanV1({ semanticHandoff: handoff(claims), maximumTargets: 8 });
+  assert.equal(plan.targets.length, 8);
+  assert.ok(plan.targets.some((target) => target.zone === "bag"));
+  assert.ok(plan.targets.some((target) => target.zone === "eyewear"));
+  assert.ok(plan.targets.some((target) => target.zone === "lower_garment"));
+  assert.equal(plan.scheduling_policy, "category_coverage_then_confidence_and_reasoning_risk");
+});

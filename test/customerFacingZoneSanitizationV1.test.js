@@ -54,7 +54,7 @@ test("validated footwear ownership survives a generic low-signal read", () => {
   assert.equal(footwear.garment_identity.primary_identity.name, "Graphite Black");
   assert.equal(footwear.primary_color.name, "Graphite Black");
   assert.equal(footwear.interpretation, "single_color");
-  assert.equal(footwear.publication_state, "confirmed");
+  assert.equal(footwear.publication_state, "possible");
   assert.equal(footwear.confidence, 63);
 });
 
@@ -209,4 +209,23 @@ test("published cards expose calibrated confidence instead of a stale legacy zer
   const sanitized = sanitizeCustomerFacingZonesV1(analysis);
   assert.equal(sanitized.garment_zones.zones.outerwear.confidence, 74);
   assert.equal(sanitized.garment_analysis.detected_items[0].confidence, 74);
+});
+
+test("restored color authority cannot label low-confidence evidence confirmed", () => {
+  const analysis = sanitizeCustomerFacingZonesV1({
+    garment_zones: { zones: {
+      footwear: {
+        confidence: 14,
+        interpretation: "single_color",
+        publication_decision: "publish",
+        primary_color: { hex: "#A3A3A3" },
+      },
+    } },
+    piece_color_ownership_v1: { accessory_color_authorities: [{
+      zone: "footwear", applied: true, confidence: 14, dominant_hex: "#EFEDEE",
+      region_colors: [{ hex: "#EFEDEE", pct: 1 }],
+    }] },
+  });
+  assert.equal(analysis.garment_zones.zones.footwear.publication_state, "unknown");
+  assert.notEqual(analysis.garment_zones.zones.footwear.publication_state, "confirmed");
 });

@@ -94,7 +94,7 @@ export const OPENAI_COLOR_LIGHTING_SCHEMA_V1 = Object.freeze({
     overall_confidence: { type: "number" },
     claims: {
       type: "array",
-      maxItems: 12,
+      maxItems: 24,
       items: {
         type: "object",
         additionalProperties: false,
@@ -155,7 +155,7 @@ function segmentationScenePrompt(visionCoreEvidence = {}) {
 function colorLightingPrompt(visionCoreEvidence = {}) {
   return [
     "You are VisionCore's compact intrinsic-color and lighting observer, not the numeric or publication authority.",
-    "Return at most 12 concise claims: one for each clearly visible garment and distinct fashion accessory, prioritizing footwear and layered garments.",
+    "Return at most 24 concise claims: one for each clearly visible garment and distinct fashion accessory. Allocate coverage across the entire outfit; do not prioritize one category over another.",
     "For each piece, estimate only the broad intrinsic material family by comparing lit and shadowed areas of that same object.",
     "If a neutral surface has white highlights and gray shadows, prefer white and state the shadow, low-light, or color-cast cue. Use unclear when the family is not defensible.",
     "Do not provide or calculate hex, RGB, LAB, percentages, scores, masks, or publication decisions. VisionCore owns all numeric measurement and normalization.",
@@ -203,7 +203,7 @@ export function buildOpenAISemanticRequestV1({ imageUrl, visionCoreEvidence = {}
     },
     // A complete garment, layered scene graph, and multi-accessory inventory
     // can be large because strict JSON must emit every required field.
-    max_output_tokens: colorLightingProfile ? 1800 : sceneGraphProfile ? 3600 : 6000,
+    max_output_tokens: colorLightingProfile ? 3200 : sceneGraphProfile ? 3600 : 6000,
   };
 }
 

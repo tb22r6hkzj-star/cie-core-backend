@@ -73,8 +73,8 @@ test("parallel color-lighting profile is compact and cannot supply numeric color
     assert.equal(claim.properties[prohibited], undefined);
   }
   assert.equal(request.text.format.name, "visioncore_color_lighting_v1");
-  assert.equal(request.max_output_tokens, 1800);
-  assert.match(request.input[0].content[0].text, /at most 12 concise claims/i);
+  assert.equal(request.max_output_tokens, 3200);
+  assert.match(request.input[0].content[0].text, /at most 24 concise claims/i);
   assert.match(request.input[0].content[0].text, /white highlights and gray shadows/i);
 });
 

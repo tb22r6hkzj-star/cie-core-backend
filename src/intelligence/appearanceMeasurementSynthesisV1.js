@@ -84,6 +84,7 @@ export function buildAppearanceMeasurementSynthesisV1(candidate = {}) {
   return {
     version: "appearance_measurement_synthesis_v1",
     piece: candidate?.piece || null,
+    instance_key: candidate?.instance_key || null,
     reasoning_state: state,
     authority_owner: "visioncore",
     appearance_truth: {

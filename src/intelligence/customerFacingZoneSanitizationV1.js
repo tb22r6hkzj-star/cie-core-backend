@@ -1,5 +1,6 @@
 import { getColorName } from "../engines/labelMapper/index.js";
 import chroma from "chroma-js";
+import { canonicalizeColorObjectV1 } from "./colorIdentityContractV1.js";
 
 const COLOR_FIELDS = [
   "hex", "dominant_hex", "dominant_color", "primary_color", "signature_color",
@@ -76,7 +77,7 @@ function restoreOwnedZoneColor(analysis, zoneKey, zone) {
     secondary_colors: namedColors.slice(1),
     interpretation: namedColors.length > 1 ? "multi_color" : "single_color",
     confidence: Math.max(Number(zone?.confidence || 0), Number(authority?.confidence || 0)),
-    publication_state: "confirmed",
+    publication_state: publicationStateForConfidence(zone, authority?.confidence),
     publication_decision: "publish",
     validation_decision: "accepted",
     color_authority_source: authority.color_authority_source || "piece_color_ownership_v1",
@@ -97,6 +98,17 @@ function confidence100(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return null;
   return Math.max(0, Math.min(100, numeric > 0 && numeric <= 1 ? numeric * 100 : numeric));
+}
+
+function publicationStateForConfidence(zone = {}, fallbackConfidence = 0) {
+  const values = [zone?.unified_confidence, zone?.calibrated_confidence, zone?.confidence, fallbackConfidence]
+    .map(confidence100)
+    .filter((value) => value !== null);
+  const confidence = values.length ? Math.max(...values) : 0;
+  if (confidence >= 80) return "confirmed";
+  if (confidence >= 65) return "probable";
+  if (confidence >= 45) return "possible";
+  return "unknown";
 }
 
 function synchronizePublishedConfidence(zone = {}) {
@@ -207,7 +219,7 @@ function restoreCanonicalGarmentColor(zone = {}) {
     object_local_colors: palette,
     interpretation: supporting.length ? "multi_color" : "single_color",
     color_mode: supporting.length ? "multicolor" : "single_color",
-    publication_state: "confirmed",
+    publication_state: publicationStateForConfidence(zone, authority?.confidence),
     publication_decision: "publish",
     validation_decision: "accepted",
     color_authority_source: authority.source || "canonical_color_authority_v1",
@@ -216,15 +228,7 @@ function restoreCanonicalGarmentColor(zone = {}) {
 
 function synchronizeColorObject(color) {
   if (!color?.hex) return color;
-  const name = getColorName(color.hex);
-  return {
-    ...color,
-    name,
-    color_identity: {
-      ...(color?.color_identity || {}),
-      name,
-    },
-  };
+  return canonicalizeColorObjectV1(color);
 }
 
 function synchronizeColorList(colors) {
@@ -234,8 +238,13 @@ function synchronizeColorList(colors) {
 function synchronizeCustomerFacingColorAliases(zone = {}) {
   const primaryHex = zone?.primary_color?.hex || zone?.dominant_color?.hex || zone?.hex || zone?.dominant_hex;
   if (!primaryHex || isUncertain(zone)) return zone;
-  const name = getColorName(primaryHex);
-  const sourceIdentity = zone?.primary_color?.color_identity || zone?.dominant_color?.color_identity || zone?.color_identity || {};
+  const canonicalPrimary = synchronizeColorObject({
+    ...(zone?.dominant_color || {}),
+    ...(zone?.primary_color || {}),
+    hex: primaryHex,
+  });
+  const name = canonicalPrimary?.name || getColorName(primaryHex);
+  const sourceIdentity = canonicalPrimary?.color_identity || {};
   const colorIdentity = { ...sourceIdentity, name };
   const primaryIdentity = {
     ...(zone?.garment_identity?.primary_identity || {}),
@@ -247,8 +256,8 @@ function synchronizeCustomerFacingColorAliases(zone = {}) {
     name,
     display_label: name,
     color_identity: colorIdentity,
-    dominant_color: synchronizeColorObject(zone?.dominant_color),
-    primary_color: synchronizeColorObject(zone?.primary_color),
+    dominant_color: canonicalPrimary,
+    primary_color: canonicalPrimary,
     signature_color: synchronizeColorObject(zone?.signature_color),
     support_colors: synchronizeColorList(zone?.support_colors),
     secondary_colors: synchronizeColorList(zone?.secondary_colors),
