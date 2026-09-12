@@ -74,7 +74,10 @@ test("external semantics cannot invent a replacement from a non-calibratable dar
 
 test("VisionCore normalizes a measured neutral shadow when no white pixel cluster survives", () => {
   const region = footwearRegion();
-  region.illumination_remeasurement_candidates_v1 = region.region_colors;
+  region.illumination_remeasurement_candidates_v1 = [
+    ...region.region_colors,
+    { hex: "#D2CECF", pct: 0.09, pixel_count: 90, total_owned_pixel_count: 1000 },
+  ];
   const result = applySemanticIntrinsicRemeasurementV1({ regions: [region], semanticHandoff: handoff() });
   const debug = result.regions[0].color_debug.semantic_intrinsic_remeasurement_v1;
   assert.equal(result.summary.applied, true);
