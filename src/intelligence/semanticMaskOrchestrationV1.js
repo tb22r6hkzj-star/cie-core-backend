@@ -1,15 +1,18 @@
+import {
+  CANONICAL_SEGMENTATION_ZONES_V1,
+  normalizeConfidenceV1,
+  segmentationZoneForPieceV1,
+} from "./pieceOntologyV1.js";
+
 const GARMENT_ZONES = new Set(["upper_garment", "lower_garment", "body_garment", "outerwear"]);
-const ACCESSORY_ZONES = new Set(["footwear", "accessory_jewelry", "belt", "bag"]);
-const SEGMENTATION_ZONES = new Set([...GARMENT_ZONES, ...ACCESSORY_ZONES]);
+const SEGMENTATION_ZONES = CANONICAL_SEGMENTATION_ZONES_V1;
 
 function clean(value) {
   return String(value || "").trim().toLowerCase();
 }
 
 function confidence(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.min(1, n > 1 ? n / 100 : n));
+  return normalizeConfidenceV1(value);
 }
 
 function colorNeutralPrompt(value) {
@@ -20,17 +23,25 @@ function colorNeutralPrompt(value) {
 }
 
 export function normalizeSemanticGarmentZoneV1(value, fallback = null) {
-  const token = clean(value).replace(/[^a-z0-9]+/g, "_");
-  const hasToken = (pattern) => new RegExp(`(?:^|_)(?:${pattern})(?:_|$)`).test(token);
-  if (hasToken("necklace|pendant|earrings?|bracelets?|watch|rings?|brooch|jewel(?:ry|lery)|chains?")) return "accessory_jewelry";
-  if (hasToken("handbag|purse|clutch|satchel|tote|backpack|bag")) return "bag";
-  if (hasToken("belt")) return "belt";
-  if (hasToken("shoes?|sneakers?|boots?|loafers?|heels?|sandals?|footwear")) return "footwear";
-  if (hasToken("jackets?|coats?|outerwear|blazers?|cardigans?|vests?")) return "outerwear";
-  if (hasToken("dress|jumpsuit|romper|one_piece")) return "body_garment";
-  if (hasToken("shirts?|blouses?|tops?|tee|t_shirt|polo|sweaters?|hoodies?")) return "upper_garment";
-  if (hasToken("pants|trousers?|jeans|shorts|skirts?")) return "lower_garment";
-  return SEGMENTATION_ZONES.has(fallback) ? fallback : null;
+  return segmentationZoneForPieceV1(value, fallback);
+}
+
+function scheduleTargets(targets, maximumTargets) {
+  const max = Math.max(1, Math.min(24, Number(maximumTargets) || 16));
+  if (targets.length <= max) return targets;
+  const selected = [];
+  const remaining = [...targets];
+  // First guarantee category coverage, then spend remaining capacity on strong,
+  // occluded, layered, and unusual instances instead of confidence alone.
+  for (const zone of SEGMENTATION_ZONES) {
+    const index = remaining.findIndex((target) => target.zone === zone);
+    if (index >= 0 && selected.length < max) selected.push(remaining.splice(index, 1)[0]);
+  }
+  remaining.sort((a, b) => {
+    const risk = (target) => (target.unusual_detail ? 0.12 : 0) + (target.layer_role !== "unknown" && target.layer_role !== "standalone" ? 0.08 : 0);
+    return (b.confidence + risk(b)) - (a.confidence + risk(a));
+  });
+  return [...selected, ...remaining.slice(0, max - selected.length)];
 }
 
 function semanticClaims(handoff = {}) {
@@ -65,7 +76,7 @@ export function buildSemanticSceneGraphV1(handoff = {}) {
   };
 }
 
-export function buildTargetConditionedSegmentationPlanV1({ dinoRegions = [], semanticHandoff = {} } = {}) {
+export function buildTargetConditionedSegmentationPlanV1({ dinoRegions = [], semanticHandoff = {}, maximumTargets = 16 } = {}) {
   const graph = buildSemanticSceneGraphV1(semanticHandoff);
   const candidates = dinoRegions
     .filter((region) => SEGMENTATION_ZONES.has(String(region?.zone || "")))
@@ -139,7 +150,11 @@ export function buildTargetConditionedSegmentationPlanV1({ dinoRegions = [], sem
 
   return {
     version: "target_conditioned_segmentation_plan_v1",
-    targets: targets.slice(0, 8),
+    targets: scheduleTargets(targets, maximumTargets),
+    candidate_target_count: targets.length,
+    target_limit: Math.max(1, Math.min(24, Number(maximumTargets) || 16)),
+    omitted_target_count: Math.max(0, targets.length - Math.max(1, Math.min(24, Number(maximumTargets) || 16))),
+    scheduling_policy: "category_coverage_then_confidence_and_reasoning_risk",
     scene_graph: graph,
     doctrine: "understand_then_localize_then_mask_then_measure",
   };

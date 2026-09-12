@@ -13,10 +13,12 @@ export function buildControlledSecondPassPlanV1({ synthesis = {}, attempt = 0 } 
   const measurementConfidence = clamp01(synthesis?.measurement_truth?.confidence);
   const semanticConfidence = clamp01(synthesis?.appearance_truth?.confidence);
   const piece = synthesis?.piece || null;
+  const instanceKey = synthesis?.instance_key || null;
 
   const base = {
     version: "controlled_second_pass_v1",
     piece,
+    instance_key: instanceKey,
     attempt,
     max_attempts: 1,
     allowed: false,

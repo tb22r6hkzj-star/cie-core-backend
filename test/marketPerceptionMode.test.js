@@ -42,5 +42,5 @@ test("all market-facing analysis routes explicitly use the market perception mod
   // The transform route has guarded rebuilds after semantic intrinsic
   // remeasurement and targeted accessory measurement; both must use the same
   // market mode as the first pass.
-  assert.equal(matches.length, 6);
+  assert.equal(matches.length, 7);
 });

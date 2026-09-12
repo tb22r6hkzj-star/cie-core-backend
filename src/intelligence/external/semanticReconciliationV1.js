@@ -1,4 +1,6 @@
 import { evaluateSemanticColorChallengeV1 } from "./semanticColorChallengeV1.js";
+import { normalizePieceIdentityV1 } from "../pieceOntologyV1.js";
+import { buildCanonicalColorIdentityV1 } from "../colorIdentityContractV1.js";
 
 const PIECE_ALIASES = Object.freeze({
   shirt: "upper_garment",
@@ -71,16 +73,18 @@ export function normalizeSemanticColorFamilyV1(value) {
 
 function measuredColorEvidence(value = {}) {
   const color = value?.primary_color || value?.dominant_color || value?.selected_color || null;
-  const family = normalizeSemanticColorFamilyV1(
+  const hex = color?.hex || value?.dominant_hex || null;
+  const derivedIdentity = buildCanonicalColorIdentityV1(hex);
+  const family = derivedIdentity.family || normalizeSemanticColorFamilyV1(
     color?.color_identity?.family || color?.family || value?.color_identity?.family || value?.color_family
   );
-  const hex = color?.hex || value?.dominant_hex || null;
   return {
     available: Boolean(family || hex),
     family,
     hex,
     confidence: normalizedConfidence(value?.unified_confidence ?? value?.calibrated_confidence ?? value?.confidence ?? value?.score),
     source: family || hex ? "visioncore_object_local_measurement" : null,
+    color_identity_contract_v1: derivedIdentity,
   };
 }
 
@@ -142,20 +146,7 @@ function buildColorCrosscheck(claim = {}, spatial = {}, mode = "off") {
 }
 
 export function normalizeSemanticPieceV1(value) {
-  const token = cleanToken(value);
-  if (PIECE_ALIASES[token]) return PIECE_ALIASES[token];
-  if (/(shirt|polo|blouse|sweater|hoodie|top)/.test(token)) return "upper_garment";
-  if (/(trouser|pants|jeans|shorts|skirt)/.test(token)) return "lower_garment";
-  if (/(shoe|loafer|sneaker|boot|footwear|heel|sandal)/.test(token)) return "footwear";
-  if (/(necklace|chain|pendant)/.test(token)) return "necklace";
-  if (/(earring|ear_stud)/.test(token)) return "earrings";
-  if (/(bracelet)/.test(token)) return "bracelet";
-  if (/(watch)/.test(token)) return "watch";
-  if (/(^|_)ring(s)?($|_)/.test(token)) return "ring";
-  if (/(jewel)/.test(token)) return "accessory_jewelry";
-  if (/(eyewear|glasses|sunglasses)/.test(token)) return "eyewear";
-  if (/(belt)/.test(token)) return "belt";
-  return token || null;
+  return normalizePieceIdentityV1(value);
 }
 
 function evidenceTokens(value = {}) {
