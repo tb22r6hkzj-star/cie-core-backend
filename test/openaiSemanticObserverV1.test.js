@@ -60,6 +60,24 @@ test("early segmentation profile is compact and contains no semantic color field
   assert.match(request.input[0].content[0].text, /VisionCore measures pixels after masking/i);
 });
 
+test("parallel color-lighting profile is compact and cannot supply numeric color", () => {
+  const request = buildOpenAISemanticRequestV1({
+    imageUrl: "https://example.test/outfit.jpg",
+    profile: "color_lighting",
+  });
+  const claim = request.text.format.schema.properties.claims.items;
+  for (const field of ["piece", "instance_key", "zone", "perceived_color_family", "color_appearance_cue", "lighting_cue", "color_confidence"]) {
+    assert.ok(claim.required.includes(field));
+  }
+  for (const prohibited of ["hex", "rgb", "lab", "percentage", "pct", "publication_decision"]) {
+    assert.equal(claim.properties[prohibited], undefined);
+  }
+  assert.equal(request.text.format.name, "visioncore_color_lighting_v1");
+  assert.equal(request.max_output_tokens, 1800);
+  assert.match(request.input[0].content[0].text, /at most 12 concise claims/i);
+  assert.match(request.input[0].content[0].text, /white highlights and gray shadows/i);
+});
+
 test("request schema permits only categorical color hypotheses", () => {
   const request = buildOpenAISemanticRequestV1({ imageUrl: "https://example.test/outfit.jpg" });
   const claim = request.text.format.schema.properties.claims.items;

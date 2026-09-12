@@ -85,6 +85,40 @@ export const OPENAI_SEGMENTATION_SCENE_SCHEMA_V1 = Object.freeze({
   },
 });
 
+export const OPENAI_COLOR_LIGHTING_SCHEMA_V1 = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  required: ["schema_version", "overall_confidence", "claims"],
+  properties: {
+    schema_version: { type: "string", enum: ["3"] },
+    overall_confidence: { type: "number" },
+    claims: {
+      type: "array",
+      maxItems: 12,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["action", "piece", "instance_key", "zone", "perceived_color_family", "color_appearance_cue", "lighting_cue", "color_confidence", "reason", "confidence"],
+        properties: {
+          action: { type: "string", enum: ["support", "request_targeted_reanalysis", "abstain"] },
+          piece: { type: ["string", "null"] },
+          instance_key: { type: ["string", "null"] },
+          zone: { type: ["string", "null"] },
+          perceived_color_family: {
+            type: ["string", "null"],
+            enum: ["black", "white", "gray", "brown", "beige", "red", "orange", "yellow", "green", "blue", "purple", "pink", "metallic_gold", "metallic_silver", "multicolor", "unclear", null],
+          },
+          color_appearance_cue: { type: ["string", "null"] },
+          lighting_cue: { type: ["string", "null"] },
+          color_confidence: { type: "number" },
+          reason: { type: ["string", "null"] },
+          confidence: { type: "number" },
+        },
+      },
+    },
+  },
+});
+
 function semanticPrompt(visionCoreEvidence = {}) {
   return [
     "You are a semantic observer inside VisionCore, not the final authority.",
@@ -118,9 +152,32 @@ function segmentationScenePrompt(visionCoreEvidence = {}) {
   ].join("\n");
 }
 
+function colorLightingPrompt(visionCoreEvidence = {}) {
+  return [
+    "You are VisionCore's compact intrinsic-color and lighting observer, not the numeric or publication authority.",
+    "Return at most 12 concise claims: one for each clearly visible garment and distinct fashion accessory, prioritizing footwear and layered garments.",
+    "For each piece, estimate only the broad intrinsic material family by comparing lit and shadowed areas of that same object.",
+    "If a neutral surface has white highlights and gray shadows, prefer white and state the shadow, low-light, or color-cast cue. Use unclear when the family is not defensible.",
+    "Do not provide or calculate hex, RGB, LAB, percentages, scores, masks, or publication decisions. VisionCore owns all numeric measurement and normalization.",
+    "Do not identify the person or infer protected, demographic, medical, religious, or socioeconomic traits.",
+    `VisionCore phase evidence: ${JSON.stringify(visionCoreEvidence)}`,
+  ].join("\n");
+}
+
 export function buildOpenAISemanticRequestV1({ imageUrl, visionCoreEvidence = {}, model = "gpt-5.6-luna", profile = "full" } = {}) {
   if (!imageUrl) throw new Error("VisionCore semantic observer requires imageUrl");
   const sceneGraphProfile = profile === "segmentation_scene";
+  const colorLightingProfile = profile === "color_lighting";
+  const prompt = colorLightingProfile
+    ? colorLightingPrompt(visionCoreEvidence)
+    : sceneGraphProfile
+      ? segmentationScenePrompt(visionCoreEvidence)
+      : semanticPrompt(visionCoreEvidence);
+  const schema = colorLightingProfile
+    ? OPENAI_COLOR_LIGHTING_SCHEMA_V1
+    : sceneGraphProfile
+      ? OPENAI_SEGMENTATION_SCENE_SCHEMA_V1
+      : OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1;
   return {
     model,
     store: false,
@@ -128,21 +185,25 @@ export function buildOpenAISemanticRequestV1({ imageUrl, visionCoreEvidence = {}
     input: [{
       role: "user",
       content: [
-        { type: "input_text", text: sceneGraphProfile ? segmentationScenePrompt(visionCoreEvidence) : semanticPrompt(visionCoreEvidence) },
+        { type: "input_text", text: prompt },
         { type: "input_image", image_url: imageUrl, detail: "high" },
       ],
     }],
     text: {
       format: {
         type: "json_schema",
-        name: sceneGraphProfile ? "visioncore_segmentation_scene_v1" : "visioncore_semantic_observation_v2",
+        name: colorLightingProfile
+          ? "visioncore_color_lighting_v1"
+          : sceneGraphProfile
+            ? "visioncore_segmentation_scene_v1"
+            : "visioncore_semantic_observation_v2",
         strict: true,
-        schema: sceneGraphProfile ? OPENAI_SEGMENTATION_SCENE_SCHEMA_V1 : OPENAI_SEMANTIC_OBSERVER_SCHEMA_V1,
+        schema,
       },
     },
     // A complete garment, layered scene graph, and multi-accessory inventory
     // can be large because strict JSON must emit every required field.
-    max_output_tokens: sceneGraphProfile ? 3600 : 6000,
+    max_output_tokens: colorLightingProfile ? 1800 : sceneGraphProfile ? 3600 : 6000,
   };
 }
 
@@ -229,7 +290,11 @@ export async function runOpenAISemanticObserverV1({
     failureStage = "observation_sanitize";
     const observation = sanitizeExternalSemanticObservation({ provider: "openai", model, ...raw });
     const estimatedCostUsd = estimateModelCost(model, payload?.usage);
-    const budget = validateExternalUsageBudgetV1({ normalCalls: 1, escalationCalls: 0, estimatedCostUsd });
+    const budget = validateExternalUsageBudgetV1({
+      normalCalls: profile === "color_lighting" ? 0 : 1,
+      escalationCalls: profile === "color_lighting" ? 1 : 0,
+      estimatedCostUsd,
+    });
     failureStage = "budget_validation";
     if (!budget.allowed) throw new Error(`External intelligence budget rejected: ${budget.violations.join(",")}`);
     const result = {
