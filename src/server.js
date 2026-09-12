@@ -8309,10 +8309,24 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       },
       visionCoreDecision: {},
       model: OPENAI_SEMANTIC_MODEL,
-      profile: "full",
+      profile: "segmentation_scene",
       timeoutMs: EARLY_SEMANTIC_OBSERVER_BUDGET_MS,
       cache: externalSemanticCache,
-      cacheKey: `${publicUrl}:visioncore_semantic_intrinsic_remeasurement_v1:${OPENAI_SEMANTIC_MODEL}`,
+      cacheKey: `${publicUrl}:visioncore_semantic_mask_orchestration_v2:${OPENAI_SEMANTIC_MODEL}`,
+    });
+    const earlyColorLightingPromise = runOpenAISemanticObserverV1({
+      mode: EXTERNAL_INTELLIGENCE_MODE,
+      imageUrl: publicUrl,
+      visionCoreEvidence: {
+        pipeline_version: "visioncore_color_lighting_observer_v1",
+        phase: "parallel_intrinsic_color_and_lighting_observation",
+      },
+      visionCoreDecision: {},
+      model: OPENAI_SEMANTIC_MODEL,
+      profile: "color_lighting",
+      timeoutMs: EARLY_SEMANTIC_OBSERVER_BUDGET_MS,
+      cache: externalSemanticCache,
+      cacheKey: `${publicUrl}:visioncore_color_lighting_observer_v1:${OPENAI_SEMANTIC_MODEL}`,
     });
     const earlyTargetSegmentationPromise = earlyExternalSemanticPromise.then(async (externalSemantic) => {
       if (!externalSemantic?.ok || externalSemantic?.skipped) {
@@ -8434,7 +8448,8 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
     const accessoryRecoveryPrioritizedOverExternalObserver = Boolean(
       localAccessoryRecoveryRequired && effectiveExternalIntelligenceMode === "off"
     );
-    const externalSemantic = analysis?.externalSemantic || await runOpenAISemanticObserverV1({
+    const earlyColorSemantic = await earlyColorLightingPromise;
+    const externalSemantic = earlyColorSemantic?.ok ? earlyColorSemantic : analysis?.externalSemantic || await runOpenAISemanticObserverV1({
       mode: effectiveExternalIntelligenceMode,
       imageUrl: publicUrl,
       visionCoreEvidence: buildExternalSemanticEvidence(outfitAnalysis),
