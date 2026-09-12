@@ -186,3 +186,42 @@ test("final publication cannot restore a stale graphite footwear authority over 
   assert.equal(sanitized.piece_color_ownership_v1.accessory_color_authorities[0].dominant_hex, "#EFEDEE");
   assert.equal(sanitized.garment_analysis.detected_items[0].primary_color.hex, "#EFEDEE");
 });
+
+test("published object-local footwear fallback is normalized when target segmentation is unavailable", () => {
+  const staleAnalysis = {
+    garment_zones: { zones: { footwear: {
+      name: "Graphite",
+      hex: "#A3A09F",
+      primary_color: { hex: "#A3A09F", pct: 0.22, pixel_count: 152 },
+      object_local_colors: [
+        { hex: "#A3A09F", pct: 0.22, pixel_count: 152 },
+        { hex: "#C3BEC0", pct: 0.15, pixel_count: 106 },
+        { hex: "#7D8797", pct: 0.1, pixel_count: 57 },
+      ],
+      interpretation: "multi_material",
+      confidence: 58,
+    } } },
+    piece_color_ownership_v1: { accessory_color_authorities: [{
+      zone: "footwear",
+      confidence: 0.58,
+      applied: false,
+      dominant_hex: null,
+      region_colors: [],
+    }] },
+  };
+
+  const published = applySemanticIntrinsicPublicationV1({
+    outfitAnalysis: staleAnalysis,
+    regions: [],
+    summary: { applied: false, changed_count: 0 },
+    semanticHandoff: handoff(),
+  });
+  const sanitized = sanitizeCustomerFacingZonesV1(published);
+  const footwear = sanitized.garment_zones.zones.footwear;
+  assert.equal(footwear.name, "Soft White");
+  assert.equal(footwear.interpretation, "single_color");
+  assert.equal(footwear.support_colors.length, 0);
+  assert.equal(footwear.semantic_intrinsic_publication_v1.authority_owner, "visioncore");
+  assert.equal(published.piece_color_ownership_v1.semantic_intrinsic_publication_v1.source, "published_zone_fallback");
+  assert.equal(published.piece_color_ownership_v1.semantic_intrinsic_publication_v1.external_numeric_color_authority, false);
+});

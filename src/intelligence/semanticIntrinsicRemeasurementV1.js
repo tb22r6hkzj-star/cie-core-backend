@@ -242,13 +242,49 @@ export function applySemanticIntrinsicPublicationV1({
   outfitAnalysis = {},
   regions = [],
   summary = {},
+  semanticHandoff = {},
 } = {}) {
-  if (summary?.applied !== true) return outfitAnalysis;
   const zones = outfitAnalysis?.garment_zones?.zones;
   if (!zones || typeof zones !== "object") return outfitAnalysis;
 
+  let publicationRegions = Array.isArray(regions) ? regions : [];
+  let publicationSummary = summary;
+  if (summary?.applied !== true) {
+    const zoneMeasurementRegions = Object.entries(zones).map(([zone, value]) => {
+      const values = [
+        value?.primary_color,
+        value?.dominant_color,
+        ...(Array.isArray(value?.object_local_colors) ? value.object_local_colors : []),
+        ...(Array.isArray(value?.region_colors) ? value.region_colors : []),
+        ...(Array.isArray(value?.detected_colors) ? value.detected_colors : []),
+        ...(Array.isArray(value?.support_colors) ? value.support_colors : []),
+      ].filter((color) => safeHex(color?.hex));
+      const unique = values.filter((color, index) =>
+        values.findIndex((other) => safeHex(other?.hex) === safeHex(color?.hex)) === index
+      );
+      return {
+        id: `published_zone_${zone}`,
+        zone,
+        label: zone,
+        confidence: value?.confidence || value?.calibrated_confidence || 0,
+        dominant_hex: value?.dominant_hex || value?.hex || value?.primary_color?.hex || value?.dominant_color?.hex,
+        region_colors: unique,
+        illumination_remeasurement_candidates_v1: unique,
+        owned_pixel_count: unique.reduce((total, color) => total + Number(color?.pixel_count || 0), 0),
+        color_debug: { publication_fallback_source: "visioncore_object_local_zone_measurement" },
+      };
+    });
+    const fallback = applySemanticIntrinsicRemeasurementV1({
+      regions: zoneMeasurementRegions,
+      semanticHandoff,
+    });
+    publicationRegions = fallback.regions;
+    publicationSummary = fallback.summary;
+  }
+  if (publicationSummary?.applied !== true) return outfitAnalysis;
+
   const correctedByZone = new Map();
-  for (const region of Array.isArray(regions) ? regions : []) {
+  for (const region of publicationRegions) {
     const zone = String(region?.zone || "");
     const debug = region?.color_debug?.semantic_intrinsic_remeasurement_v1;
     if (!ELIGIBLE_ZONES.has(zone) || debug?.applied !== true) continue;
@@ -347,6 +383,8 @@ export function applySemanticIntrinsicPublicationV1({
       semantic_intrinsic_publication_v1: {
         applied: true,
         corrected_zones: [...correctedByZone.keys()],
+        source: summary?.applied === true ? "segmented_region" : "published_zone_fallback",
+        remeasurement_summary: publicationSummary,
         authority_owner: "visioncore",
         external_numeric_color_authority: false,
       },

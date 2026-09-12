@@ -8888,6 +8888,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       outfitAnalysis,
       regions: semanticIntrinsicRemeasurement.regions,
       summary: semanticIntrinsicRemeasurement.summary,
+      semanticHandoff: externalSemantic?.handoff,
     });
     outfitAnalysis = sanitizeCustomerFacingZonesV1(outfitAnalysis);
     outfitAnalysis = {
@@ -8895,7 +8896,8 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       external_intelligence: {
         ...(outfitAnalysis?.external_intelligence || {}),
         semantic_reconciliation: semanticReconciliation,
-        semantic_intrinsic_remeasurement_v1: semanticIntrinsicRemeasurement.summary,
+        semantic_intrinsic_remeasurement_v1: outfitAnalysis?.piece_color_ownership_v1?.semantic_intrinsic_publication_v1?.remeasurement_summary
+          || semanticIntrinsicRemeasurement.summary,
       },
     };
     outfitAnalysis.consumer_evidence_v1 = buildConsumerEvidenceV1({
