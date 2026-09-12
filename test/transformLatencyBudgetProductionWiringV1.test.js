@@ -13,7 +13,8 @@ test("transform route uses total latency budget and capped Pixelcut timeout", ()
 
 test("semantic understanding starts early and target-conditioned masks follow localization", () => {
   assert.match(source, /const earlyExternalSemanticPromise = runOpenAISemanticObserverV1\(\{/);
-  assert.match(source, /profile: "segmentation_scene"/);
+  assert.match(source, /profile: "full"/);
+  assert.match(source, /visioncore_semantic_intrinsic_remeasurement_v1/);
   assert.match(source, /timeoutMs: EARLY_SEMANTIC_OBSERVER_BUDGET_MS/);
   assert.match(source, /const earlyTargetSegmentationPromise = earlyExternalSemanticPromise\.then/);
   assert.match(source, /runTargetConditionedSegmentation\(publicUrl, earlyPlan/);
