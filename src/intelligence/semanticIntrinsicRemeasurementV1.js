@@ -202,3 +202,149 @@ export function applySemanticIntrinsicRemeasurementV1({
     },
   };
 }
+
+function correctedRegionScore(region = {}) {
+  const maskOwned = region?.mask_color_ownership_v1?.applied === true ? 1 : 0;
+  const spatiallyValidated = region?.target_conditioned_mask_v1?.spatially_validated === true ? 1 : 0;
+  const confidence = clamp01(region?.confidence);
+  const pixels = Number(region?.region_colors?.[0]?.pixel_count || region?.owned_pixel_count || 0);
+  return maskOwned * 1_000_000 + spatiallyValidated * 100_000 + confidence * 10_000 + pixels;
+}
+
+function publicationPalette(region = {}) {
+  const colors = Array.isArray(region?.region_colors) ? region.region_colors : [];
+  const dominantHex = safeHex(region?.dominant_hex || colors[0]?.hex);
+  if (!dominantHex) return [];
+  const primary = {
+    ...(colors.find((color) => safeHex(color?.hex) === dominantHex) || colors[0] || {}),
+    hex: dominantHex,
+    source: region?.color_debug?.semantic_intrinsic_remeasurement_v1?.selected_hex_was_visioncore_calibrated
+      ? "visioncore_illuminant_normalization_v1"
+      : "semantic_triggered_owned_pixel_remeasurement_v1",
+    ownership_validated: true,
+    traceable_to_pixels: true,
+    intrinsic_material_identity: true,
+  };
+  return [primary, ...colors.filter((color) => safeHex(color?.hex) !== dominantHex)].slice(0, 6);
+}
+
+/**
+ * Preserve an already-completed VisionCore intrinsic remeasurement through the
+ * final customer publication graph. The external observer is only the trigger;
+ * every published numeric value comes from the VisionCore region result.
+ */
+export function applySemanticIntrinsicPublicationV1({
+  outfitAnalysis = {},
+  regions = [],
+  summary = {},
+} = {}) {
+  if (summary?.applied !== true) return outfitAnalysis;
+  const zones = outfitAnalysis?.garment_zones?.zones;
+  if (!zones || typeof zones !== "object") return outfitAnalysis;
+
+  const correctedByZone = new Map();
+  for (const region of Array.isArray(regions) ? regions : []) {
+    const zone = String(region?.zone || "");
+    const debug = region?.color_debug?.semantic_intrinsic_remeasurement_v1;
+    if (!ELIGIBLE_ZONES.has(zone) || debug?.applied !== true) continue;
+    const palette = publicationPalette(region);
+    if (!palette.length) continue;
+    const previous = correctedByZone.get(zone);
+    if (!previous || correctedRegionScore(region) > correctedRegionScore(previous)) {
+      correctedByZone.set(zone, region);
+    }
+  }
+  if (!correctedByZone.size) return outfitAnalysis;
+
+  const nextZones = { ...zones };
+  for (const [zoneKey, region] of correctedByZone.entries()) {
+    if (!nextZones[zoneKey]) continue;
+    const palette = publicationPalette(region);
+    const primary = palette[0];
+    const existingZone = nextZones[zoneKey];
+    nextZones[zoneKey] = {
+      ...existingZone,
+      hex: primary.hex,
+      dominant_hex: primary.hex,
+      dominant_color: primary,
+      primary_color: primary,
+      region_colors: palette,
+      object_local_colors: palette,
+      detected_colors: palette,
+      support_colors: palette.slice(1),
+      secondary_colors: palette.slice(1),
+      interpretation: palette.length > 1 ? "multi_color" : "single_color",
+      color_authority_source: primary.source,
+      canonical_color_authority_v1: {
+        ...(existingZone?.canonical_color_authority_v1 || {}),
+        applied: true,
+        zone: zoneKey,
+        region_id: region?.id || region?.region_id || null,
+        source: primary.source,
+        dominant_hex: primary.hex,
+        region_colors: palette,
+        invariant: "all_customer_facing_color_aliases_derive_from_one_owned_palette",
+      },
+      semantic_intrinsic_publication_v1: {
+        applied: true,
+        source_region_id: region?.id || region?.region_id || null,
+        authority_owner: "visioncore",
+        external_numeric_color_authority: false,
+        previous_published_hex: safeHex(existingZone?.dominant_hex || existingZone?.hex),
+        published_hex: primary.hex,
+      },
+    };
+  }
+
+  const ownership = outfitAnalysis?.piece_color_ownership_v1 || {};
+  const existingAuthorities = Array.isArray(ownership?.accessory_color_authorities)
+    ? ownership.accessory_color_authorities
+    : [];
+  const patchedZones = new Set();
+  const nextAuthorities = existingAuthorities.map((authority) => {
+    const region = correctedByZone.get(String(authority?.zone || ""));
+    if (!region || !nextZones[authority.zone]) return authority;
+    const palette = publicationPalette(region);
+    patchedZones.add(authority.zone);
+    return {
+      ...authority,
+      applied: true,
+      dominant_hex: palette[0].hex,
+      region_colors: palette,
+      color_authority_source: palette[0].source,
+      semantic_intrinsic_publication_v1: true,
+    };
+  });
+  for (const [zoneKey, region] of correctedByZone.entries()) {
+    if (patchedZones.has(zoneKey) || !nextZones[zoneKey]) continue;
+    const palette = publicationPalette(region);
+    nextAuthorities.push({
+      id: region?.id || region?.region_id || null,
+      region_id: region?.region_id || null,
+      zone: zoneKey,
+      label: region?.label || region?.segment_label || zoneKey,
+      type: region?.object_type || region?.label || zoneKey,
+      confidence: Number(region?.confidence || nextZones[zoneKey]?.confidence || 0),
+      applied: true,
+      dominant_hex: palette[0].hex,
+      region_colors: palette,
+      color_authority_source: palette[0].source,
+      semantic_intrinsic_publication_v1: true,
+    });
+  }
+
+  return {
+    ...outfitAnalysis,
+    garment_zones: { ...outfitAnalysis.garment_zones, zones: nextZones },
+    piece_color_ownership_v1: {
+      ...ownership,
+      accessory_color_authorities: nextAuthorities,
+      semantic_intrinsic_publication_v1: {
+        applied: true,
+        corrected_zones: [...correctedByZone.keys()],
+        authority_owner: "visioncore",
+        external_numeric_color_authority: false,
+      },
+    },
+  };
+}

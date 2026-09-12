@@ -60,7 +60,10 @@ import { applySignatureColorAuthorityV2 } from "./intelligence/signatureColorAut
 import { buildSceneOwnershipV1 } from "./intelligence/sceneOwnershipV1.js";
 import { runOpenAISemanticObserverV1 } from "./intelligence/external/openaiSemanticObserverV1.js";
 import { reconcileExternalSemanticsV1 } from "./intelligence/external/semanticReconciliationV1.js";
-import { applySemanticIntrinsicRemeasurementV1 } from "./intelligence/semanticIntrinsicRemeasurementV1.js";
+import {
+  applySemanticIntrinsicPublicationV1,
+  applySemanticIntrinsicRemeasurementV1,
+} from "./intelligence/semanticIntrinsicRemeasurementV1.js";
 import { buildSemanticPublicationConstraintsV1 } from "./intelligence/external/semanticPublicationPolicyV1.js";
 import {
   buildTargetedAccessoryReanalysisPlanV1,
@@ -8881,6 +8884,11 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         outfitAnalysis,
       });
     }
+    outfitAnalysis = applySemanticIntrinsicPublicationV1({
+      outfitAnalysis,
+      regions: semanticIntrinsicRemeasurement.regions,
+      summary: semanticIntrinsicRemeasurement.summary,
+    });
     outfitAnalysis = sanitizeCustomerFacingZonesV1(outfitAnalysis);
     outfitAnalysis = {
       ...outfitAnalysis,
