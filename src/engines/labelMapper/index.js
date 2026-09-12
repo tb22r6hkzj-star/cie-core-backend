@@ -196,7 +196,11 @@ export function getColorName(hex) {
   if (saturation < 0.09 && lightness < 0.28) return "Charcoal";
   if (saturation < 0.1 && lightness < 0.4) return "Slate Gray";
   if (saturation < 0.1 && lightness >= 0.42 && lightness <= 0.7) return "Graphite";
-  if (saturation < 0.08 && lightness >= 0.7 && lightness <= 0.9) return "Chrome Silver";
+  // A neutral RGB measurement can establish apparent light gray, but it
+  // cannot establish a metallic material.  Metallic labels are published by
+  // metallicColorIdentityV1 only after object-local reflectance evidence has
+  // been validated.
+  if (saturation < 0.08 && lightness >= 0.7 && lightness <= 0.9) return "Light Gray";
   if (saturation < 0.12 && lightness < 0.58) return "Stone Gray";
   if (saturation < 0.12 && lightness < 0.74) return "Ash Gray";
   if (saturation < 0.1 && lightness > 0.93) return "Soft White";
@@ -231,8 +235,14 @@ export function getColorName(hex) {
     Number(lab.b || 0) >= Number(lab.a || 0) * 0.9
   ) return "Rich Brown";
   if (hue >= 8 && hue < 18) return lightness < 0.46 ? "Brick Red" : "Coral";
-  if (hue >= 315 && hue < 333) return lightness < 0.54 ? "Berry" : "Dusty Rose";
-  if (hue >= 333 && hue < 345) return lightness < 0.52 ? "Muted Lip Rose" : "Soft Blush";
+  if (hue >= 315 && hue < 333) {
+    if (saturation >= 0.55) return lightness < 0.5 ? "Deep Magenta" : "Vivid Pink";
+    return lightness < 0.54 ? "Berry" : "Dusty Rose";
+  }
+  if (hue >= 333 && hue < 345) {
+    if (saturation >= 0.5) return lightness < 0.52 ? "Deep Rose" : "Rose Pink";
+    return lightness < 0.52 ? "Muted Lip Rose" : "Soft Blush";
+  }
 
   if (hue >= 18 && hue < 28) return lightness < 0.42 ? "Rich Brown" : "Desert Tan";
   if (hue >= 28 && hue < 40) return lightness < 0.48 ? "Cognac" : "Camel";
