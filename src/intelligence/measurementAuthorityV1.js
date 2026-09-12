@@ -1,6 +1,7 @@
 import chroma from "chroma-js";
 
 const SOURCE_PRIORITY = {
+  semantic_triggered_owned_pixel_remeasurement_v1: 125,
   exclusive_sam_mask_pixels: 120,
   accessory_positive_mask_pixels: 110,
   sam_mask_interior: 100,

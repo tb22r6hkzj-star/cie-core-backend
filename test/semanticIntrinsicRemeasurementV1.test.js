@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { applySemanticIntrinsicRemeasurementV1 } from "../src/intelligence/semanticIntrinsicRemeasurementV1.js";
+import { applyPieceColorOwnershipV1 } from "../src/intelligence/pieceColorOwnershipV1.js";
 
 function handoff(overrides = {}) {
   return {
@@ -87,4 +88,28 @@ test("shadow and off modes preserve the original publication", () => {
     assert.equal(result.summary.applied, false);
     assert.equal(result.regions[0].dominant_hex, "#C2BEC0");
   }
+});
+
+test("validated intrinsic remeasurement survives downstream mask authority selection", () => {
+  const remeasured = applySemanticIntrinsicRemeasurementV1({
+    regions: [{
+      ...footwearRegion(),
+      source_type: "sam_segment",
+      label: "sneaker",
+      segment_label: "sneaker",
+      confidence: 94,
+      mask_url: "https://example.test/mask.png",
+      mask_geometry: { bbox: { x: 0.1, y: 0.7, width: 0.3, height: 0.2 } },
+      mask_color_ownership_v1: { applied: true },
+      target_conditioned_mask_v1: { applied: true, spatially_validated: true },
+    }],
+    semanticHandoff: handoff(),
+  });
+  const owned = applyPieceColorOwnershipV1({
+    decodedImage: { width: 2, height: 2, data: new Uint8Array(16) },
+    regions: remeasured.regions,
+  });
+  assert.equal(owned.regions[0].dominant_hex, "#EFEDEE");
+  assert.equal(owned.regions[0].region_colors[0].measurement_authority, "selected");
+  assert.equal(owned.regions[0].region_colors[0].measurement_source, "exclusive_sam_mask_pixels_intrinsic_remeasurement");
 });
