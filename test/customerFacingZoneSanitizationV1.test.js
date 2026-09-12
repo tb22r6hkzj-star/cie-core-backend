@@ -165,3 +165,48 @@ test("derived garment cards use the same authoritative hex and regenerated name 
     assert.equal(outerwear.garment_identity.primary_identity.name, "Vivid Pink");
   }
 });
+
+test("layered garments keep sibling-owned colors out of the upper-garment palette", () => {
+  const analysis = { garment_zones: { zones: {
+    upper_garment: {
+      hex: "#EFEDEE", interpretation: "multi_color",
+      primary_color: { hex: "#EFEDEE", pct: 0.83 },
+      support_colors: [
+        { hex: "#DB5A97", pct: 0.49 },
+        { hex: "#B63768", pct: 0.32 },
+        { hex: "#4C5A6C", pct: 0.05 },
+        { hex: "#BB8568", pct: 0.04 },
+      ],
+      detected_colors: [{ hex: "#EFEDEE", pct: 0.83 }, { hex: "#DB5A97", pct: 0.49 }],
+    },
+    lower_garment: {
+      hex: "#6F7E91", interpretation: "single_color", primary_color: { hex: "#6F7E91", pct: 0.39 },
+    },
+    outerwear: {
+      hex: "#E1609E", interpretation: "single_color", primary_color: { hex: "#E1609E", pct: 0.47 },
+    },
+  } } };
+
+  const upper = sanitizeCustomerFacingZonesV1(analysis).garment_zones.zones.upper_garment;
+  assert.equal(upper.name, "Soft White");
+  assert.equal(upper.interpretation, "single_color");
+  assert.deepEqual(upper.support_colors, []);
+  assert.deepEqual(upper.detected_colors.map((color) => color.hex), ["#EFEDEE"]);
+  assert.equal(upper.layered_ownership_reconciliation_v1.applied, true);
+});
+
+test("published cards expose calibrated confidence instead of a stale legacy zero", () => {
+  const staleItem = { type: "outerwear", confidence: 0, primary_color: { hex: "#E1609E" } };
+  const analysis = {
+    garment_zones: { zones: { outerwear: {
+      hex: "#E1609E", interpretation: "single_color", confidence: 0,
+      unified_confidence: 74, calibrated_confidence: 74,
+      primary_color: { hex: "#E1609E", pct: 0.47 },
+    } } },
+    garment_analysis: { detected_items: [staleItem] },
+  };
+
+  const sanitized = sanitizeCustomerFacingZonesV1(analysis);
+  assert.equal(sanitized.garment_zones.zones.outerwear.confidence, 74);
+  assert.equal(sanitized.garment_analysis.detected_items[0].confidence, 74);
+});
