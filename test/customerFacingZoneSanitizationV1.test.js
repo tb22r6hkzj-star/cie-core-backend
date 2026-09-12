@@ -128,3 +128,40 @@ test("canonical garment authority rewrites every public alias and preserves a re
   assert.equal(lower.interpretation, "multi_color");
   assert.equal(lower.color_authority_source, "exclusive_sam_mask_pixels");
 });
+
+test("derived garment cards use the same authoritative hex and regenerated name as the published zone", () => {
+  const staleItem = {
+    type: "outerwear",
+    display_label: "Muted Lip Rose",
+    primary_color: { hex: "#BE4175", name: "Muted Lip Rose", pct: 0.73 },
+    dominant_color: { hex: "#BE4175", name: "Muted Lip Rose", pct: 0.73 },
+    signature_color: { hex: "#BE4175", name: "Muted Lip Rose" },
+    detected_colors: [{ hex: "#E15F9E", name: "Dusty Rose", pct: 0.73 }],
+    garment_identity: { primary_identity: { name: "Muted Lip Rose" } },
+  };
+  const analysis = {
+    garment_zones: { zones: { outerwear: {
+      name: "stale zone name",
+      hex: "#E15F9E",
+      interpretation: "single_color",
+      primary_color: { hex: "#E15F9E", name: "stale primary", pct: 0.73 },
+      dominant_color: { hex: "#E15F9E", name: "stale dominant", pct: 0.73 },
+      signature_color: { hex: "#E15F9E", name: "stale signature" },
+      detected_colors: [{ hex: "#E15F9E", name: "stale detected", pct: 0.73 }],
+    } } },
+    garment_analysis: { detected_items: [staleItem] },
+    material_analysis: { detected_items: [staleItem] },
+  };
+
+  const sanitized = sanitizeCustomerFacingZonesV1(analysis);
+  for (const collection of [sanitized.garment_analysis.detected_items, sanitized.material_analysis.detected_items]) {
+    const outerwear = collection[0];
+    assert.equal(outerwear.display_label, "Vivid Pink");
+    assert.equal(outerwear.primary_color.hex, "#E15F9E");
+    assert.equal(outerwear.primary_color.name, "Vivid Pink");
+    assert.equal(outerwear.dominant_color.name, "Vivid Pink");
+    assert.equal(outerwear.signature_color.name, "Vivid Pink");
+    assert.equal(outerwear.detected_colors[0].name, "Vivid Pink");
+    assert.equal(outerwear.garment_identity.primary_identity.name, "Vivid Pink");
+  }
+});

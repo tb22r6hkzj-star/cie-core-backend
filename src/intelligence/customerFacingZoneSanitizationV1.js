@@ -182,6 +182,72 @@ function synchronizeCustomerFacingColorAliases(zone = {}) {
   };
 }
 
+function synchronizeDerivedItemWithPublishedZone(item = {}, zones = {}) {
+  const zone = zones?.[item?.type];
+  if (!zone || isUncertain(zone)) return item;
+
+  const authoritativeHex = zone?.primary_color?.hex
+    || zone?.dominant_color?.hex
+    || zone?.hex
+    || zone?.dominant_hex;
+  if (!authoritativeHex) return item;
+
+  const authoritativeName = getColorName(authoritativeHex);
+  const sourcePrimary = synchronizeColorObject({
+    ...(item?.primary_color || {}),
+    ...(zone?.primary_color || zone?.dominant_color || {}),
+    hex: authoritativeHex,
+  });
+  const sourceDominant = synchronizeColorObject({
+    ...(item?.dominant_color || {}),
+    ...(zone?.dominant_color || zone?.primary_color || {}),
+    hex: authoritativeHex,
+  });
+  const sourceIdentity = sourcePrimary?.color_identity || sourceDominant?.color_identity || {};
+
+  const sourceList = (field) => Array.isArray(zone?.[field])
+    ? synchronizeColorList(zone[field])
+    : synchronizeColorList(item?.[field]);
+
+  return {
+    ...item,
+    name: authoritativeName,
+    ...(new Set(["upper_garment", "lower_garment", "body_garment", "outerwear"]).has(item?.type)
+      ? { display_label: authoritativeName }
+      : {}),
+    dominant_color: sourceDominant,
+    primary_color: sourcePrimary,
+    signature_color: zone?.signature_color
+      ? synchronizeColorObject(zone.signature_color)
+      : synchronizeColorObject(item?.signature_color),
+    support_colors: sourceList("support_colors"),
+    secondary_colors: sourceList("secondary_colors"),
+    accent_colors: sourceList("accent_colors"),
+    detected_colors: sourceList("detected_colors"),
+    region_colors: sourceList("region_colors"),
+    object_local_colors: sourceList("object_local_colors"),
+    color_identity: {
+      ...(item?.color_identity || {}),
+      ...sourceIdentity,
+      name: authoritativeName,
+    },
+    garment_identity: {
+      ...(item?.garment_identity || {}),
+      primary_identity: {
+        ...(item?.garment_identity?.primary_identity || {}),
+        ...sourceIdentity,
+        name: authoritativeName,
+      },
+    },
+  };
+}
+
+function synchronizeDerivedCollection(collection, zones) {
+  return Array.isArray(collection)
+    ? collection.map((item) => synchronizeDerivedItemWithPublishedZone(item, zones))
+    : collection;
+}
+
 export function sanitizeCustomerFacingZonesV1(analysis = {}) {
   const originalZones = analysis?.garment_zones?.zones;
   if (!originalZones || typeof originalZones !== "object") return analysis;
@@ -207,8 +273,24 @@ export function sanitizeCustomerFacingZonesV1(analysis = {}) {
     zones[key] = sanitizeUncertainZone(key, synchronizeCustomerFacingColorAliases(withOwnedColor));
   }
 
+  const garmentAnalysis = analysis?.garment_analysis
+    ? {
+        ...analysis.garment_analysis,
+        detected_items: synchronizeDerivedCollection(analysis.garment_analysis.detected_items, zones),
+      }
+    : analysis?.garment_analysis;
+  const materialAnalysis = analysis?.material_analysis
+    ? {
+        ...analysis.material_analysis,
+        detected_items: synchronizeDerivedCollection(analysis.material_analysis.detected_items, zones),
+      }
+    : analysis?.material_analysis;
+
   return {
     ...analysis,
+    garment_analysis: garmentAnalysis,
+    material_analysis: materialAnalysis,
+    accessory_analysis: synchronizeDerivedCollection(analysis?.accessory_analysis, zones),
     garment_zones: {
       ...analysis.garment_zones,
       zones,
