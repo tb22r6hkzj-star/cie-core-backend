@@ -137,9 +137,11 @@ test("validated intrinsic remeasurement survives downstream mask authority selec
 });
 
 test("final publication cannot restore a stale graphite footwear authority over intrinsic white", () => {
+  const shadowedFootwear = footwearRegion();
+  shadowedFootwear.illumination_remeasurement_candidates_v1 = shadowedFootwear.region_colors;
   const remeasured = applySemanticIntrinsicRemeasurementV1({
     regions: [{
-      ...footwearRegion(),
+      ...shadowedFootwear,
       confidence: 0.8,
       label: "sneakers",
     }],
@@ -178,6 +180,8 @@ test("final publication cannot restore a stale graphite footwear authority over 
   assert.equal(footwear.dominant_hex, "#EFEDEE");
   assert.equal(footwear.primary_color.hex, "#EFEDEE");
   assert.equal(footwear.name, "Soft White");
+  assert.equal(footwear.interpretation, "single_color");
+  assert.deepEqual(footwear.support_colors, []);
   assert.equal(footwear.semantic_intrinsic_publication_v1.authority_owner, "visioncore");
   assert.equal(sanitized.piece_color_ownership_v1.accessory_color_authorities[0].dominant_hex, "#EFEDEE");
   assert.equal(sanitized.garment_analysis.detected_items[0].primary_color.hex, "#EFEDEE");
