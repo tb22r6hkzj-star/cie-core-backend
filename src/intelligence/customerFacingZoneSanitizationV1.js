@@ -93,6 +93,87 @@ function colorDistance(a, b) {
   try { return chroma.distance(a, b, "lab"); } catch { return Number.POSITIVE_INFINITY; }
 }
 
+function confidence100(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  return Math.max(0, Math.min(100, numeric > 0 && numeric <= 1 ? numeric * 100 : numeric));
+}
+
+function synchronizePublishedConfidence(zone = {}) {
+  if (isUncertain(zone)) return zone;
+  const calibrated = [zone?.unified_confidence, zone?.calibrated_confidence, zone?.raw_confidence]
+    .map(confidence100)
+    .find((value) => value !== null && value > 0);
+  if (calibrated === undefined) return zone;
+  return {
+    ...zone,
+    // Customer-facing cards historically read `confidence`, while the current
+    // pipeline publishes its decision confidence under the calibrated fields.
+    confidence: calibrated,
+  };
+}
+
+function publishedPalette(zone = {}) {
+  const values = [
+    zone?.primary_color,
+    zone?.dominant_color,
+    ...(Array.isArray(zone?.region_colors) ? zone.region_colors : []),
+    ...(Array.isArray(zone?.detected_colors) ? zone.detected_colors : []),
+  ];
+  return values.filter((color, index) => color?.hex && values.findIndex((other) => other?.hex === color.hex) === index);
+}
+
+function enforceLayeredGarmentOwnership(zones = {}) {
+  const upper = zones?.upper_garment;
+  const outerwear = zones?.outerwear;
+  if (!upper || !outerwear || isUncertain(upper) || isUncertain(outerwear)) return zones;
+
+  const upperHex = upper?.primary_color?.hex || upper?.dominant_color?.hex || upper?.hex;
+  const outerHex = outerwear?.primary_color?.hex || outerwear?.dominant_color?.hex || outerwear?.hex;
+  if (!upperHex || !outerHex || colorDistance(upperHex, outerHex) < 18) return zones;
+
+  const siblingColors = Object.entries(zones)
+    .filter(([key, zone]) => key !== "upper_garment" && !isUncertain(zone))
+    .flatMap(([, zone]) => publishedPalette(zone));
+  const belongsToSibling = (color = {}) => {
+    if (!color?.hex || colorDistance(color.hex, upperHex) < 8) return false;
+    return siblingColors.some((sibling) =>
+      colorDistance(color.hex, sibling.hex) <= 20
+      && colorDistance(color.hex, sibling.hex) < colorDistance(color.hex, upperHex)
+    );
+  };
+  const ownedSupporting = (colors) => (Array.isArray(colors) ? colors : [])
+    .filter((color) => normalizedPct(color) >= 0.06)
+    .filter((color) => !belongsToSibling(color));
+  const supporting = ownedSupporting([
+    ...(Array.isArray(upper?.support_colors) ? upper.support_colors : []),
+    ...(Array.isArray(upper?.secondary_colors) ? upper.secondary_colors : []),
+    ...(Array.isArray(upper?.accent_colors) ? upper.accent_colors : []),
+  ]).filter((color, index, values) => values.findIndex((other) => other?.hex === color.hex) === index);
+  const primary = synchronizeColorObject(upper?.primary_color || upper?.dominant_color || { hex: upperHex });
+  const palette = [primary, ...supporting];
+
+  return {
+    ...zones,
+    upper_garment: {
+      ...upper,
+      signature_color: supporting[0] || null,
+      support_colors: supporting,
+      secondary_colors: supporting,
+      accent_colors: supporting.slice(1),
+      detected_colors: palette,
+      region_colors: palette,
+      object_local_colors: palette,
+      interpretation: supporting.length ? "multi_color" : "single_color",
+      color_mode: supporting.length ? "multicolor" : "single_color",
+      layered_ownership_reconciliation_v1: {
+        applied: true,
+        sibling_zone_count: Object.keys(zones).length - 1,
+      },
+    },
+  };
+}
+
 function restoreCanonicalGarmentColor(zone = {}) {
   const authority = zone?.canonical_color_authority_v1;
   if (authority?.applied !== true || !authority?.dominant_hex) return zone;
@@ -211,6 +292,7 @@ function synchronizeDerivedItemWithPublishedZone(item = {}, zones = {}) {
 
   return {
     ...item,
+    confidence: zone?.confidence ?? item?.confidence,
     name: authoritativeName,
     ...(new Set(["upper_garment", "lower_garment", "body_garment", "outerwear"]).has(item?.type)
       ? { display_label: authoritativeName }
@@ -270,19 +352,24 @@ export function sanitizeCustomerFacingZonesV1(analysis = {}) {
     const withOwnedColor = ["footwear", "bag"].includes(key)
       ? restoreOwnedZoneColor(analysis, key, withCanonicalColor)
       : withCanonicalColor;
-    zones[key] = sanitizeUncertainZone(key, synchronizeCustomerFacingColorAliases(withOwnedColor));
+    zones[key] = sanitizeUncertainZone(
+      key,
+      synchronizePublishedConfidence(synchronizeCustomerFacingColorAliases(withOwnedColor))
+    );
   }
+
+  const ownershipReconciledZones = enforceLayeredGarmentOwnership(zones);
 
   const garmentAnalysis = analysis?.garment_analysis
     ? {
         ...analysis.garment_analysis,
-        detected_items: synchronizeDerivedCollection(analysis.garment_analysis.detected_items, zones),
+        detected_items: synchronizeDerivedCollection(analysis.garment_analysis.detected_items, ownershipReconciledZones),
       }
     : analysis?.garment_analysis;
   const materialAnalysis = analysis?.material_analysis
     ? {
         ...analysis.material_analysis,
-        detected_items: synchronizeDerivedCollection(analysis.material_analysis.detected_items, zones),
+        detected_items: synchronizeDerivedCollection(analysis.material_analysis.detected_items, ownershipReconciledZones),
       }
     : analysis?.material_analysis;
 
@@ -290,10 +377,10 @@ export function sanitizeCustomerFacingZonesV1(analysis = {}) {
     ...analysis,
     garment_analysis: garmentAnalysis,
     material_analysis: materialAnalysis,
-    accessory_analysis: synchronizeDerivedCollection(analysis?.accessory_analysis, zones),
+    accessory_analysis: synchronizeDerivedCollection(analysis?.accessory_analysis, ownershipReconciledZones),
     garment_zones: {
       ...analysis.garment_zones,
-      zones,
+      zones: ownershipReconciledZones,
       customer_facing_zone_sanitization_v1: {
         applied: true,
         legacy_accessory_alias_removed: Boolean(originalZones.accessory_jewelry && !zones.accessory_jewelry),
