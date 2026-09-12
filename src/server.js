@@ -60,6 +60,7 @@ import { applySignatureColorAuthorityV2 } from "./intelligence/signatureColorAut
 import { buildSceneOwnershipV1 } from "./intelligence/sceneOwnershipV1.js";
 import { runOpenAISemanticObserverV1 } from "./intelligence/external/openaiSemanticObserverV1.js";
 import { reconcileExternalSemanticsV1 } from "./intelligence/external/semanticReconciliationV1.js";
+import { applySemanticIntrinsicRemeasurementV1 } from "./intelligence/semanticIntrinsicRemeasurementV1.js";
 import { buildSemanticPublicationConstraintsV1 } from "./intelligence/external/semanticPublicationPolicyV1.js";
 import {
   buildTargetedAccessoryReanalysisPlanV1,
@@ -6662,7 +6663,7 @@ function competingMaskWins(target = {}, competitor = {}) {
   return String(competitor.region?.id || "") < String(target.region?.id || "");
 }
 
-function extractMaskedRegionColors(baseImage, maskImage, limit = 6, ownership = {}) {
+function measureMaskedRegionColors(baseImage, maskImage, ownership = {}) {
   const baseW = Number(baseImage?.width || 0);
   const baseH = Number(baseImage?.height || 0);
   const maskW = Number(maskImage?.width || 0);
@@ -6726,8 +6727,11 @@ function extractMaskedRegionColors(baseImage, maskImage, limit = 6, ownership = 
       };
     })
     .filter((c) => !!c.hex)
-    .sort((a, b) => b.pct - a.pct)
-    .slice(0, limit);
+    .sort((a, b) => b.pct - a.pct);
+}
+
+function extractMaskedRegionColors(baseImage, maskImage, limit = 6, ownership = {}) {
+  return measureMaskedRegionColors(baseImage, maskImage, ownership).slice(0, limit);
 }
 
 
@@ -7462,10 +7466,11 @@ async function enrichSamRegionsWithMaskedColors(imageUrl, regions = []) {
       const candidateSemanticInstanceKey = candidate.region?.target_conditioned_mask_v1?.semantic_instance_key || null;
       return Boolean(semanticInstanceKey && candidateSemanticInstanceKey && semanticInstanceKey !== candidateSemanticInstanceKey);
     });
-    const regionColors = extractMaskedRegionColors(baseImage, decoded.maskImage, 6, {
+    const measuredColors = measureMaskedRegionColors(baseImage, decoded.maskImage, {
       target: decoded,
       competitors,
     });
+    const regionColors = measuredColors.slice(0, 6);
     const dominantHex = safeHex(regionColors[0]?.hex || region?.dominant_hex || "");
     const totalOwnedPixelCount = Number(regionColors[0]?.total_owned_pixel_count || 0);
 
@@ -7474,6 +7479,14 @@ async function enrichSamRegionsWithMaskedColors(imageUrl, regions = []) {
       coverage: round2(Math.max(Number(region?.coverage || 0), Number(decoded.geometry?.coverage || 0))),
       dominant_hex: dominantHex || region?.dominant_hex || null,
       region_colors: regionColors,
+      illumination_remeasurement_candidates_v1: measuredColors.slice(0, 32).map((color) => ({
+        ...color,
+        source: "exclusive_mask_pixel_membership",
+        measurement_source: "exclusive_mask_pixel_membership",
+        ownership_state: "owned",
+        ownership_validated: true,
+        traceable_to_pixels: true,
+      })),
       owned_pixel_count: totalOwnedPixelCount,
       mask_geometry: decoded.geometry,
       mask_color_ownership_v1: {
@@ -8296,10 +8309,10 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       },
       visionCoreDecision: {},
       model: OPENAI_SEMANTIC_MODEL,
-      profile: "segmentation_scene",
+      profile: "full",
       timeoutMs: EARLY_SEMANTIC_OBSERVER_BUDGET_MS,
       cache: externalSemanticCache,
-      cacheKey: `${publicUrl}:visioncore_semantic_mask_orchestration_v1:${OPENAI_SEMANTIC_MODEL}`,
+      cacheKey: `${publicUrl}:visioncore_semantic_intrinsic_remeasurement_v1:${OPENAI_SEMANTIC_MODEL}`,
     });
     const earlyTargetSegmentationPromise = earlyExternalSemanticPromise.then(async (externalSemantic) => {
       if (!externalSemantic?.ok || externalSemantic?.skipped) {
@@ -8340,7 +8353,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
     } catch (error) {
       return sendStepError(res, 500, "analyze_cloudinary_colors", error);
     }
-    const segmentedRegions = Array.isArray(analysis?.segmentedRegions) ? analysis.segmentedRegions : [];
+    let segmentedRegions = Array.isArray(analysis?.segmentedRegions) ? analysis.segmentedRegions : [];
     if (!analysis?.pipeline?.detection_segmentation_ok || !segmentedRegions.length) {
       const samReason = analysis?.pipeline?.sam_reason || "sam_failed";
       console.warn("[SAM DEBUG] Continuing /api/images/transform without SAM segmented regions", {
@@ -8438,6 +8451,31 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       handoff: externalSemantic?.handoff,
       outfitAnalysis,
     });
+    const semanticIntrinsicRemeasurement = applySemanticIntrinsicRemeasurementV1({
+      regions: segmentedRegions,
+      semanticHandoff: externalSemantic?.handoff,
+    });
+    if (semanticIntrinsicRemeasurement.summary.applied) {
+      segmentedRegions = semanticIntrinsicRemeasurement.regions;
+      analysis.segmentedRegions = segmentedRegions;
+      outfitAnalysis = buildOutfitAnalysis({
+        dominantHex: analysis.dominantHex,
+        topColors: analysis.topColors,
+        segmentedRegions,
+        decodedImage: analysis.decodedImage,
+        perception_v6_mode: MARKET_PERCEPTION_V6_MODE,
+        dinoGarmentRegions: analysis.dinoGarmentRegions,
+        pipeline: analysis.pipeline,
+      });
+      outfitAnalysis = {
+        ...outfitAnalysis,
+        capture_quality_v1: captureQuality,
+      };
+      semanticReconciliation = reconcileExternalSemanticsV1({
+        handoff: externalSemantic?.handoff,
+        outfitAnalysis,
+      });
+    }
     let accessoryIntelligenceLane = buildAccessoryIntelligenceLaneV1({
       outfitAnalysis,
       reconciliation: semanticReconciliation,
@@ -8829,6 +8867,18 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       });
     }
     outfitAnalysis = sanitizeCustomerFacingZonesV1(outfitAnalysis);
+    outfitAnalysis = {
+      ...outfitAnalysis,
+      external_intelligence: {
+        ...(outfitAnalysis?.external_intelligence || {}),
+        semantic_reconciliation: semanticReconciliation,
+        semantic_intrinsic_remeasurement_v1: semanticIntrinsicRemeasurement.summary,
+      },
+    };
+    outfitAnalysis.consumer_evidence_v1 = buildConsumerEvidenceV1({
+      outfitAnalysis,
+      captureQuality,
+    });
     console.info("[EXTERNAL INTELLIGENCE] semantic observer", {
       configured_mode: EXTERNAL_INTELLIGENCE_MODE,
       effective_mode: effectiveExternalIntelligenceMode,
@@ -8897,6 +8947,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           failure_stage: externalSemantic.failure_stage || null,
           disposition: externalSemantic?.handoff?.disposition || null,
           semantic_reconciliation: semanticReconciliation,
+          semantic_intrinsic_remeasurement_v1: semanticIntrinsicRemeasurement.summary,
           accessory_intelligence_lane: accessoryIntelligenceLane,
           targeted_accessory_reanalysis: targetedAccessoryReanalysis,
           accessory_recovery_priority_v1: {
