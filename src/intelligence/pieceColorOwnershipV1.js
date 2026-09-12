@@ -452,17 +452,23 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
         doctrine: "one_visible_pixel_has_one_winning_piece_owner",
       };
       const ownedCandidates = (Array.isArray(region?.region_colors) ? region.region_colors : [])
-        .map((color) => ({
-          ...color,
-          hex: safeHex(color?.hex),
-          source: "exclusive_sam_mask_pixels",
-          measurement_source: "exclusive_sam_mask_pixels",
-          ownership_state: "owned",
-          ownership_validated: true,
-          ownership_validation: validator,
-          confidence: normalizeConfidence(region?.confidence),
-          traceable_to_pixels: true,
-        }))
+        .map((color) => {
+          const intrinsicRemeasurement = color?.source === "semantic_triggered_owned_pixel_remeasurement_v1" &&
+            color?.intrinsic_material_identity === true;
+          return {
+            ...color,
+            hex: safeHex(color?.hex),
+            source: intrinsicRemeasurement ? color.source : "exclusive_sam_mask_pixels",
+            measurement_source: intrinsicRemeasurement
+              ? "exclusive_sam_mask_pixels_intrinsic_remeasurement"
+              : "exclusive_sam_mask_pixels",
+            ownership_state: "owned",
+            ownership_validated: true,
+            ownership_validation: validator,
+            confidence: normalizeConfidence(region?.confidence),
+            traceable_to_pixels: true,
+          };
+        })
         .filter((color) => !!color.hex);
       const authority = selectMeasuredColorAuthorityV1(ownedCandidates);
       const publishableColors = authority.publishable.map((color) => ({
