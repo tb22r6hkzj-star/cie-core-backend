@@ -17,6 +17,17 @@ test("true neutral gray remains neutral", () => {
   assert.match(name, /Gray|Graphite|Neutral|Charcoal|Slate/i);
 });
 
+test("light neutral pixels stay appearance-based without inventing metallic material", () => {
+  assert.equal(getColorName("#C2BEC0"), "Light Gray");
+  assert.doesNotMatch(getColorName("#C2BEC0"), /Chrome|Silver|Metal/i);
+});
+
+test("saturated pink measurements do not collapse into dusty or muted labels", () => {
+  assert.equal(getColorName("#DB5A97"), "Vivid Pink");
+  assert.equal(getColorName("#E1609E"), "Vivid Pink");
+  assert.equal(getColorName("#B63768"), "Deep Rose");
+});
+
 test("existing vivid or clear forest green identity is preserved", () => {
   assert.match(getColorName("#284B35"), /Forest Green|Green|Sage/i);
 });
