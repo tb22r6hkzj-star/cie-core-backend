@@ -96,7 +96,7 @@ function semanticPrompt(visionCoreEvidence = {}) {
     "Model the outfit as a scene graph: state each piece's layer_role, which instance keys it overlaps, its occlusion, and any tiny or unusual fashion detail.",
     "Provide a short segmentation_prompt that uniquely describes the visible physical item without mentioning its color.",
     "Do not identify the person or infer protected, demographic, medical, religious, or socioeconomic traits.",
-    "For each visible piece, independently suggest only one broad perceived_color_family from the schema and a short color_appearance_cue. Use unclear when lighting, reflection, transparency, or occlusion makes the family unreliable.",
+    "For each visible piece, independently suggest only one broad perceived_color_family from the schema and a short color_appearance_cue. Estimate the intrinsic material family by comparing lit and shadowed areas of the same object: if a neutral surface has white highlights and gray shadows, prefer white and explain the illumination effect. Use unclear when lighting, reflection, transparency, or occlusion still makes the intrinsic family unreliable.",
     "Do not use VisionCore's color conclusion to form the suggestion. VisionCore will independently measure object-local pixels and reconcile your categorical hypothesis afterward.",
     "Never calculate, invent, request, or override hex, RGB, LAB, delta-E, percentages, outfit scores, or publication decisions.",
     "If evidence is ambiguous, abstain or request targeted reanalysis.",

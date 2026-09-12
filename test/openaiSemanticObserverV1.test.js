@@ -13,6 +13,7 @@ test("request grants OpenAI semantic observation but no color authority", () => 
   assert.match(prompt, /perceived_color_family/i);
   assert.match(prompt, /Never calculate, invent, request, or override hex/i);
   assert.match(prompt, /object-local pixels/i);
+  assert.match(prompt, /white highlights and gray shadows/i);
   assert.match(prompt, /Do not identify the person/i);
   assert.equal(request.input[0].content[1].detail, "high");
   assert.equal(request.text.format.strict, true);
