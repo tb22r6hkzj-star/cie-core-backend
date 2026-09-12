@@ -69,7 +69,7 @@ function selectMeasuredWhiteCandidate(region = {}) {
     const pixels = Number(candidate?.pixel_count || 0);
     const ratio = Number(candidate?.pct || 0);
     return candidate.chroma <= 14 &&
-      candidate.lightness >= 82 &&
+      candidate.lightness >= 91.5 &&
       candidate.lightness <= 98.5 &&
       (pixels >= minimumPixels || ratio >= 0.008) &&
       (!current || candidate.lightness >= current.lightness + 5);
