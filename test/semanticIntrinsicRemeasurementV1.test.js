@@ -62,12 +62,27 @@ test("a semantic suggestion without ambiguous lighting cannot alter measured col
   assert.equal(result.regions[0].dominant_hex, "#C2BEC0");
 });
 
-test("external semantics cannot invent a replacement when no owned white candidate exists", () => {
+test("external semantics cannot invent a replacement from a non-calibratable dark measurement", () => {
   const region = footwearRegion();
+  region.dominant_hex = "#555555";
+  region.region_colors = [{ hex: "#555555", pct: 0.8, pixel_count: 800, total_owned_pixel_count: 1000 }];
   region.illumination_remeasurement_candidates_v1 = region.region_colors;
   const result = applySemanticIntrinsicRemeasurementV1({ regions: [region], semanticHandoff: handoff() });
   assert.equal(result.summary.applied, false);
-  assert.equal(result.regions[0].dominant_hex, "#C2BEC0");
+  assert.equal(result.regions[0].dominant_hex, "#555555");
+});
+
+test("VisionCore normalizes a measured neutral shadow when no white pixel cluster survives", () => {
+  const region = footwearRegion();
+  region.illumination_remeasurement_candidates_v1 = region.region_colors;
+  const result = applySemanticIntrinsicRemeasurementV1({ regions: [region], semanticHandoff: handoff() });
+  const debug = result.regions[0].color_debug.semantic_intrinsic_remeasurement_v1;
+  assert.equal(result.summary.applied, true);
+  assert.equal(result.regions[0].dominant_hex, "#EFEDEE");
+  assert.equal(debug.selected_hex_was_measured_from_owned_pixels, false);
+  assert.equal(debug.selected_hex_was_visioncore_calibrated, true);
+  assert.equal(debug.derived_from_measured_hex, "#C2BEC0");
+  assert.equal(debug.authority_owner, "visioncore");
 });
 
 test("white-family semantics cannot replace a strongly chromatic measurement", () => {

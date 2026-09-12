@@ -453,7 +453,10 @@ export function applyPieceColorOwnershipV1({ decodedImage = null, regions = [] }
       };
       const ownedCandidates = (Array.isArray(region?.region_colors) ? region.region_colors : [])
         .map((color) => {
-          const intrinsicRemeasurement = color?.source === "semantic_triggered_owned_pixel_remeasurement_v1" &&
+          const intrinsicRemeasurement = [
+            "semantic_triggered_owned_pixel_remeasurement_v1",
+            "visioncore_illuminant_normalization_v1",
+          ].includes(color?.source) &&
             color?.intrinsic_material_identity === true;
           return {
             ...color,

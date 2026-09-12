@@ -83,7 +83,31 @@ function selectMeasuredWhiteCandidate(region = {}) {
       return lightnessValue * 0.7 + support * 100 - candidate.chroma * 0.55;
     };
     return score(right) - score(left);
-  })[0];
+  }).map((candidate) => ({ ...candidate, calibrated_not_raw_pixel: false }))[0];
+}
+
+function buildIlluminantNormalizedWhiteCandidate(region = {}) {
+  const currentColor = region?.region_colors?.[0] || {};
+  const currentHex = safeHex(region?.dominant_hex || currentColor?.hex);
+  const current = currentHex ? describe(currentHex) : null;
+  if (!current || current.chroma > 18 || current.lightness < 62 || current.lightness >= 88) return null;
+  const [, a, b] = chroma(currentHex).lab();
+  const normalizedHex = safeHex(chroma.lab(94, a * 0.5, b * 0.5).hex());
+  if (!normalizedHex) return null;
+  return {
+    ...currentColor,
+    hex: normalizedHex,
+    source: "visioncore_illuminant_normalization_v1",
+    measurement_source: "derived_from_exclusive_mask_pixels_under_lighting_challenge",
+    derived_from_measured_hex: currentHex,
+    calibrated_not_raw_pixel: true,
+    normalization: {
+      method: "neutral_surface_reference_white_v1",
+      measured_lightness: Number(current.lightness.toFixed(3)),
+      normalized_lightness: 94,
+      chroma_retention_ratio: 0.5,
+    },
+  };
 }
 
 function publishMeasuredCandidate(region = {}, candidate = {}, claim = {}) {
@@ -91,7 +115,9 @@ function publishMeasuredCandidate(region = {}, candidate = {}, claim = {}) {
   const existing = Array.isArray(region?.region_colors) ? region.region_colors : [];
   const selected = {
     ...candidate,
-    source: "semantic_triggered_owned_pixel_remeasurement_v1",
+    source: candidate?.calibrated_not_raw_pixel
+      ? "visioncore_illuminant_normalization_v1"
+      : "semantic_triggered_owned_pixel_remeasurement_v1",
     measurement_source: candidate?.measurement_source || "exclusive_mask_pixel_membership",
     ownership_state: "owned",
     ownership_validated: true,
@@ -118,7 +144,10 @@ function publishMeasuredCandidate(region = {}, candidate = {}, claim = {}) {
         appearance_cue: claim?.color_appearance_cue || null,
         authority_owner: "visioncore",
         external_numeric_color_authority: false,
-        selected_hex_was_measured_from_owned_pixels: true,
+        selected_hex_was_measured_from_owned_pixels: candidate?.calibrated_not_raw_pixel !== true,
+        selected_hex_was_visioncore_calibrated: candidate?.calibrated_not_raw_pixel === true,
+        derived_from_measured_hex: candidate?.derived_from_measured_hex || null,
+        normalization: candidate?.normalization || null,
       },
     },
   };
@@ -153,7 +182,7 @@ export function applySemanticIntrinsicRemeasurementV1({
       hasIlluminationAmbiguity(candidate)
     );
     if (!claim) return region;
-    const selected = selectMeasuredWhiteCandidate(region);
+    const selected = selectMeasuredWhiteCandidate(region) || buildIlluminantNormalizedWhiteCandidate(region);
     if (!selected) return region;
     const oldHex = safeHex(region?.dominant_hex || region?.region_colors?.[0]?.hex);
     if (oldHex === selected.hex) return region;
