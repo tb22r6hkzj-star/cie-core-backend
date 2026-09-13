@@ -44,12 +44,34 @@ function measurementMass(candidate = {}) {
   return pixels > 0 ? pixels : measurementRatio(candidate);
 }
 
-function mergeEquivalentMeasurements(candidates = [], maximumDeltaE = 8) {
+function measurementFamily(hex) {
+  try {
+    const [lightness, a, b] = chroma(hex).lab();
+    const labChroma = Math.sqrt(a * a + b * b);
+    if (labChroma < 14) return lightness >= 85 ? "white" : lightness < 32 ? "black" : "gray";
+    const [rawHue] = chroma(hex).hsl();
+    const hue = Number.isFinite(rawHue) ? rawHue : 0;
+    if (hue >= 345 || hue < 15) return "red";
+    if (hue >= 315) return "pink";
+    if (hue < 55) return "earth";
+    if (hue < 80) return "yellow";
+    if (hue < 170) return "green";
+    if (hue < 205) return "teal";
+    if (hue < 255) return "blue";
+    if (hue < 315) return "purple";
+    return "other";
+  } catch {
+    return "unknown";
+  }
+}
+
+function mergeEquivalentMeasurements(candidates = [], maximumDeltaE = 36) {
   const groups = [];
   for (const candidate of candidates) {
     const match = groups.find((group) => (
       group.source === candidate.source &&
       group.ownership_validated === candidate.ownership_validated &&
+      measurementFamily(group.hex) === measurementFamily(candidate.hex) &&
       chroma.distance(group.hex, candidate.hex, "lab") <= maximumDeltaE
     ));
     if (!match) {
@@ -194,6 +216,7 @@ export function selectMeasuredColorAuthorityV1(candidates = []) {
       global_palette_can_publish_garment_truth: false,
       higher_purity_spatial_measurement_wins: true,
       equivalent_owned_clusters_are_merged_before_selection: true,
+      illumination_variants_merge_only_within_one_color_family: true,
       largest_owned_pixel_mass_wins_within_authority_tier: true,
       reasoning_cannot_invent_replacement_hex: true,
     },

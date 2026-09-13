@@ -140,3 +140,19 @@ test("equivalent pale footwear clusters merge and largest owned mass wins within
   assert.ok(result.selected?.pixel_count >= 470);
   assert.equal(result.policy.largest_owned_pixel_mass_wins_within_authority_tier, true);
 });
+
+test("same-family red illumination fragments combine without absorbing white or pink", () => {
+  const common = { source: "exclusive_sam_mask_pixels", ownership_state: "owned", ownership_validated: true, confidence: .95 };
+  const result = selectMeasuredColorAuthorityV1([
+    { ...common, hex: "#C02E2E", pct: .09, pixel_count: 90 },
+    { ...common, hex: "#901F1F", pct: .07, pixel_count: 70 },
+    { ...common, hex: "#701312", pct: .06, pixel_count: 60 },
+    { ...common, hex: "#F0ECF4", pct: .16, pixel_count: 160 },
+    { ...common, hex: "#ECC1DC", pct: .12, pixel_count: 120 },
+  ]);
+
+  assert.equal(result.selected?.hex, "#C02E2E");
+  assert.equal(result.selected?.pixel_count, 220);
+  assert.equal(result.selected?.merged_measurement_count, 3);
+  assert.equal(result.policy.illumination_variants_merge_only_within_one_color_family, true);
+});
