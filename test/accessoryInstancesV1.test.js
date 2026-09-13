@@ -179,6 +179,18 @@ test("keeps spatially separate matching jewelry instances and removes overlappin
   assert.deepEqual(result.instances.flatMap((item) => item.evidence_ids), ["left", "right"]);
 });
 
+test("rejects accessory labels assigned to incompatible body locations", () => {
+  const result = buildAccessoryInstancesV1({
+    perceptionV6: {
+      evidence_ledger: [
+        evidence({ id: "shorts-logo-as-necklace", label: "necklace", geometry: { x: .51, y: .54, x2: .61, y2: .64 } }),
+        evidence({ id: "face-as-watch", label: "watch", geometry: { x: .42, y: .08, x2: .58, y2: .24 } }),
+      ],
+    },
+  });
+  assert.equal(result.detected_count, 0);
+});
+
 test("publishes a supported identity but withholds unisolated color", () => {
   const result = buildAccessoryInstancesV1({
     perceptionV6: {

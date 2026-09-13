@@ -195,6 +195,43 @@ test("layered garments keep sibling-owned colors out of the upper-garment palett
   assert.equal(upper.layered_ownership_reconciliation_v1.applied, true);
 });
 
+test("withholds a broad upper read when an outer layer exists but the inner layer has no independent mask", () => {
+  const analysis = {
+    semantic_scene_graph_v1: { pieces: [
+      { zone: "upper_garment", layer_role: "inner", confidence: .96 },
+      { zone: "outerwear", layer_role: "outer", confidence: .98 },
+    ] },
+    garment_zones: { zones: { upper_garment: {
+      hex: "#CC3534",
+      interpretation: "single_color",
+      publication_decision: "publish",
+      primary_color: { hex: "#CC3534", source: "dino_interior" },
+    } } },
+  };
+  const upper = sanitizeCustomerFacingZonesV1(analysis).garment_zones.zones.upper_garment;
+  assert.equal(upper.publication_state, "unknown");
+  assert.equal(upper.hex, null);
+  assert.equal(upper.validation_reason, "outer_layer_present_without_independent_inner_mask");
+});
+
+test("keeps an independently masked inner garment under outerwear", () => {
+  const analysis = {
+    semantic_scene_graph_v1: { pieces: [
+      { zone: "upper_garment", layer_role: "inner", confidence: .96 },
+      { zone: "outerwear", layer_role: "outer", confidence: .98 },
+    ] },
+    garment_zones: { zones: { upper_garment: {
+      hex: "#EFEDEE",
+      interpretation: "single_color",
+      publication_decision: "publish",
+      primary_color: { hex: "#EFEDEE", source: "exclusive_mask_pixel_membership" },
+    } } },
+  };
+  const upper = sanitizeCustomerFacingZonesV1(analysis).garment_zones.zones.upper_garment;
+  assert.equal(upper.hex, "#EFEDEE");
+  assert.equal(upper.name, "Soft White");
+});
+
 test("published cards expose calibrated confidence instead of a stale legacy zero", () => {
   const staleItem = { type: "outerwear", confidence: 0, primary_color: { hex: "#E1609E" } };
   const analysis = {

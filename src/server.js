@@ -172,6 +172,13 @@ const EARLY_TARGET_SEGMENTATION_BUDGET_MS = Math.max(
   Number(process.env.VISIONCORE_EARLY_TARGET_SEGMENTATION_TIMEOUT_MS) || 35000
 );
 const ACCESSORY_REANALYSIS_BUDGET_MS = 10000;
+// The correction pass is local VisionCore work over masks already acquired.
+// Keep its deadline independent from optional provider work so a slow first
+// pass cannot silently disable contradiction recovery.
+const RUNTIME_SECOND_PASS_BUDGET_MS = Math.max(
+  1000,
+  Math.min(12000, Number(process.env.VISIONCORE_SECOND_PASS_BUDGET_MS) || 8000)
+);
 const ACCESSORY_MICRO_CROP_SAM_TIMEOUT_MS = 15000;
 const externalSemanticCache = new Map();
 
@@ -8481,7 +8488,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       outfitAnalysis,
     });
     const secondPassSyntheses = buildAppearanceMeasurementSynthesesV1(semanticReconciliation);
-    const secondPassBudgetMs = Math.max(0, Math.min(8000, transformLatencyBudget.remainingMs()));
+    const secondPassBudgetMs = RUNTIME_SECOND_PASS_BUDGET_MS;
     let secondPassRemeasurementPromise = null;
     const runtimeSecondPass = await executeRuntimeSecondPassV1({
       syntheses: secondPassSyntheses,
@@ -8944,6 +8951,10 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       summary: semanticIntrinsicRemeasurement.summary,
       semanticHandoff: externalSemantic?.handoff,
     });
+    outfitAnalysis = {
+      ...outfitAnalysis,
+      semantic_scene_graph_v1: analysis.semantic_scene_graph_v1,
+    };
     outfitAnalysis = sanitizeCustomerFacingZonesV1(outfitAnalysis);
     outfitAnalysis = {
       ...outfitAnalysis,
