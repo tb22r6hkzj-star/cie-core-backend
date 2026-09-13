@@ -28,11 +28,34 @@ test("does not publish gold from an unvalidated skin-colored crop", () => {
   assert.equal(result.family, null);
 });
 
-test("does not mislabel neutral silver or black hardware as gold", () => {
+test("publishes validated neutral reflective pixels as silver rather than gold", () => {
   const result = classifyMeasuredMetallicPaletteV1({
     validationSupported: true,
     highlightRatio: 0.12,
     colors: [{ hex: "#D5D6D8", pct: 0.55 }, { hex: "#303236", pct: 0.45 }],
+  });
+  assert.equal(result.publishable, true);
+  assert.equal(result.family, "silver_tone_metal");
+  assert.equal(result.display_name, "Silver/Diamond Tone");
+  assert.notEqual(result.family, "gold_tone_metal");
+});
+
+test("one clean validated silver cluster can publish when reflectance is independently measured", () => {
+  const result = classifyMeasuredMetallicPaletteV1({
+    validationSupported: true,
+    highlightRatio: 0.09,
+    colors: [{ hex: "#C9C8C5", pct: 1 }],
+  });
+  assert.equal(result.publishable, true);
+  assert.equal(result.family, "silver_tone_metal");
+  assert.equal(result.representative_hex, "#C9C8C5");
+});
+
+test("dark neutral hardware without a measured reflective highlight remains unclassified", () => {
+  const result = classifyMeasuredMetallicPaletteV1({
+    validationSupported: true,
+    highlightRatio: 0,
+    colors: [{ hex: "#242424", pct: 1 }],
   });
   assert.equal(result.publishable, false);
 });
