@@ -83,6 +83,7 @@ import { evaluateCaptureQualityV1 } from "./intelligence/captureQualityGateV1.js
 import { buildConsumerEvidenceV1 } from "./intelligence/consumerEvidenceV1.js";
 import { buildAppearanceMeasurementSynthesesV1 } from "./intelligence/appearanceMeasurementSynthesisV1.js";
 import { executeRuntimeSecondPassV1 } from "./intelligence/runtimeSecondPassV1.js";
+import { aggregateMeasuredMaskColorsV1 } from "./intelligence/maskedPatternPaletteAggregationV1.js";
 import { segmentationZoneForPieceV1 } from "./intelligence/pieceOntologyV1.js";
 import { createTransformLatencyBudgetV1, shouldRunAccessoryEscalationV1 } from "./intelligence/transformLatencyBudgetV1.js";
 import { buildGroundingDinoQueryPlanV1 } from "./intelligence/groundingDinoQueryPlanV1.js";
@@ -7484,7 +7485,10 @@ async function enrichSamRegionsWithMaskedColors(imageUrl, regions = []) {
       target: decoded,
       competitors,
     });
-    const regionColors = measuredColors.slice(0, 6);
+    // Consolidate the entire owned mask before limiting the palette. Limiting
+    // raw RGB buckets first erases distributed pattern colors whose combined
+    // mass is meaningful (for example a taupe monogram over dark brown).
+    const regionColors = aggregateMeasuredMaskColorsV1(measuredColors, 6);
     const dominantHex = safeHex(regionColors[0]?.hex || region?.dominant_hex || "");
     const totalOwnedPixelCount = Number(regionColors[0]?.total_owned_pixel_count || 0);
 
