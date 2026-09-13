@@ -213,7 +213,7 @@ test("post-ownership summary abstention suppresses stale segmented watch palette
   assert.equal(bridged.stale_accessory_palette_suppressed, true);
 });
 
-test("unrelated accessories remain unchanged when there is no ownership verdict", () => {
+test("unrelated jewelry identity remains visible but color is withheld without ownership", () => {
   const earring = {
     instance_id: "earrings_1",
     zone_key: "accessory_earrings",
@@ -233,7 +233,9 @@ test("unrelated accessories remain unchanged when there is no ownership verdict"
     accessory_instances_v1: { instances: [earring], zones: { accessory_earrings: earring } },
     garment_zones: { zones: { accessory_earrings: earring }, accessory_instances: [earring] },
   });
-  assert.equal(result.accessory_instances_v1.instances[0].hex, "#D9D9D9");
+  assert.equal(result.accessory_instances_v1.instances[0].accessory_type, "earrings");
+  assert.equal(result.accessory_instances_v1.instances[0].hex, null);
+  assert.equal(result.accessory_instances_v1.instances[0].validation_decision, "identity_only");
 });
 
 test("same-type identities sharing one ownership region publish once", () => {
@@ -258,4 +260,24 @@ test("same-type identities sharing one ownership region publish once", () => {
   assert.equal(result.accessory_instances_v1.instances[0].zone_key, "accessory_necklace");
   assert.equal(result.accessory_instances_v1.instances[0].hex, null);
   assert.equal(result.accessory_instances_v1.instances[0].validation_reason, "accessory_material_identity_not_isolated");
+});
+
+test("withheld watch authority clears the stale Head-to-Toe accessory projection", () => {
+  const instance = watchInstance("#2B2420");
+  const analysis = analysisWith({}, instance);
+  analysis.accessory_analysis = [{
+    ...instance,
+    type: "watch",
+    region_colors: [
+      { hex: "#2B2420", pct: 0.17 },
+      { hex: "#7A5B46", pct: 0.17 },
+    ],
+    color_mode: "multicolor",
+  }];
+
+  const result = reconcileAccessoryPublicationV1(analysis);
+  assert.equal(result.accessory_instances_v1.instances[0].hex, null);
+  assert.equal(result.accessory_analysis[0].hex, null);
+  assert.deepEqual(result.accessory_analysis[0].region_colors, []);
+  assert.match(result.accessory_analysis[0].color_publication_decision, /^withhold_/);
 });

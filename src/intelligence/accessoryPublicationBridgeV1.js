@@ -197,8 +197,6 @@ function bridgeInstance(instance, region) {
       suspiciousWarmPrimary = r > g && g > b && (max - min) >= 18 && r >= 120 && g >= 90 && b >= 55;
     }
     const suspiciousNoisyPalette = uniqueHexes.length >= 4;
-    if (!existingWithhold && !suspiciousWarmPrimary && !suspiciousNoisyPalette) return instance;
-
     return {
       ...instance,
       object_local_colors: [],
@@ -213,7 +211,11 @@ function bridgeInstance(instance, region) {
       signature_color: null,
       color_publication_decision: existingWithhold ? decision || "withhold_unvalidated_color" : "withhold_unvalidated_color",
       validation_decision: "identity_only",
-      validation_reason: existingWithhold ? (instance?.validation_reason || "accessory_color_already_withheld") : "suspicious_accessory_palette_without_ownership_region",
+      validation_reason: existingWithhold
+        ? (instance?.validation_reason || "accessory_color_already_withheld")
+        : suspiciousWarmPrimary || suspiciousNoisyPalette
+          ? "suspicious_accessory_palette_without_ownership_region"
+          : "accessory_color_without_ownership_region",
       color_authority_source: "piece_color_ownership_v1",
       stale_accessory_palette_suppressed: true,
       accessory_final_publication_gate_v1: true,
@@ -328,6 +330,22 @@ function updateVisibleAccessoryZones(originalZones = {}, instances = []) {
   return zones;
 }
 
+function updateVisibleAccessoryCollection(collection = [], instances = []) {
+  if (!Array.isArray(collection)) return collection;
+  const claimed = new Set();
+  return collection.map((item) => {
+    const type = instanceType(item);
+    if (!type) return item;
+    const instance = instances.find((candidate, index) => (
+      !claimed.has(index) && instanceType(candidate) === type
+    ));
+    if (!instance) return suppressLegacyJewelryColor(item, type);
+    const index = instances.indexOf(instance);
+    claimed.add(index);
+    return instance;
+  });
+}
+
 export function reconcileAccessoryPublicationV1(analysis = {}) {
   if (!analysis || typeof analysis !== "object") return analysis;
   const bundle = analysis?.accessory_instances_v1;
@@ -363,6 +381,7 @@ export function reconcileAccessoryPublicationV1(analysis = {}) {
 
   return {
     ...analysis,
+    accessory_analysis: updateVisibleAccessoryCollection(analysis?.accessory_analysis, instances),
     accessory_instances_v1: {
       ...bundle,
       instances,
@@ -384,6 +403,7 @@ export function reconcileAccessoryPublicationV1(analysis = {}) {
         lineage_source: "post_ownership_summary_v1",
         visible_zone_matching: "normalized_accessory_identity_plus_instance_lineage",
         final_publication_gate_version: "accessory_final_publication_gate_v1",
+        derived_accessory_collection_synchronized: true,
       },
     } : analysis?.garment_zones,
   };

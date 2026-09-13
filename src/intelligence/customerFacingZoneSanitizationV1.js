@@ -454,8 +454,27 @@ function synchronizeDerivedItemWithPublishedZone(item = {}, zones = {}) {
     const outerHex = zones.outerwear?.primary_color?.hex || zones.outerwear?.dominant_color?.hex || zones.outerwear?.hex;
     if (outerHex && colorDistance(itemHex, outerHex) < 8) targetType = "outerwear";
   }
-  const zone = zones?.[targetType];
-  if (!zone || isUncertain(zone)) return item;
+  const accessoryType = String(item?.accessory_type || item?.object_type || item?.type || "")
+    .trim().toLowerCase().replace(/^accessory_/, "").replace(/[^a-z0-9]+/g, "_");
+  const zone = zones?.[item?.zone_key] || zones?.[targetType] || zones?.[`accessory_${accessoryType}`];
+  if (!zone) return item;
+  if (isUncertain(zone)) {
+    return {
+      ...item,
+      ...zone,
+      hex: null,
+      dominant_hex: null,
+      dominant_color: null,
+      primary_color: null,
+      signature_color: null,
+      support_colors: [],
+      secondary_colors: [],
+      accent_colors: [],
+      detected_colors: [],
+      region_colors: [],
+      object_local_colors: [],
+    };
+  }
 
   const authoritativeHex = zone?.primary_color?.hex
     || zone?.dominant_color?.hex

@@ -347,3 +347,20 @@ test("dominant black eyewear cannot publish distant unowned clothing colors", ()
   assert.equal(eyewear.color_mode, "single_color");
   assert.equal(eyewear.mode, "single_color");
 });
+
+test("derived accessory cards resolve accessory zone keys and cannot retain withheld colors", () => {
+  const stale = {
+    type: "watch", accessory_type: "watch", zone_key: "accessory_watch",
+    hex: "#2B2420", primary_color: { hex: "#2B2420" },
+    region_colors: [{ hex: "#2B2420", pct: 0.6 }],
+  };
+  const analysis = {
+    garment_zones: { zones: { accessory_watch: {
+      ...stale, interpretation: "unknown", color_publication_decision: "withhold_unisolated_material_color",
+    } } },
+    accessory_analysis: [stale],
+  };
+  const result = sanitizeCustomerFacingZonesV1(analysis);
+  assert.equal(result.accessory_analysis[0].hex, null);
+  assert.deepEqual(result.accessory_analysis[0].region_colors, []);
+});
