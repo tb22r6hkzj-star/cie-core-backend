@@ -61,6 +61,22 @@ test("piece truth preserves spatially distinct instances of the same type", () =
   assert.equal(truth.pieces.length, 2);
 });
 
+test("piece truth consolidates same-type cards without independent spatial lineage", () => {
+  const truth = buildPieceTruthPublicationV1({
+    garment_zones: { zones: {
+      accessory_necklace: { accessory_type: "necklace", confidence: 0.49 },
+    } },
+    accessory_instances_v1: { instances: [{
+      instance_id: "necklace_2",
+      zone_key: "accessory_necklace_2",
+      accessory_type: "necklace",
+      confidence: 0.88,
+    }] },
+  });
+  assert.equal(truth.pieces.length, 1);
+  assert.equal(truth.pieces[0].metrics_v1.measurement_confidence, 0.88);
+});
+
 test("publication guard links legacy cards to their canonical piece", () => {
   const next = applyPieceTruthPublicationV1({
     outfit_analysis: {
@@ -89,4 +105,3 @@ test("required but unfinished second pass is explicit in every piece record", ()
   assert.equal(truth.pieces[0].correction_v1.state, "required_unresolved");
   assert.equal(truth.pieces[0].correction_v1.reason, "mask_contradiction");
 });
-

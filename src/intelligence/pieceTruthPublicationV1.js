@@ -186,7 +186,19 @@ export function buildPieceTruthPublicationV1(analysis = {}) {
     const existing = byEvidence.get(key);
     if (!existing || quality(piece) > quality(existing)) byEvidence.set(key, piece);
   }
-  const pieces = [...byEvidence.values()];
+  const lineageDeduped = [...byEvidence.values()];
+  const pieces = [];
+  for (const piece of lineageDeduped.sort((a, b) => quality(b) - quality(a))) {
+    const sameType = pieces.find((existing) => existing.piece_type === piece.piece_type);
+    const hasIndependentRegion = Boolean(piece?.provenance_v1?.source_region_id);
+    const existingHasIndependentRegion = Boolean(sameType?.provenance_v1?.source_region_id);
+    // Detector-generated instance IDs are not proof of separate physical
+    // objects. Keep two same-type cards only when both own distinct measured
+    // regions (for example left and right earrings). Otherwise they are
+    // competing projections of one unresolved physical piece.
+    if (sameType && (!hasIndependentRegion || !existingHasIndependentRegion)) continue;
+    pieces.push(piece);
+  }
   const byZone = Object.fromEntries(pieces.filter((piece) => piece.zone_key).map((piece) => [piece.zone_key, piece.piece_id]));
 
   return {
@@ -254,4 +266,3 @@ export function applyPieceTruthPublicationV1(payload = {}) {
   const truth = buildPieceTruthPublicationV1(payload);
   return attachRefs(payload, truth);
 }
-
