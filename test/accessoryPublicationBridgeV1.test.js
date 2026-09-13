@@ -262,6 +262,34 @@ test("same-type identities sharing one ownership region publish once", () => {
   assert.equal(result.accessory_instances_v1.instances[0].validation_reason, "accessory_material_identity_not_isolated");
 });
 
+test("single neutral jewelry cluster publishes silver only with measured reflectance", () => {
+  const region = {
+    id: "necklace-silver-mask",
+    zone: "accessory_jewelry",
+    label: "necklace",
+    confidence: .91,
+    dominant_hex: "#C1C0C2",
+    region_colors: [{ hex: "#C1C0C2", pct: 1, pixel_count: 140 }],
+    color_debug: { piece_color_ownership_v1: { applied: true } },
+  };
+  const result = reconcileAccessoryPublicationV1({
+    segmented_regions: [region],
+    accessory_instances_v1: { instances: [{
+      instance_id: "necklace_1",
+      zone_key: "accessory_necklace",
+      accessory_type: "necklace",
+      confidence: .88,
+      highlight_ratio: .09,
+    }], zones: {} },
+    garment_zones: { zones: {}, accessory_instances: [] },
+  });
+
+  const necklace = result.accessory_instances_v1.instances[0];
+  assert.equal(necklace.hex, "#C1C0C2");
+  assert.equal(necklace.material_family, "silver_tone_metal");
+  assert.equal(necklace.material_display_name, "Silver/Diamond Tone");
+});
+
 test("withheld watch authority clears the stale Head-to-Toe accessory projection", () => {
   const instance = watchInstance("#2B2420");
   const analysis = analysisWith({}, instance);
