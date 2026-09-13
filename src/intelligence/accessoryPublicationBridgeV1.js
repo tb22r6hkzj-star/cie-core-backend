@@ -163,11 +163,11 @@ function chooseRegion(instance, regions = []) {
 function metallicRepresentative(instance, colors = []) {
   const type = instanceType(instance);
   const metallicTypes = new Set(["watch", "necklace", "chain", "pendant", "earrings", "ring", "bracelet", "shoe_hardware"]);
-  if (!metallicTypes.has(type) || colors.length < 2) return null;
+  if (!metallicTypes.has(type) || colors.length < 1) return null;
 
   const metallic = classifyMeasuredMetallicPaletteV1({
     colors,
-    highlightRatio: Number(instance?.metallic_color_evidence_v1?.evidence?.highlight_ratio || instance?.highlight_ratio || 0.08),
+    highlightRatio: Number(instance?.metallic_color_evidence_v1?.evidence?.highlight_ratio || instance?.highlight_ratio || 0),
     validationSupported: true,
   });
   if (!metallic.publishable || !metallic.representative_hex) return null;
