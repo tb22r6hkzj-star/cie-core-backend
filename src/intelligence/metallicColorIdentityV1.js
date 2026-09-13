@@ -41,6 +41,12 @@ function isWarmMetalRow(row) {
   return hue >= 24 && hue <= 62 && saturation >= 0.16 && lightness >= 0.20 && lightness <= 0.90 && r >= g && g > b;
 }
 
+function isSilverMetalRow(row) {
+  const { saturation, lightness, r, g, b } = row?.traits || {};
+  const channelSpread = Math.max(r, g, b) - Math.min(r, g, b);
+  return saturation <= 0.18 && channelSpread <= 34 && lightness >= 0.08 && lightness <= 0.96;
+}
+
 function representativeMetalRow(rows = []) {
   const warmRows = rows.filter(isWarmMetalRow);
   if (!warmRows.length) return null;
@@ -68,38 +74,63 @@ function representativeMetalRow(rows = []) {
   })[0] || null;
 }
 
+function representativeSilverRow(rows = []) {
+  const candidates = rows.filter((row) => isSilverMetalRow(row) && row.traits.lightness >= 0.30);
+  if (!candidates.length) return null;
+  return [...candidates].sort((a, b) => {
+    const score = (row) => row.weight * 1.2 - Math.abs(row.traits.lightness - 0.62) * 0.35;
+    return score(b) - score(a);
+  })[0] || null;
+}
+
 /**
  * Classifies a metallic color family from VisionCore-owned object pixels.
  * It deliberately refuses to infer gold from an external semantic label.
  */
 export function classifyMeasuredMetallicPaletteV1({ colors = [], highlightRatio = 0, validationSupported = false } = {}) {
   const rows = normalizedWeights(colors);
-  if (!validationSupported || rows.length < 2) {
+  if (!validationSupported || rows.length < 1) {
     return { publishable: false, family: null, display_name: null, confidence: 0, representative_hex: null, reason: "insufficient_validated_metallic_pixels" };
   }
 
   const warmShare = rows.reduce((sum, row) => sum + (isWarmMetalRow(row) ? row.weight : 0), 0);
+  const silverShare = rows.reduce((sum, row) => sum + (isSilverMetalRow(row) ? row.weight : 0), 0);
   const luminances = rows.map((row) => row.traits.luminance);
   const luminanceSpread = Math.max(...luminances) - Math.min(...luminances);
   const reflectiveStructure = luminanceSpread >= 0.16 || (highlightRatio >= 0.015 && highlightRatio <= 0.68);
-  const confidence = clamp01(warmShare * 0.72 + Math.min(1, luminanceSpread / 0.28) * 0.20 + (reflectiveStructure ? 0.08 : 0));
-  const publishable = warmShare >= 0.58 && reflectiveStructure && confidence >= 0.62;
-  const representative = publishable ? representativeMetalRow(rows) : null;
+  const goldConfidence = clamp01(warmShare * 0.72 + Math.min(1, luminanceSpread / 0.28) * 0.20 + (reflectiveStructure ? 0.08 : 0));
+  const silverConfidence = clamp01(silverShare * 0.70 + Math.min(1, luminanceSpread / 0.28) * 0.16 + (reflectiveStructure ? 0.14 : 0));
+  const goldPublishable = warmShare >= 0.58 && reflectiveStructure && goldConfidence >= 0.62;
+  const silverPublishable = !goldPublishable && silverShare >= 0.58 && reflectiveStructure && silverConfidence >= 0.62;
+  const publishable = goldPublishable || silverPublishable;
+  const family = goldPublishable ? "gold_tone_metal" : silverPublishable ? "silver_tone_metal" : null;
+  const displayName = goldPublishable ? "Gold Tone" : silverPublishable ? "Silver/Diamond Tone" : null;
+  const confidence = goldPublishable ? goldConfidence : silverConfidence;
+  const representative = goldPublishable
+    ? representativeMetalRow(rows)
+    : silverPublishable
+      ? representativeSilverRow(rows)
+      : null;
 
   return {
     publishable,
-    family: publishable ? "gold_tone_metal" : null,
-    display_name: publishable ? "Gold Tone" : null,
+    family,
+    display_name: displayName,
     confidence,
     representative_hex: representative ? safeHex(representative.color?.hex) : null,
-    reason: publishable ? "validated_warm_metal_reflectance" : "metallic_family_not_sufficiently_supported",
+    reason: goldPublishable
+      ? "validated_warm_metal_reflectance"
+      : silverPublishable
+        ? "validated_neutral_metal_reflectance"
+        : "metallic_family_not_sufficiently_supported",
     evidence: {
       warm_pixel_share: warmShare,
+      neutral_silver_pixel_share: silverShare,
       luminance_spread: luminanceSpread,
       highlight_ratio: clamp01(highlightRatio),
       representative_source: representative ? "measured_mid_tone_metallic_pixel_cluster" : null,
       specular_highlight_excluded_from_representative: Boolean(
-        rows.length >= 3 &&
+        rows.length >= 2 &&
         rows.some((row) => row !== representative && row.traits.lightness >= 0.70)
       ),
     },
