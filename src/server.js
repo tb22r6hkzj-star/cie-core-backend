@@ -976,12 +976,19 @@ function getZoneColorMode(clusters = []) {
   const topPct = Number(sorted?.[0]?.pct || 0);
   const secondPct = Number(sorted?.[1]?.pct || 0);
   const meaningfulCount = sorted.filter((c) => Number(c?.pct || 0) >= 0.08).length;
+  const repeatedSecondary = sorted.slice(1).find((c) =>
+    c?.pattern_repetition_supported === true &&
+    Number(c?.pct || 0) >= 0.025 &&
+    colorDistanceLab(sorted[0]?.base || sorted[0]?.hex, c?.base || c?.hex) >= 6
+  );
   const reason = sorted.length > 0 && topPct < 0.55
     ? "top_pct_lt_0_55"
     : secondPct >= 0.18
       ? "second_pct_gte_0_18"
       : meaningfulCount >= 3
         ? "three_colors_pct_gte_0_08"
+        : repeatedSecondary
+          ? "spatially_repeated_secondary"
         : null;
   return {
     color_mode: reason ? "multi_color" : "single_color",
@@ -1645,6 +1652,10 @@ function buildSegmentedColorObject({
 }
 
 function getBlackNuanceLabel(hex) {
+  const perceptualName = getColorName(hex);
+  if (/Brown|Umber|Cognac|Espresso|Olive|Navy|Green|Blue|Purple|Red/i.test(perceptualName)) {
+    return perceptualName;
+  }
   const light = getLight(hex);
   if (light < 0.12) return "Jet Black";
   if (light < 0.18) return "Deep Black";
@@ -1727,6 +1738,16 @@ function isMateriallyDistinctGarmentColor(primaryHex, secondaryHex) {
   );
 }
 
+function isSpatiallyRepeatedGarmentColor(primaryHex, color = {}) {
+  const secondaryHex = safeHex(color?.hex || color?.base || "");
+  return Boolean(
+    secondaryHex &&
+    color?.pattern_repetition_supported === true &&
+    Number(color?.pct || 0) >= 0.025 &&
+    colorDistanceLab(primaryHex, secondaryHex) >= 6
+  );
+}
+
 function matchesOtherGarmentPrimary(primaryHex, secondaryHex, otherGarmentPrimaryHexes = []) {
   const primary = safeHex(primaryHex || "");
   const secondary = safeHex(secondaryHex || "");
@@ -1754,7 +1775,7 @@ function buildGarmentPublicationAuthorityV1(zoneKey, zoneData = {}, regionColors
   let suppressedOwnedPiecePrimaryCount = 0;
   const ownedSecondaries = rows.filter((color) => {
     const hex = safeHex(color?.hex || color?.base || "");
-    if (!hex || !primaryHex || !isMateriallyDistinctGarmentColor(primaryHex, hex)) return false;
+    if (!hex || !primaryHex || (!isMateriallyDistinctGarmentColor(primaryHex, hex) && !isSpatiallyRepeatedGarmentColor(primaryHex, color))) return false;
     if (matchesOtherGarmentPrimary(primaryHex, hex, context?.otherGarmentPrimaryHexes)) {
       suppressedCrossZonePrimaryCount += 1;
       return false;
@@ -2457,6 +2478,17 @@ function inferZoneColorRead(zoneKey, zoneData, normalizedColors = [], regionColo
     cluster_count: clusters.length,
     color_mode: mode === "multicolor" ? "multi_color" : "single_color",
     interpretation,
+    pattern: debugContext.multicolor_reason === "spatially_repeated_secondary"
+      ? "repeating_color_motif"
+      : undefined,
+    pattern_evidence_v1: debugContext.multicolor_reason === "spatially_repeated_secondary"
+      ? {
+          supported: true,
+          source: "exclusive_mask_spatial_distribution",
+          reason: debugContext.multicolor_reason,
+          external_color_authority: false,
+        }
+      : undefined,
     display_label: displayLabel,
     confidence: zoneConfidence,
     confidence_breakdown: buildConfidenceBreakdown({
@@ -3695,6 +3727,8 @@ export function buildColorClusters(colors = []) {
       if (dist < 20) {
         cluster.colors.push(c);
         cluster.weight += weight;
+        cluster.pattern_repetition_supported ||= c?.pattern_repetition_supported === true;
+        cluster.spatial_cell_ratio = Math.max(Number(cluster.spatial_cell_ratio || 0), Number(c?.spatial_cell_ratio || 0));
         placed = true;
         break;
       }
@@ -3705,6 +3739,8 @@ export function buildColorClusters(colors = []) {
         base: hex,
         colors: [c],
         weight,
+        pattern_repetition_supported: c?.pattern_repetition_supported === true,
+        spatial_cell_ratio: Number(c?.spatial_cell_ratio || 0),
       });
     }
   }
@@ -6688,6 +6724,7 @@ function measureMaskedRegionColors(baseImage, maskImage, ownership = {}) {
 
   const buckets = new Map();
   let pixelCount = 0;
+  const spatialGridSize = 8;
 
   for (let my = 0; my < maskH; my += 1) {
     for (let mx = 0; mx < maskW; mx += 1) {
@@ -6712,13 +6749,15 @@ function measureMaskedRegionColors(baseImage, maskImage, ownership = {}) {
       const g = Number(baseImage.data[bIdx + 1] || 0);
       const b = Number(baseImage.data[bIdx + 2] || 0);
       const key = `${Math.round(r / 16)}_${Math.round(g / 16)}_${Math.round(b / 16)}`;
+      const spatialCell = `${Math.min(spatialGridSize - 1, Math.floor((mx / maskW) * spatialGridSize))}_${Math.min(spatialGridSize - 1, Math.floor((my / maskH) * spatialGridSize))}`;
 
-      if (!buckets.has(key)) buckets.set(key, { count: 0, rSum: 0, gSum: 0, bSum: 0 });
+      if (!buckets.has(key)) buckets.set(key, { count: 0, rSum: 0, gSum: 0, bSum: 0, spatialCells: new Set() });
       const row = buckets.get(key);
       row.count += 1;
       row.rSum += r;
       row.gSum += g;
       row.bSum += b;
+      row.spatialCells.add(spatialCell);
       pixelCount += 1;
     }
   }
@@ -6739,6 +6778,12 @@ function measureMaskedRegionColors(baseImage, maskImage, ownership = {}) {
         pct: row.count / pixelCount,
         pixel_count: row.count,
         total_owned_pixel_count: pixelCount,
+        spatial_cells: [...row.spatialCells],
+        spatial_grid_cell_count: spatialGridSize * spatialGridSize,
+        ownership_state: "owned",
+        ownership_validated: true,
+        measurement_source: "exclusive_mask_pixel_membership",
+        traceable_to_pixels: true,
       };
     })
     .filter((c) => !!c.hex)
@@ -8295,6 +8340,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
   const transformLatencyBudget = createTransformLatencyBudgetV1({
     totalMs: Number(process.env.VISIONCORE_TRANSFORM_BUDGET_MS) || 50000,
     reserveMs: Number(process.env.VISIONCORE_TRANSFORM_RESPONSE_RESERVE_MS) || 5000,
+    correctionReserveMs: Number(process.env.VISIONCORE_CORRECTION_RESERVE_MS) || 12000,
   });
   try {
     const files = Array.isArray(req.files) ? req.files : [];
@@ -8492,7 +8538,10 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       outfitAnalysis,
     });
     const secondPassSyntheses = buildAppearanceMeasurementSynthesesV1(semanticReconciliation);
-    const secondPassBudgetMs = RUNTIME_SECOND_PASS_BUDGET_MS;
+    const secondPassBudgetMs = Math.min(
+      RUNTIME_SECOND_PASS_BUDGET_MS,
+      transformLatencyBudget.correctionRemainingMs()
+    );
     let secondPassRemeasurementPromise = null;
     const runtimeSecondPass = await executeRuntimeSecondPassV1({
       syntheses: secondPassSyntheses,
@@ -8526,7 +8575,11 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
               recovery_pass: true,
             };
             const recovered = await runTargetConditionedSegmentation(publicUrl, recoveryPlan, {
-              timeoutMs: Math.max(1000, Math.min(7000, secondPassBudgetMs)),
+              timeoutMs: transformLatencyBudget.correctionProviderTimeoutMs({
+                requestedMs: Math.max(1000, Math.min(7000, secondPassBudgetMs)),
+                maximumMs: 7000,
+                minimumMs: 1000,
+              }),
             });
             if (recovered?.results) {
               const spatial = validateTargetConditionedMaskRegionsV1({
@@ -8644,7 +8697,9 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       targetedAccessoryReanalysis.execution_allowed &&
       targetedAccessoryReanalysis.query &&
       (
-        !transformLatencyBudget.canRun(1500) ||
+        !(localAccessoryRecoveryRequired
+          ? transformLatencyBudget.canRunCorrection(1500)
+          : transformLatencyBudget.canRun(1500)) ||
         (
           !localAccessoryRecoveryRequired &&
           !shouldRunAccessoryEscalationV1(transformLatencyBudget, accessoryReanalysisMinimumRemainingMs)
@@ -8656,13 +8711,21 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         execution_allowed: false,
         latency_budget_skipped: true,
         identity_fallback_preserved: true,
-        reason: transformLatencyBudget.canRun(1500)
+        reason: (localAccessoryRecoveryRequired
+          ? transformLatencyBudget.canRunCorrection(1500)
+          : transformLatencyBudget.canRun(1500))
           ? "transform_latency_budget_insufficient_for_optional_accessory_reanalysis"
           : "transform_latency_budget_exhausted_before_accessory_reanalysis",
       };
     }
     if (targetedAccessoryReanalysis.execution_allowed && targetedAccessoryReanalysis.query) {
-      const targetedDetectorTimeoutMs = transformLatencyBudget.providerTimeoutMs({
+      const accessoryBudgetCanRun = (minimumMs) => localAccessoryRecoveryRequired
+        ? transformLatencyBudget.canRunCorrection(minimumMs)
+        : transformLatencyBudget.canRun(minimumMs);
+      const accessoryProviderTimeoutMs = (options) => localAccessoryRecoveryRequired
+        ? transformLatencyBudget.correctionProviderTimeoutMs(options)
+        : transformLatencyBudget.providerTimeoutMs(options);
+      const targetedDetectorTimeoutMs = accessoryProviderTimeoutMs({
         requestedMs: ACCESSORY_REANALYSIS_BUDGET_MS,
         maximumMs: ACCESSORY_REANALYSIS_BUDGET_MS,
       });
@@ -8735,7 +8798,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
                 true_micro_crop_v1: cropArtifact,
               };
             }
-            if (!transformLatencyBudget.canRun(1500)) {
+            if (!accessoryBudgetCanRun(1500)) {
               return {
                 enabled: true,
                 ok: false,
@@ -8745,7 +8808,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
               };
             }
             const detected = await runGroundingDinoDetection(cropArtifact.url, microQuery, {
-              timeoutMs: transformLatencyBudget.providerTimeoutMs({
+              timeoutMs: accessoryProviderTimeoutMs({
                 requestedMs: ACCESSORY_REANALYSIS_BUDGET_MS,
                 maximumMs: ACCESSORY_REANALYSIS_BUDGET_MS,
               }),
@@ -8788,7 +8851,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
                 regions: [],
               };
             }
-            if (!transformLatencyBudget.canRun(1500)) {
+            if (!accessoryBudgetCanRun(1500)) {
               return {
                 enabled: true,
                 ok: false,
@@ -8797,7 +8860,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
               };
             }
             const segmented = await runSamSegmentation(trueMicroCropArtifact.url, {
-              timeoutMs: transformLatencyBudget.providerTimeoutMs({
+              timeoutMs: accessoryProviderTimeoutMs({
                 requestedMs: ACCESSORY_MICRO_CROP_SAM_TIMEOUT_MS,
                 maximumMs: ACCESSORY_MICRO_CROP_SAM_TIMEOUT_MS,
               }),
