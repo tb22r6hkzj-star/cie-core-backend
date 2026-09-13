@@ -235,3 +235,27 @@ test("unrelated accessories remain unchanged when there is no ownership verdict"
   });
   assert.equal(result.accessory_instances_v1.instances[0].hex, "#D9D9D9");
 });
+
+test("same-type identities sharing one ownership region publish once", () => {
+  const region = {
+    id: "necklace-mask",
+    zone: "accessory_jewelry",
+    label: "necklace",
+    confidence: .9,
+    dominant_hex: "#C1ACB0",
+    region_colors: [{ hex: "#C1ACB0", pct: .8, pixel_count: 100 }],
+    color_debug: { piece_color_ownership_v1: { applied: true } },
+  };
+  const first = { instance_id: "necklace_1", zone_key: "accessory_necklace", accessory_type: "necklace", confidence: .86 };
+  const second = { instance_id: "necklace_2", zone_key: "accessory_necklace_2", accessory_type: "necklace", confidence: .49 };
+  const result = reconcileAccessoryPublicationV1({
+    segmented_regions: [region],
+    accessory_instances_v1: { instances: [first, second], zones: {} },
+    garment_zones: { zones: {}, accessory_instances: [first, second] },
+  });
+
+  assert.equal(result.accessory_instances_v1.instances.length, 1);
+  assert.equal(result.accessory_instances_v1.instances[0].zone_key, "accessory_necklace");
+  assert.equal(result.accessory_instances_v1.instances[0].hex, null);
+  assert.equal(result.accessory_instances_v1.instances[0].validation_reason, "accessory_material_identity_not_isolated");
+});

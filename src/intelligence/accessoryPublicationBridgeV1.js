@@ -225,6 +225,28 @@ function bridgeInstance(instance, region) {
   }
 
   const metal = metallicRepresentative(instance, colors);
+  const type = instanceType(instance);
+  const requiresIsolatedMaterialIdentity = new Set(["necklace", "chain", "pendant", "earrings"]).has(type);
+  if (requiresIsolatedMaterialIdentity && !metal) {
+    return {
+      ...instance,
+      object_local_colors: [],
+      support_colors: [],
+      secondary_colors: [],
+      region_colors: [],
+      detected_colors: [],
+      hex: null,
+      dominant_hex: null,
+      dominant_color: null,
+      primary_color: null,
+      signature_color: null,
+      color_publication_decision: "withhold_unisolated_material_color",
+      validation_decision: "identity_only",
+      validation_reason: "accessory_material_identity_not_isolated",
+      color_authority_source: "piece_color_ownership_v1",
+      stale_accessory_palette_suppressed: true,
+    };
+  }
   const primary = metal?.representative || colors[0];
   const orderedColors = [primary, ...colors.filter((color) => color !== primary)];
 
@@ -295,7 +317,29 @@ export function reconcileAccessoryPublicationV1(analysis = {}) {
   if (!bundle || !Array.isArray(bundle?.instances)) return analysis;
 
   const regions = ownershipRegions(analysis);
-  const instances = bundle.instances.map((instance) => bridgeInstance(instance, chooseRegion(instance, regions)));
+  const bridgedRecords = bundle.instances.map((instance) => {
+    const region = chooseRegion(instance, regions);
+    return { instance: bridgeInstance(instance, region), region };
+  });
+  const dedupedRecords = [];
+  for (const record of bridgedRecords.sort((a, b) => Number(b.instance?.confidence || 0) - Number(a.instance?.confidence || 0))) {
+    const duplicate = dedupedRecords.some((kept) => (
+      instanceType(kept.instance) === instanceType(record.instance) &&
+      kept.region && record.region && kept.region === record.region
+    ));
+    if (!duplicate) dedupedRecords.push(record);
+  }
+  const typeCounts = new Map();
+  const instances = dedupedRecords.map((record) => {
+    const type = instanceType(record.instance);
+    const index = Number(typeCounts.get(type) || 0);
+    typeCounts.set(type, index + 1);
+    return {
+      ...record.instance,
+      instance_id: `${type}_${index + 1}`,
+      zone_key: `accessory_${type}${index ? `_${index + 1}` : ""}`,
+    };
+  });
   const byZoneKey = Object.fromEntries(instances.map((instance) => [instance.zone_key, instance]));
   const originalZones = analysis?.garment_zones?.zones || {};
   const zones = updateVisibleAccessoryZones(originalZones, instances);
