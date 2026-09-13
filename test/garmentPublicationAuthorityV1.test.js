@@ -145,6 +145,27 @@ test("owned light and shadow shades of one brown material do not create multicol
   assert.deepEqual(result.detected_colors.map((color) => color.hex), ["#935234"]);
 });
 
+test("a low-mass secondary repeated across an owned garment publishes as a pattern", () => {
+  const palette = [
+    { hex: "#2B2420", pct: 0.93, ownership_state: "owned", ownership_validated: true, spatial_cell_ratio: 0.72, pattern_repetition_supported: true },
+    { hex: "#75675C", pct: 0.07, ownership_state: "owned", ownership_validated: true, spatial_cell_ratio: 0.42, pattern_repetition_supported: true },
+  ];
+  const result = inferZoneColorRead(
+    "lower_garment",
+    { hex: "#2B2420", name: "Espresso Brown", pct: 0.93, score: 88, confidence: 88 },
+    [],
+    palette,
+    true,
+    { zoneColorSource: "target_conditioned_sam_mask", evidence: { coverage: .72, weighted_confidence: .88, color_count: 2 } }
+  );
+
+  assert.equal(result.color_mode, "multi_color");
+  assert.equal(result.pattern, "repeating_color_motif");
+  assert.equal(result.pattern_evidence_v1.source, "exclusive_mask_spatial_distribution");
+  assert.ok(result.detected_colors.some((color) => color.hex === "#75675C"));
+  assert.equal(result.primary_color.name, "Espresso Brown");
+});
+
 test("another garment primary cannot publish as this garment's secondary", () => {
   const palette = [
     { hex: "#935234", pct: 0.82, source: "upper_garment_purity_v1", body_share: 0.74, boundary_share: 0.08, underarm_share: 0.04, spatial_penalty: 1 },
