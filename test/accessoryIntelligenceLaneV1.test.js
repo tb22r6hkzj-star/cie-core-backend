@@ -94,3 +94,17 @@ test("unresolved accessory challenges never grant OpenAI numeric color authority
   assert.equal(lane.publication_gate.openai_numeric_color_authority, false);
   assert.equal(lane.publication_gate.unresolved_challenge_behavior, "identity_only_or_withhold_color");
 });
+
+test("challenged necklaces, rings, and bracelets receive the same bounded recovery lane", () => {
+  for (const accessory_type of ["necklace", "ring", "bracelet"]) {
+    const lane = buildAccessoryIntelligenceLaneV1({
+      outfitAnalysis: {
+        accessory_instances_v1: {
+          instances: [{ accessory_type, confidence: 0.55, object_local_colors: [{ hex: "#9E6A55", pct: 0.8 }] }],
+        },
+      },
+      reconciliation: {},
+    });
+    assert.ok(lane.forced_micro_crop_targets.includes(accessory_type));
+  }
+});

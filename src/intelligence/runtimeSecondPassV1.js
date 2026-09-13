@@ -1,18 +1,21 @@
 import { buildControlledSecondPassPlansV1 } from "./controlledSecondPassV1.js";
 
 function timeoutPromise(ms) {
-  return new Promise((_, reject) => {
+  let timer = null;
+  const promise = new Promise((_, reject) => {
     const error = new Error("second_pass_timeout");
     error.code = "SECOND_PASS_TIMEOUT";
-    setTimeout(() => reject(error), ms);
+    timer = setTimeout(() => reject(error), ms);
   });
+  return { promise, cancel: () => clearTimeout(timer) };
 }
 
 async function boundedCall(fn, payload, timeoutMs) {
   if (typeof fn !== "function") return { ok: false, skipped: true, reason: "executor_missing" };
   const started = Date.now();
+  const timeout = timeoutPromise(timeoutMs);
   try {
-    const result = await Promise.race([Promise.resolve(fn(payload)), timeoutPromise(timeoutMs)]);
+    const result = await Promise.race([Promise.resolve(fn(payload)), timeout.promise]);
     return { ok: true, skipped: false, latency_ms: Date.now() - started, result };
   } catch (error) {
     return {
@@ -22,6 +25,8 @@ async function boundedCall(fn, payload, timeoutMs) {
       reason: error?.code === "SECOND_PASS_TIMEOUT" ? "timeout" : "execution_failure",
       error: error?.message || "execution_failure",
     };
+  } finally {
+    timeout.cancel();
   }
 }
 

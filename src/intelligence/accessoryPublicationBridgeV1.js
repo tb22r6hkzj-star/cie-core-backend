@@ -130,17 +130,34 @@ function ownedColors(region = {}) {
 function chooseRegion(instance, regions = []) {
   const wanted = instanceType(instance);
   if (!wanted) return null;
-  const matches = regions.filter((region) => regionType(region) === wanted);
+  const instanceKey = token(instance?.semantic_instance_key || instance?.instance_key || "");
+  const instanceRegionIds = new Set([
+    instance?.region_id, instance?.detection_id, instance?.source_region_id,
+  ].filter(Boolean).map(String));
+  const matches = regions.filter((region) => regionType(region) === wanted).map((region) => {
+    const regionKey = token(region?.target_conditioned_mask_v1?.semantic_instance_key || region?.semantic_instance_key || region?.instance_key || "");
+    const regionIds = [region?.id, region?.region_id, region?.detection_id].filter(Boolean).map(String);
+    const identityMatch = Boolean(instanceKey && regionKey && instanceKey === regionKey);
+    const lineageMatch = regionIds.some((id) => instanceRegionIds.has(id));
+    return { region, identityMatch, lineageMatch, regionKey };
+  });
   if (!matches.length) return null;
-  return matches.sort((a, b) => {
-    if (Boolean(b?.post_ownership_summary_authority) !== Boolean(a?.post_ownership_summary_authority)) {
-      return b?.post_ownership_summary_authority ? 1 : -1;
+  const hasExplicitInstanceIdentity = Boolean(instanceKey || instanceRegionIds.size);
+  const eligible = hasExplicitInstanceIdentity
+    ? matches.filter((match) => match.identityMatch || match.lineageMatch)
+    : matches.length === 1 ? matches : [];
+  if (!eligible.length) return null;
+  return eligible.sort((a, b) => {
+    if (b.identityMatch !== a.identityMatch) return b.identityMatch ? 1 : -1;
+    if (b.lineageMatch !== a.lineageMatch) return b.lineageMatch ? 1 : -1;
+    if (Boolean(b.region?.post_ownership_summary_authority) !== Boolean(a.region?.post_ownership_summary_authority)) {
+      return b.region?.post_ownership_summary_authority ? 1 : -1;
     }
-    const aApplied = ownershipDebug(a)?.applied === true;
-    const bApplied = ownershipDebug(b)?.applied === true;
+    const aApplied = ownershipDebug(a.region)?.applied === true;
+    const bApplied = ownershipDebug(b.region)?.applied === true;
     if (bApplied !== aApplied) return bApplied ? 1 : -1;
-    return Number(b?.confidence || 0) - Number(a?.confidence || 0);
-  })[0];
+    return Number(b.region?.confidence || 0) - Number(a.region?.confidence || 0);
+  })[0].region;
 }
 
 function metallicRepresentative(instance, colors = []) {
@@ -226,7 +243,7 @@ function bridgeInstance(instance, region) {
 
   const metal = metallicRepresentative(instance, colors);
   const type = instanceType(instance);
-  const requiresIsolatedMaterialIdentity = new Set(["necklace", "chain", "pendant", "earrings"]).has(type);
+  const requiresIsolatedMaterialIdentity = new Set(["watch", "ring", "bracelet", "necklace", "chain", "pendant", "earrings", "shoe_hardware"]).has(type);
   if (requiresIsolatedMaterialIdentity && !metal) {
     return {
       ...instance,
@@ -365,7 +382,7 @@ export function reconcileAccessoryPublicationV1(analysis = {}) {
         authority_owner: "visioncore",
         source: "piece_color_ownership_v1",
         lineage_source: "post_ownership_summary_v1",
-        visible_zone_matching: "normalized_accessory_identity",
+        visible_zone_matching: "normalized_accessory_identity_plus_instance_lineage",
         final_publication_gate_version: "accessory_final_publication_gate_v1",
       },
     } : analysis?.garment_zones,

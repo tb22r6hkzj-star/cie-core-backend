@@ -82,7 +82,10 @@ test("images transform route is timed and receives accessory publication guard",
           accessory_type: "watch",
           confidence: 0.92,
           dominant_hex: "#C69B43",
-          region_colors: [{ hex: "#C69B43", pct: 0.88, pixel_count: 44 }],
+          region_colors: [
+            { hex: "#C69B43", pct: 0.72, pixel_count: 44 },
+            { hex: "#F2D58A", pct: 0.18, pixel_count: 11 },
+          ],
           color_debug: { piece_color_ownership_v1: { applied: true } },
         }],
         accessory_instances_v1: {
