@@ -54,6 +54,30 @@ test("rejects masks without independent detector geometry", () => {
   assert.ok(result.evaluations[0].reasons.includes("detector_box_missing"));
 });
 
+test("accepts a high-confidence semantic-only mask with plausible target geometry", () => {
+  const result = validateTargetConditionedMaskRegionsV1({
+    regions: [region("jacket", "outerwear", { x: 0.2, y: 0.1, w: 0.5, h: 0.5 }, 0.25)],
+    plan: { targets: [{
+      id: "jacket", zone: "outerwear", bbox: null, source: "semantic_target",
+      semantic_instance_key: "jacket_1", confidence: 0.94,
+    }] },
+  });
+  assert.equal(result.validated_count, 1);
+  assert.equal(result.evaluations[0].corroboration, "semantic_target_geometry");
+});
+
+test("semantic-only corroboration still rejects implausible mask coverage", () => {
+  const result = validateTargetConditionedMaskRegionsV1({
+    regions: [region("chain", "accessory_jewelry", { x: 0.1, y: 0.1, w: 0.8, h: 0.7 }, 0.56)],
+    plan: { targets: [{
+      id: "chain", zone: "accessory_jewelry", bbox: null, source: "semantic_target",
+      semantic_instance_key: "chain_1", confidence: 0.96,
+    }] },
+  });
+  assert.equal(result.validated_count, 0);
+  assert.ok(result.evaluations[0].reasons.includes("mask_coverage_out_of_zone_bounds"));
+});
+
 test("remeasurement rejects masks with too few exclusive owned pixels", () => {
   const spatial = validateTargetConditionedMaskRegionsV1({
     regions: [region("shoe", "footwear", { x: 0.3, y: 0.8, w: 0.2, h: 0.08 }, 0.016)],
@@ -74,8 +98,13 @@ test("remeasurement preserves masks with enough exclusive pixels", () => {
   });
   const result = validateTargetConditionedMaskMeasurementsV1({
     validation: spatial,
-    regions: [{ ...spatial.regions[0], owned_pixel_count: 25000 }],
+    regions: [{
+      ...spatial.regions[0], owned_pixel_count: 25000,
+      region_colors: [{ hex: "#2E2825", pct: 0.65 }, { hex: "#746052", pct: 0.25 }],
+    }],
   });
   assert.equal(result.validated_count, 1);
   assert.equal(result.evaluations[0].authority, "validated_spatial_and_pixel_mask");
+  assert.equal(result.regions[0].region_colors[1].ownership_validated, true);
+  assert.equal(result.regions[0].region_colors[1].ownership_state, "owned");
 });

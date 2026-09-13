@@ -83,5 +83,5 @@ test("visible watch alias receives post-ownership metallic representative instea
   assert.ok(WATCH_COLORS.some((color) => color.hex === published.hex));
   assert.notEqual(published.hex, "#DDC4A0");
   assert.equal(published.validation_reason, "validated_accessory_metallic_representative");
-  assert.equal(result.garment_zones.accessory_publication_bridge_v1.visible_zone_matching, "normalized_accessory_identity");
+  assert.equal(result.garment_zones.accessory_publication_bridge_v1.visible_zone_matching, "normalized_accessory_identity_plus_instance_lineage");
 });

@@ -60,10 +60,14 @@ function evaluate(region, target) {
   const maskOverlapRatio = overlap / Math.max(area(maskBox), 1e-9);
   const accessory = ["footwear", "accessory_jewelry", "belt", "bag"].includes(zone);
   const minimumOverlap = accessory ? 0.08 : 0.12;
+  const semanticOnlyTarget = target?.source === "semantic_target" &&
+    Boolean(target?.semantic_instance_key) && Number(target?.confidence || 0) >= 0.8;
+  const semanticGeometryValidated = semanticOnlyTarget && Boolean(maskBox) && Boolean(bounds) &&
+    coverage >= bounds[0] && coverage <= bounds[1];
   const reasons = [];
   if (!bounds) reasons.push("unsupported_target_zone");
   if (!maskBox) reasons.push("mask_geometry_missing");
-  if (!detectorBox) reasons.push("detector_box_missing");
+  if (!detectorBox && !semanticGeometryValidated) reasons.push("detector_box_missing");
   if (bounds && (coverage < bounds[0] || coverage > bounds[1])) reasons.push("mask_coverage_out_of_zone_bounds");
   if (maskBox && detectorBox && detectorOverlapRatio < minimumOverlap) reasons.push("insufficient_detector_overlap");
   if (maskBox && detectorBox && maskOverlapRatio < minimumOverlap) reasons.push("insufficient_mask_overlap");
@@ -77,6 +81,7 @@ function evaluate(region, target) {
     detector_overlap_ratio: round4(detectorOverlapRatio),
     mask_overlap_ratio: round4(maskOverlapRatio),
     detector_region_id: target?.detector_region_id || null,
+    corroboration: detectorBox ? "detector_overlap" : semanticGeometryValidated ? "semantic_target_geometry" : "none",
     authority: reasons.length ? "rejected_before_pixel_authority" : "validated_spatial_mask",
   };
 }
@@ -130,8 +135,18 @@ export function validateTargetConditionedMaskMeasurementsV1({ validation = {}, r
     .filter((region) => acceptedIds.has(String(region?.id || "")))
     .map((region) => {
       const evaluation = evaluations.find((row) => String(row.region_id) === String(region?.id || ""));
+      const validateColors = (colors) => Array.isArray(colors) ? colors.map((color) => ({
+        ...color,
+        source: color?.source || "exclusive_sam_mask_pixels",
+        measurement_source: color?.measurement_source || color?.source || "exclusive_sam_mask_pixels",
+        ownership_state: "owned",
+        ownership_validated: true,
+        traceable_to_pixels: true,
+      })) : colors;
       return {
         ...region,
+        region_colors: validateColors(region?.region_colors),
+        detected_colors: validateColors(region?.detected_colors),
         target_conditioned_mask_v1: {
           ...(region?.target_conditioned_mask_v1 || {}),
           spatially_validated: true,

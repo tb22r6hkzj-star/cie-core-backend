@@ -138,7 +138,7 @@ test("post-ownership summary authority outranks stale segmented watch palette", 
   assert.equal(result.garment_zones.zones.accessory_watch.hex, "#C69B43");
 });
 
-test("applied same-type summary authority outranks a higher-confidence abstention", () => {
+test("watch color is withheld when same-type ownership lacks isolated metallic evidence", () => {
   const instance = watchInstance();
   const analysis = analysisWith({}, instance);
   analysis.piece_color_ownership_v1 = {
@@ -170,9 +170,9 @@ test("applied same-type summary authority outranks a higher-confidence abstentio
 
   const result = reconcileAccessoryPublicationV1(analysis);
   const bridged = result.accessory_instances_v1.instances[0];
-  assert.equal(bridged.hex, "#C0AC93");
-  assert.equal(bridged.color_publication_decision, "publish_owned_color");
-  assert.equal(bridged.validation_decision, "accepted");
+  assert.equal(bridged.hex, null);
+  assert.match(bridged.color_publication_decision, /^withhold_/);
+  assert.equal(bridged.validation_decision, "identity_only");
 });
 
 test("post-ownership summary abstention suppresses stale segmented watch palette", () => {

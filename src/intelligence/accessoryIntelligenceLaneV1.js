@@ -4,7 +4,7 @@ const ACCESSORY_TYPES = new Set([
   "watch", "earrings", "ring", "bracelet", "necklace", "chain", "pendant",
   "belt", "footwear", "shoe_hardware", "bag", "eyewear",
 ]);
-const MICRO_CROP_TYPES = new Set(["watch", "earrings"]);
+const MICRO_CROP_TYPES = new Set(["watch", "earrings", "ring", "bracelet", "necklace", "chain", "pendant"]);
 const METALLIC_TYPES = new Set(["watch", "earrings", "ring", "bracelet", "necklace", "chain", "pendant", "shoe_hardware"]);
 
 function token(value) {

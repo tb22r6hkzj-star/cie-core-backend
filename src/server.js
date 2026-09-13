@@ -8498,11 +8498,48 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         const zone = segmentationZoneForPieceV1(piece, piece);
         secondPassRemeasurementPromise ||= enrichSamRegionsWithMaskedColors(publicUrl, segmentedRegions);
         const remeasuredRegions = await secondPassRemeasurementPromise;
-        const candidates = remeasuredRegions.filter((region) => {
+        let candidates = remeasuredRegions.filter((region) => {
           if (region?.zone !== zone) return false;
           const regionInstanceKey = region?.target_conditioned_mask_v1?.semantic_instance_key || null;
           return !instanceKey || !regionInstanceKey || regionInstanceKey === instanceKey;
         });
+        // A second pass must be able to recover a target rejected or missed in
+        // the first pass. Re-coloring only surviving regions cannot correct a
+        // missing jacket, shirt, or small accessory.
+        if (!candidates.length) {
+          const originalTargets = analysis?.target_conditioned_segmentation_plan_v1?.targets || [];
+          const recoveryTargets = originalTargets.filter((target) => {
+            if (target?.zone !== zone) return false;
+            return !instanceKey || !target?.semantic_instance_key || target.semantic_instance_key === instanceKey;
+          });
+          if (recoveryTargets.length) {
+            const recoveryPlan = {
+              ...(analysis?.target_conditioned_segmentation_plan_v1 || {}),
+              targets: recoveryTargets,
+              candidate_target_count: recoveryTargets.length,
+              target_limit: recoveryTargets.length,
+              omitted_target_count: 0,
+              recovery_pass: true,
+            };
+            const recovered = await runTargetConditionedSegmentation(publicUrl, recoveryPlan, {
+              timeoutMs: Math.max(1000, Math.min(7000, secondPassBudgetMs)),
+            });
+            if (recovered?.results) {
+              const spatial = validateTargetConditionedMaskRegionsV1({
+                regions: recovered?.regions || [],
+                plan: recoveryPlan,
+              });
+              const measured = validateTargetConditionedMaskMeasurementsV1({
+                validation: spatial,
+                regions: spatial.regions,
+              });
+              candidates = measured.regions.map((region) => ({
+                ...region,
+                semantic_recovery_pass_v1: true,
+              }));
+            }
+          }
+        }
         if (!candidates.length) return { available: false, piece, instance_key: instanceKey, regions: [] };
         return { available: candidates.length > 0, piece, instance_key: instanceKey, regions: candidates };
       },
@@ -8570,7 +8607,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       outfitAnalysis,
     });
     const forcedAccessoryTargets = (accessoryIntelligenceLane?.forced_micro_crop_targets || [])
-      .filter((type) => ["watch", "earrings"].includes(type));
+      .filter((type) => ["watch", "earrings", "ring", "bracelet", "necklace", "chain", "pendant"].includes(type));
     if (forcedAccessoryTargets.length && targetedAccessoryReanalysis?.mode === "assist") {
       const existingTargetTypes = new Set((targetedAccessoryReanalysis?.targets || []).map((target) => target?.type));
       const forcedTargets = forcedAccessoryTargets
@@ -8582,9 +8619,11 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           missing_instance_count: 0,
           forced_by_accessory_intelligence_lane: true,
         }));
-      const forcedQueries = forcedAccessoryTargets.flatMap((type) =>
-        type === "watch" ? ["watch"] : ["earring", "stud earring", "earrings"]
-      );
+      const forcedQueries = forcedAccessoryTargets.flatMap((type) => ({
+        watch: ["watch"], earrings: ["earring", "stud earring", "earrings"],
+        ring: ["finger ring", "rings"], bracelet: ["bracelet", "wrist jewelry"],
+        necklace: ["necklace"], chain: ["chain necklace"], pendant: ["pendant necklace"],
+      }[type] || [type]));
       const existingQuery = String(targetedAccessoryReanalysis?.query || "").trim();
       const forcedQuery = forcedQueries.length ? `${forcedQueries.join(". ")}.` : "";
       targetedAccessoryReanalysis = {
