@@ -7,6 +7,7 @@ import { classifyExternalStageV2, summarizeExternalStageEventsV2 } from "./exter
 import { reconcileAccessoryPublicationPayloadV1 } from "./accessoryPublicationBridgeV1.js";
 import { applyAccessoryCanonicalPublicationV2 } from "./accessoryCanonicalPublicationV2.js";
 import { applyTransformGarmentColorAuthorityV1 } from "./transformGarmentColorAuthorityV1.js";
+import { applyPieceTruthPublicationV1 } from "./pieceTruthPublicationV1.js";
 
 const runtime = createAnalysisLatencyRuntimeV1({ maxRecords: 500 });
 const originalGet = express.application.get;
@@ -124,9 +125,10 @@ function applyLivePublicationGuards(payload = {}, route = null) {
   const bridged = reconcileAccessoryPublicationPayloadV1(payload);
   const canonical = applyAccessoryCanonicalPublicationV2(bridged);
   const reasoned = attachReasoningCards(canonical);
-  return route === "/api/images/transform"
+  const guarded = route === "/api/images/transform"
     ? applyTransformGarmentColorAuthorityV1(reasoned)
     : reasoned;
+  return applyPieceTruthPublicationV1(guarded);
 }
 
 function buildInstrumentationMiddleware(path) {
