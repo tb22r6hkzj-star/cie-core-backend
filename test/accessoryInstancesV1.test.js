@@ -21,6 +21,7 @@ function evidence({
   supported = true,
   targeted = false,
   identityRejected = false,
+  highlightRatio = 0,
 } = {}) {
   return {
     id,
@@ -33,7 +34,7 @@ function evidence({
     identity_rejected: identityRejected,
     targeted_reanalysis_v1: targeted,
     validation: { supported, reason: supported ? "small_object_local_pixels_validated" : "insufficient_small_object_pixel_evidence" },
-    pixel_evidence: { available: true, sample_count: 64 },
+    pixel_evidence: { available: true, sample_count: 64, ratios: { highlight: highlightRatio } },
     object_local_colors: colors,
   };
 }
@@ -136,6 +137,26 @@ test("labels validated reflective warm jewelry pixels as measured gold tone", ()
   assert.equal(result.instances[0].material_family, "gold_tone_metal");
   assert.equal(result.instances[0].material_display_name, "Gold Tone");
   assert.equal(result.instances[0].external_color_authority, false);
+});
+
+test("labels a validated single-cluster bracelet as measured silver tone", () => {
+  const result = buildAccessoryInstancesV1({
+    perceptionV6: {
+      evidence_ledger: [evidence({
+        id: "bracelet-silver",
+        label: "bracelet",
+        highlightRatio: .09,
+        geometry: { x: .72, y: .48, x2: .82, y2: .58 },
+        colors: [{
+          hex: "#C9C8C5", pct: .82, pixel_count: 52,
+          source_class: "object", surrounding_distance: .16,
+        }],
+      })],
+    },
+  });
+  assert.equal(result.instances[0].material_family, "silver_tone_metal");
+  assert.equal(result.instances[0].material_display_name, "Silver/Diamond Tone");
+  assert.equal(result.instances[0].color_publication_decision, "publish_object_local_color");
 });
 
 test("normalizes Grounding DINO x_min geometry using embedded image dimensions", () => {
