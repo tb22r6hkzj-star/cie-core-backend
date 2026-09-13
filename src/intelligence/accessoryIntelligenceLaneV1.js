@@ -86,7 +86,7 @@ function evaluateAccessory(instance = {}, reconciliation = {}) {
   const semantic = semanticCandidateFor(type, reconciliation);
   const metallicCue = semanticMetallicCue(semantic);
   const measuredMetallic = METALLIC_TYPES.has(type)
-    ? classifyMeasuredMetallicPaletteV1({ colors, highlightRatio: Number(instance?.metallic_color_evidence_v1?.evidence?.highlight_ratio || 0.08), validationSupported: colors.length >= 2 })
+    ? classifyMeasuredMetallicPaletteV1({ colors, highlightRatio: Number(instance?.metallic_color_evidence_v1?.evidence?.highlight_ratio || 0), validationSupported: colors.length >= 1 })
     : null;
   const reasons = [];
 

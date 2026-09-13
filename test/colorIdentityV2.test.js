@@ -47,3 +47,9 @@ test("warm earth brown measurements are never mislabeled as Brick Red", () => {
   assert.equal(getColorName("#763D25"), "Rich Brown");
   assert.equal(getColorName("#935234"), "Rich Brown");
 });
+
+test("warm near-black pixels preserve brown undertone before black nuance naming", () => {
+  assert.equal(getColorName("#2B2420"), "Espresso Brown");
+  assert.equal(getColorName("#302720"), "Espresso Brown");
+  assert.match(getColorName("#090909"), /Black/);
+});

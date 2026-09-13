@@ -192,7 +192,7 @@ function buildInstance(entry, index) {
     validationSupported: entry.colorAccepted,
   });
   const metallicColorRequired = new Set([
-    "necklace", "chain", "pendant", "earrings", "ring", "watch", "shoe_hardware",
+    "necklace", "chain", "pendant", "earrings", "ring", "bracelet", "watch", "shoe_hardware",
   ]).has(entry.type);
   const colorAccepted = entry.colorAccepted && (!metallicColorRequired || metallicIdentity.publishable);
   const identityOnlyReason = entry.targetedIdentity && !entry.measurementAccepted

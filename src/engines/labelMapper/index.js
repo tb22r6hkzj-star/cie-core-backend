@@ -198,6 +198,15 @@ export function getColorName(hex) {
   if (lab.l >= 86 && chromaMagnitude <= 12) return "Linen White";
   if (lab.l >= 74 && chromaMagnitude <= 10) return "Light Gray";
 
+  // Near-black does not mean neutral black. Preserve a stable warm direction
+  // before the low-lightness neutral rules so dark brown pixels such as
+  // #2B2420 are not renamed Jet Black merely because their luminance is low.
+  const [red, green, blue] = chroma(safe).rgb();
+  if (
+    lab.l < 24 && chromaMagnitude >= 3.5 &&
+    hue >= 8 && hue <= 58 && red >= green && green >= blue && red - blue >= 5
+  ) return "Espresso Brown";
+
   if (isDarkOliveFamily(safe)) return "Deep Olive";
   if (directionalChromaticIdentity) return directionalChromaticIdentity;
   if (saturation < 0.05 && lightness < 0.1) return "Jet Black";

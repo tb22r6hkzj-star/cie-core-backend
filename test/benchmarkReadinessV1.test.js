@@ -8,7 +8,7 @@ test("the current golden catalog honestly reports that validation is not complet
   const result = evaluateBenchmarkReadinessV1(catalog);
   assert.equal(result.ready, false);
   assert.equal(result.adjudicated_image_count, 0);
-  assert.equal(result.seed_case_count, 1);
+  assert.equal(result.seed_case_count, 2);
   assert.equal(result.seed_cases_are_not_benchmark_samples, true);
   assert.ok(result.blockers.includes("no_physical_color_ground_truth"));
 });

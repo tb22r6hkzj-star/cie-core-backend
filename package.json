@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node --import ./src/intelligence/liveServerTelemetryPreloadV1.js src/server.js",
     "test": "NODE_ENV=test node --test",
-    "benchmark:readiness": "node scripts/benchmark-readiness.mjs"
+    "benchmark:readiness": "node scripts/benchmark-readiness.mjs",
+    "fixture:piece-truth": "node scripts/check-piece-truth-fixture.mjs"
   },
   "dependencies": {
     "chroma-js": "^2.4.2",

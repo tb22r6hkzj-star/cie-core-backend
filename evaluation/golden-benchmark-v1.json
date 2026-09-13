@@ -41,6 +41,17 @@
       "expected_pattern_by_zone": { "upper_garment": "solid", "lower_garment": "solid" },
       "expected_primary_color_by_zone": { "upper_garment": "#935234", "lower_garment": "#3F5041" },
       "ground_truth_notes": "Black belongs to belt and footwear, not either garment palette. Source image remains outside the repository until consent and retention handling are finalized."
+    },
+    {
+      "image_id": "dark-monogram-silver-jewelry-v1",
+      "annotation_status": "annotated",
+      "benchmark_axes": ["layered", "overlap", "print_or_graphic", "multicolor", "bag_or_jewelry", "ownership_conflict", "black_white_gray", "shadow_highlight"],
+      "fixture_contract": "evaluation/fixtures/dark-monogram-silver-jewelry-v1.json",
+      "source_sha256": "9eae5f03e7ed5f5d3873e9fe416c85088921535fa7854db446b4fd52f5564723",
+      "expected_zone_labels": { "upper_garment": "shirt", "outerwear": "jacket", "lower_garment": "trousers", "footwear": "footwear" },
+      "expected_color_mode_by_zone": { "upper_garment": "single_color", "outerwear": "multi_color", "lower_garment": "multi_color", "footwear": "single_color" },
+      "expected_pattern_by_zone": { "outerwear": "repeating_monogram", "lower_garment": "repeating_monogram" },
+      "ground_truth_notes": "Product-owner-approved visual regression fixture. Exact hex is deliberately not asserted without physical color ground truth. The private source image is fingerprinted and excluded from source control."
     }
   ]
 }

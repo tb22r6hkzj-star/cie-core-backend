@@ -1,0 +1,106 @@
+{
+  "schema_version": "piece_truth_fixture_v1",
+  "fixture_id": "dark-monogram-silver-jewelry-v1",
+  "status": "product_owner_approved_regression_case",
+  "release_blocking": true,
+  "source_asset": {
+    "uri": "private-fixture://dark-monogram-silver-jewelry-v1.jpeg",
+    "sha256": "9eae5f03e7ed5f5d3873e9fe416c85088921535fa7854db446b4fd52f5564723",
+    "width": 834,
+    "height": 1614,
+    "repository_storage": "excluded",
+    "reason": "User-supplied evaluation image is fingerprinted but not redistributed in source control."
+  },
+  "ground_truth_scope": {
+    "exact_hex_adjudicated": false,
+    "visual_piece_and_family_truth_approved": true,
+    "notes": "Do not invent exact hex targets from the rendered photograph. Gate identity, ownership, color family, pattern mode, metallic family, consolidation, and publication consistency."
+  },
+  "benchmark_axes": [
+    "layered_overlap",
+    "tonal_repeated_pattern",
+    "near_black_warm_undertone",
+    "white_neutral",
+    "reflective_silver_jewelry",
+    "small_accessory",
+    "duplicate_instance_risk"
+  ],
+  "expected_pieces": [
+    {
+      "id": "shirt",
+      "aliases": ["short_sleeve_shirt", "upper_garment", "tee", "t_shirt"],
+      "min_count": 1,
+      "max_count": 1,
+      "color_mode": "single_color",
+      "required_color_families": ["white"],
+      "remeasurement_must_complete": true
+    },
+    {
+      "id": "jacket",
+      "aliases": ["outerwear", "hoodless_casual_jacket"],
+      "min_count": 1,
+      "max_count": 1,
+      "color_mode": "multicolor",
+      "pattern_required": true,
+      "required_color_families": ["warm_dark_brown", "taupe_brown"],
+      "forbidden_primary_names": ["jet_black"],
+      "remeasurement_must_complete": true
+    },
+    {
+      "id": "trousers",
+      "aliases": ["pants", "lower_garment", "straight_leg_trousers", "matching_patterned_trousers"],
+      "min_count": 1,
+      "max_count": 1,
+      "color_mode": "multicolor",
+      "pattern_required": true,
+      "required_color_families": ["warm_dark_brown", "taupe_brown"],
+      "forbidden_primary_names": ["jet_black"],
+      "remeasurement_must_complete": true
+    },
+    {
+      "id": "footwear",
+      "aliases": ["shoe", "shoes", "sneaker", "lace_up_athletic_shoe"],
+      "min_count": 1,
+      "max_count": 1,
+      "color_mode": "single_color",
+      "required_color_families": ["white"]
+    },
+    {
+      "id": "necklace",
+      "aliases": ["chain", "chains"],
+      "min_count": 1,
+      "max_count": 1,
+      "required_color_families": ["silver_tone"],
+      "color_publication_required": true,
+      "remeasurement_must_complete": true
+    },
+    {
+      "id": "ring",
+      "aliases": ["rings"],
+      "min_count": 1,
+      "max_count": 1,
+      "required_color_families": ["silver_tone"],
+      "color_publication_required": true,
+      "remeasurement_must_complete": true
+    },
+    {
+      "id": "bracelet",
+      "aliases": ["bracelets", "wrist_jewelry"],
+      "min_count": 1,
+      "max_count": 1,
+      "required_color_families": ["silver_tone"],
+      "color_publication_required": true,
+      "remeasurement_must_complete": true
+    },
+    {
+      "id": "watch",
+      "aliases": ["wristwatch"],
+      "min_count": 1,
+      "max_count": 1,
+      "required_color_families": ["silver_tone"],
+      "color_publication_required": true,
+      "remeasurement_must_complete": true
+    }
+  ]
+}
+

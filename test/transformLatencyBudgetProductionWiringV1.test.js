@@ -79,12 +79,13 @@ test("required local accessory recovery is not suppressed by the optional-work l
 });
 
 test("targeted accessory recovery cannot outlive the transform budget", () => {
-  assert.match(source, /!transformLatencyBudget\.canRun\(1500\)/);
+  assert.match(source, /accessoryBudgetCanRun\(1500\)/);
+  assert.match(source, /transformLatencyBudget\.canRunCorrection\(minimumMs\)/);
   assert.match(source, /transform_latency_budget_exhausted_before_accessory_reanalysis/);
-  assert.match(source, /const targetedDetectorTimeoutMs = transformLatencyBudget\.providerTimeoutMs/);
+  assert.match(source, /const targetedDetectorTimeoutMs = accessoryProviderTimeoutMs/);
   assert.match(source, /targetedAccessoryReanalysis\.query,[\s\S]*\{ timeoutMs: targetedDetectorTimeoutMs \}/);
   assert.match(source, /runGroundingDinoDetection\(cropArtifact\.url, microQuery, \{/);
-  assert.match(source, /runSamSegmentation\(trueMicroCropArtifact\.url, \{[\s\S]*providerTimeoutMs/);
+  assert.match(source, /runSamSegmentation\(trueMicroCropArtifact\.url, \{[\s\S]*timeoutMs: accessoryProviderTimeoutMs/);
   assert.match(source, /transform_latency_budget_exhausted_before_micro_crop_detection/);
   assert.match(source, /transform_latency_budget_exhausted_before_micro_crop_segmentation/);
 });
@@ -95,8 +96,11 @@ test("response debug exposes transform latency budget snapshot", () => {
 
 test("runtime contradiction recovery has a dedicated bounded budget", () => {
   assert.match(source, /VISIONCORE_SECOND_PASS_BUDGET_MS/);
-  assert.match(source, /const secondPassBudgetMs = RUNTIME_SECOND_PASS_BUDGET_MS/);
+  assert.match(source, /const secondPassBudgetMs = Math\.min\([\s\S]*RUNTIME_SECOND_PASS_BUDGET_MS,[\s\S]*transformLatencyBudget\.correctionRemainingMs\(\)/);
   assert.doesNotMatch(source, /secondPassBudgetMs = Math\.max\(0, Math\.min\(8000, transformLatencyBudget\.remainingMs\(\)\)\)/);
+  assert.match(source, /VISIONCORE_CORRECTION_RESERVE_MS/);
+  assert.match(source, /transformLatencyBudget\.correctionRemainingMs\(\)/);
+  assert.match(source, /transformLatencyBudget\.correctionProviderTimeoutMs/);
 });
 
 test("primary DINO and split YOLO zero-result fallback lanes share the transform budget", () => {
