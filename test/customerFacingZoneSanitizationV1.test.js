@@ -283,3 +283,67 @@ test("restored ownership normalizes mixed confidence scales before publication",
   assert.equal(footwear.confidence, 97);
   assert.equal(footwear.publication_state, "confirmed");
 });
+
+test("red white pink layered outfit publishes jacket and shirt under their semantic zone identities", () => {
+  const color = (hex, pct, ownership_validated = true) => ({ hex, pct, ownership_validated });
+  const analysis = sanitizeCustomerFacingZonesV1({
+    semantic_scene_graph_v1: { pieces: [
+      { piece: "jacket", subtype: "track jacket", zone: "outerwear", layer_role: "outer", confidence: .98 },
+      { piece: "shirt", subtype: "shirt", zone: "upper_garment", layer_role: "inner", confidence: .97 },
+      { piece: "shorts", subtype: "shorts", zone: "lower_garment", layer_role: "standalone", confidence: .98 },
+      { piece: "footwear", subtype: "low top athletic sneaker", zone: "footwear", layer_role: "standalone", confidence: .96 },
+    ] },
+    garment_zones: { zones: {
+      upper_garment: {
+        interpretation: "multi_color", primary_color: color("#F5F1FB", .17),
+        detected_colors: [color("#F5F1FB", .17), color("#C22E2E", .15), color("#DEB3CB", .12)],
+      },
+      body_garment: {
+        interpretation: "single_color", primary_color: color("#F5F1FB", .54),
+        detected_colors: [color("#F5F1FB", .54)],
+      },
+      lower_garment: {
+        interpretation: "multi_color", primary_color: color("#F0ECF4", .20),
+        detected_colors: [color("#F0ECF4", .20), color("#C02E2E", .08), color("#E2AFC8", .07)],
+      },
+      footwear: {
+        interpretation: "multi_color", color_mode: "single_color", mode: "single_color",
+        primary_color: color("#DEB3CB", .31),
+        detected_colors: [color("#DEB3CB", .31), color("#E1D2DD", .05), color("#D53A45", .04)],
+      },
+    } },
+  });
+  const zones = analysis.garment_zones.zones;
+  assert.equal(zones.body_garment, undefined);
+  assert.equal(zones.outerwear.display_zone_label, "Track Jacket");
+  assert.deepEqual(zones.outerwear.detected_colors.map((row) => row.hex), ["#F5F1FB", "#C22E2E", "#DEB3CB"]);
+  assert.equal(zones.upper_garment.display_zone_label, "Shirt");
+  assert.equal(zones.upper_garment.color_mode, "single_color");
+  assert.equal(zones.lower_garment.display_zone_label, "Shorts");
+  assert.deepEqual(zones.lower_garment.detected_colors.map((row) => row.hex), ["#F0ECF4", "#C02E2E", "#E2AFC8"]);
+  assert.equal(zones.footwear.display_zone_label, "Low Top Athletic Sneaker");
+  assert.equal(zones.footwear.color_mode, "multicolor");
+  assert.equal(zones.footwear.mode, "multicolor");
+  assert.equal(zones.footwear.read_mode, "multicolor");
+  assert.ok(zones.footwear.detected_colors.some((row) => row.hex === "#D53A45"));
+});
+
+test("dominant black eyewear cannot publish distant unowned clothing colors", () => {
+  const analysis = sanitizeCustomerFacingZonesV1({
+    garment_zones: { zones: { eyewear: {
+      interpretation: "single_color",
+      primary_color: { hex: "#1E0D11", pct: .82, ownership_validated: true },
+      detected_colors: [
+        { hex: "#1E0D11", pct: .82, ownership_validated: true },
+        { hex: "#5F4140", pct: .13 },
+        { hex: "#9E6A63", pct: .01 },
+        { hex: "#BBB1CE", pct: .01 },
+      ],
+    } } },
+  });
+  const eyewear = analysis.garment_zones.zones.eyewear;
+  assert.deepEqual(eyewear.detected_colors.map((row) => row.hex), ["#1E0D11"]);
+  assert.deepEqual(eyewear.secondary_colors, []);
+  assert.equal(eyewear.color_mode, "single_color");
+  assert.equal(eyewear.mode, "single_color");
+});

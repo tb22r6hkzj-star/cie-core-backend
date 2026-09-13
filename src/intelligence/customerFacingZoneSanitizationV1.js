@@ -138,6 +138,143 @@ function publishedPalette(zone = {}) {
   return values.filter((color, index) => color?.hex && values.findIndex((other) => other?.hex === color.hex) === index);
 }
 
+function canonicalPublishedPalette(zone = {}) {
+  const primaryHex = zone?.primary_color?.hex || zone?.dominant_color?.hex || zone?.hex || zone?.dominant_hex;
+  const values = [
+    zone?.primary_color,
+    zone?.dominant_color,
+    ...(Array.isArray(zone?.object_local_colors) ? zone.object_local_colors : []),
+    ...(Array.isArray(zone?.region_colors) ? zone.region_colors : []),
+    ...(Array.isArray(zone?.detected_colors) ? zone.detected_colors : []),
+    ...(Array.isArray(zone?.support_colors) ? zone.support_colors : []),
+    ...(Array.isArray(zone?.secondary_colors) ? zone.secondary_colors : []),
+    ...(Array.isArray(zone?.accent_colors) ? zone.accent_colors : []),
+  ].filter((color) => color?.hex);
+  const unique = values.filter((color, index) =>
+    values.findIndex((other) => String(other.hex).toUpperCase() === String(color.hex).toUpperCase()) === index
+  );
+  const primary = unique.find((color) => String(color.hex).toUpperCase() === String(primaryHex).toUpperCase())
+    || (primaryHex ? { hex: primaryHex, pct: 1 } : unique[0]);
+  if (!primary?.hex) return [];
+  const supporting = unique
+    .filter((color) => String(color.hex).toUpperCase() !== String(primary.hex).toUpperCase())
+    .filter((color) => normalizedPct(color) >= 0.03 || color?.ownership_validated === true)
+    .filter((color) => colorDistance(primary.hex, color.hex) >= 10)
+    .sort((a, b) => normalizedPct(b) - normalizedPct(a))
+    .slice(0, 4);
+  return [primary, ...supporting].map(synchronizeColorObject);
+}
+
+function synchronizeZonePublicationContract(zoneKey, zone = {}) {
+  if (isUncertain(zone)) return zone;
+  let palette = canonicalPublishedPalette(zone);
+  if (!palette.length) return zone;
+
+  // Eyewear masks often contain cheek, clothing, and backdrop pixels around a
+  // compact dark frame. A dominant dark frame may retain only nearby dark/
+  // neutral evidence unless a secondary has explicit independent ownership.
+  if (zoneKey === "eyewear" && normalizedPct(palette[0]) >= 0.6) {
+    let primaryLightness = 100;
+    try { primaryLightness = chroma(palette[0].hex).lab()[0]; } catch {}
+    if (primaryLightness <= 24) {
+      palette = [palette[0], ...palette.slice(1).filter((color) => {
+        const independentlyOwned = color?.ownership_validated === true
+          || color?.ownership_validation?.validated === true;
+        return independentlyOwned && normalizedPct(color) >= 0.05 && colorDistance(palette[0].hex, color.hex) <= 18;
+      })];
+    }
+  }
+
+  const primary = palette[0];
+  const supporting = palette.slice(1);
+  const multicolor = supporting.length > 0;
+  const mergeAlias = (existing, fallback) => {
+    const permitted = new Set(palette.map((color) => String(color.hex).toUpperCase()));
+    const current = Array.isArray(existing) ? existing.map(synchronizeColorObject).filter((color) =>
+      color?.hex && (zoneKey !== "eyewear" || permitted.has(String(color.hex).toUpperCase()))
+    ) : [];
+    return [...current, ...fallback.filter((color) =>
+      !current.some((present) => String(present.hex).toUpperCase() === String(color.hex).toUpperCase())
+    )];
+  };
+  const detected = mergeAlias(zone?.detected_colors, palette);
+  const regions = mergeAlias(zone?.region_colors, palette);
+  const objectLocal = mergeAlias(zone?.object_local_colors, palette);
+  const support = mergeAlias(zone?.support_colors, supporting);
+  const secondary = mergeAlias(zone?.secondary_colors, supporting);
+  const accents = mergeAlias(zone?.accent_colors, supporting.slice(1));
+  return {
+    ...zone,
+    hex: primary.hex,
+    dominant_hex: primary.hex,
+    dominant_color: primary,
+    primary_color: primary,
+    signature_color: synchronizeColorObject(zone?.signature_color) || supporting[0] || null,
+    support_colors: support,
+    secondary_colors: secondary,
+    accent_colors: accents,
+    detected_colors: detected,
+    region_colors: regions,
+    object_local_colors: objectLocal,
+    interpretation: multicolor ? "multi_color" : "single_color",
+    color_mode: multicolor ? "multicolor" : "single_color",
+    mode: multicolor ? "multicolor" : "single_color",
+    read_mode: multicolor ? "multicolor" : "single_color",
+  };
+}
+
+function semanticPieceLabel(piece = {}, fallback = "") {
+  const raw = String(piece?.subtype || piece?.piece || fallback).trim();
+  return raw ? raw.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase()) : null;
+}
+
+function applySemanticLayerIdentity(analysis = {}, zones = {}) {
+  const pieces = Array.isArray(analysis?.semantic_scene_graph_v1?.pieces)
+    ? analysis.semantic_scene_graph_v1.pieces
+    : [];
+  const outerPiece = pieces.find((piece) => piece?.zone === "outerwear" && piece?.layer_role === "outer" && Number(piece?.confidence || 0) >= 0.75);
+  const innerPiece = pieces.find((piece) => piece?.zone === "upper_garment" && piece?.layer_role === "inner" && Number(piece?.confidence || 0) >= 0.75);
+  const next = { ...zones };
+
+  // Some legacy consumers call the largest torso mask `upper_garment` and put
+  // the independently isolated inner shirt in `body_garment`. When semantics
+  // confirms an outer+inner stack, move the measured zone objects rather than
+  // copying semantic colors or publishing two aliases for the same pixels.
+  if (outerPiece && innerPiece && (!next.outerwear || isUncertain(next.outerwear)) && next.upper_garment && next.body_garment && !isUncertain(next.body_garment)) {
+    next.outerwear = {
+      ...next.upper_garment,
+      garment_type: outerPiece.subtype || outerPiece.piece || "jacket",
+      object_type: outerPiece.piece || "outerwear",
+      display_zone_label: semanticPieceLabel(outerPiece, "Jacket"),
+      semantic_zone_reassignment_v1: { from: "upper_garment", to: "outerwear", measured_values_preserved: true },
+    };
+    next.upper_garment = {
+      ...next.body_garment,
+      garment_type: innerPiece.subtype || innerPiece.piece || "shirt",
+      object_type: innerPiece.piece || "upper_garment",
+      display_zone_label: semanticPieceLabel(innerPiece, "Shirt"),
+      semantic_zone_reassignment_v1: { from: "body_garment", to: "upper_garment", measured_values_preserved: true },
+    };
+    delete next.body_garment;
+  }
+
+  for (const [zoneKey, zone] of Object.entries(next)) {
+    const piece = pieces
+      .filter((candidate) => candidate?.zone === zoneKey && Number(candidate?.confidence || 0) >= 0.75)
+      .sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0))[0];
+    if (!piece || zoneKey.startsWith("accessory_")) continue;
+    next[zoneKey] = {
+      ...zone,
+      garment_type: piece.subtype || piece.piece || zone?.garment_type,
+      object_type: piece.piece || zone?.object_type,
+      display_zone_label: semanticPieceLabel(piece, zoneKey),
+      semantic_identity_authority_v1: "categorical_identity_only",
+      external_color_authority: false,
+    };
+  }
+  return next;
+}
+
 function enforceLayeredGarmentOwnership(zones = {}) {
   const upper = zones?.upper_garment;
   const outerwear = zones?.outerwear;
@@ -311,7 +448,13 @@ function synchronizeCustomerFacingColorAliases(zone = {}) {
 }
 
 function synchronizeDerivedItemWithPublishedZone(item = {}, zones = {}) {
-  const zone = zones?.[item?.type];
+  let targetType = item?.type;
+  const itemHex = item?.primary_color?.hex || item?.dominant_color?.hex;
+  if (itemHex && zones?.outerwear?.semantic_zone_reassignment_v1 && targetType === "upper_garment") {
+    const outerHex = zones.outerwear?.primary_color?.hex || zones.outerwear?.dominant_color?.hex || zones.outerwear?.hex;
+    if (outerHex && colorDistance(itemHex, outerHex) < 8) targetType = "outerwear";
+  }
+  const zone = zones?.[targetType];
   if (!zone || isUncertain(zone)) return item;
 
   const authoritativeHex = zone?.primary_color?.hex
@@ -339,11 +482,17 @@ function synchronizeDerivedItemWithPublishedZone(item = {}, zones = {}) {
 
   return {
     ...item,
+    type: targetType,
     confidence: zone?.confidence ?? item?.confidence,
     name: authoritativeName,
-    ...(new Set(["upper_garment", "lower_garment", "body_garment", "outerwear"]).has(item?.type)
-      ? { display_label: authoritativeName }
+    ...(new Set(["upper_garment", "lower_garment", "body_garment", "outerwear"]).has(targetType)
+      ? { display_label: zone?.semantic_identity_authority_v1 ? zone?.display_zone_label || authoritativeName : authoritativeName }
       : {}),
+    display_zone_label: zone?.display_zone_label || item?.display_zone_label,
+    garment_type: zone?.garment_type || item?.garment_type,
+    color_mode: zone?.color_mode || item?.color_mode,
+    mode: zone?.mode || item?.mode,
+    read_mode: zone?.read_mode || item?.read_mode,
     dominant_color: sourceDominant,
     primary_color: sourcePrimary,
     signature_color: zone?.signature_color
@@ -405,10 +554,11 @@ export function sanitizeCustomerFacingZonesV1(analysis = {}) {
     );
   }
 
-  const ownershipReconciledZones = enforceMissingLayerMaskSafety(
+  const semanticLayerZones = applySemanticLayerIdentity(analysis, enforceLayeredGarmentOwnership(zones));
+  const ownershipReconciledZones = Object.fromEntries(Object.entries(enforceMissingLayerMaskSafety(
     analysis,
-    enforceLayeredGarmentOwnership(zones)
-  );
+    semanticLayerZones
+  )).map(([key, zone]) => [key, synchronizeZonePublicationContract(key, zone)]));
 
   const garmentAnalysis = analysis?.garment_analysis
     ? {
