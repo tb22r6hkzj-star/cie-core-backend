@@ -189,6 +189,41 @@ function enforceLayeredGarmentOwnership(zones = {}) {
   };
 }
 
+function enforceMissingLayerMaskSafety(analysis = {}, zones = {}) {
+  const pieces = Array.isArray(analysis?.semantic_scene_graph_v1?.pieces)
+    ? analysis.semantic_scene_graph_v1.pieces
+    : [];
+  const hasOuterLayer = pieces.some((piece) => piece?.zone === "outerwear" && piece?.layer_role === "outer" && Number(piece?.confidence || 0) >= 0.75);
+  const hasInnerUpper = pieces.some((piece) => piece?.zone === "upper_garment" && piece?.layer_role === "inner" && Number(piece?.confidence || 0) >= 0.75);
+  if (!hasOuterLayer || !hasInnerUpper || (zones?.outerwear && !isUncertain(zones.outerwear)) || !zones?.upper_garment) return zones;
+
+  const upper = zones.upper_garment;
+  const authorityText = [
+    upper?.color_authority_source,
+    upper?.canonical_color_authority_v1?.source,
+    upper?.primary_color?.source,
+    upper?.primary_color?.measurement_source,
+  ].filter(Boolean).join(" ").toLowerCase();
+  if (/exclusive_mask|sam_mask|target_conditioned/.test(authorityText)) return zones;
+
+  return {
+    ...zones,
+    upper_garment: sanitizeUncertainZone("upper_garment", {
+      ...upper,
+      interpretation: "unknown",
+      publication_state: "unknown",
+      publication_decision: "withhold_unresolved_layer_ownership",
+      validation_decision: "rejected",
+      validation_reason: "outer_layer_present_without_independent_inner_mask",
+      layered_ownership_reconciliation_v1: {
+        applied: true,
+        withheld: true,
+        reason: "outer_layer_present_without_independent_inner_mask",
+      },
+    }),
+  };
+}
+
 function restoreCanonicalGarmentColor(zone = {}) {
   const authority = zone?.canonical_color_authority_v1;
   if (authority?.applied !== true || !authority?.dominant_hex) return zone;
@@ -370,7 +405,10 @@ export function sanitizeCustomerFacingZonesV1(analysis = {}) {
     );
   }
 
-  const ownershipReconciledZones = enforceLayeredGarmentOwnership(zones);
+  const ownershipReconciledZones = enforceMissingLayerMaskSafety(
+    analysis,
+    enforceLayeredGarmentOwnership(zones)
+  );
 
   const garmentAnalysis = analysis?.garment_analysis
     ? {

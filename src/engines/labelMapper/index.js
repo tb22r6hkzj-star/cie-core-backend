@@ -189,6 +189,15 @@ export function getColorName(hex) {
   const directionalChromaticIdentity = getDirectionalChromaticIdentity(safe);
   const lab = getLab(safe);
 
+  // Hue becomes numerically unstable near the neutral axis: a tiny blue or
+  // violet cast in a photographed white can otherwise turn #F4F1FB into
+  // "Periwinkle".  Resolve high-lightness, low-LAB-chroma samples as neutrals
+  // before any directional or hue-family naming. Genuine pale colors retain
+  // enough LAB chroma to continue into the chromatic branches below.
+  if (lab.l >= 93 && chromaMagnitude <= 10) return "Soft White";
+  if (lab.l >= 86 && chromaMagnitude <= 12) return "Linen White";
+  if (lab.l >= 74 && chromaMagnitude <= 10) return "Light Gray";
+
   if (isDarkOliveFamily(safe)) return "Deep Olive";
   if (directionalChromaticIdentity) return directionalChromaticIdentity;
   if (saturation < 0.05 && lightness < 0.1) return "Jet Black";

@@ -22,6 +22,17 @@ test("light neutral pixels stay appearance-based without inventing metallic mate
   assert.doesNotMatch(getColorName("#C2BEC0"), /Chrome|Silver|Metal/i);
 });
 
+test("near-white camera casts do not become pastel hue names", () => {
+  assert.equal(getColorName("#F4F1FB"), "Soft White");
+  assert.equal(getColorName("#F0ECF4"), "Soft White");
+  assert.doesNotMatch(getColorName("#F4F1FB"), /Periwinkle|Purple|Violet|Blue/i);
+});
+
+test("genuinely chromatic pale colors remain chromatic", () => {
+  assert.match(getColorName("#B9CCF4"), /Blue|Periwinkle/i);
+  assert.match(getColorName("#F2B6D2"), /Pink|Rose|Blush/i);
+});
+
 test("saturated pink measurements do not collapse into dusty or muted labels", () => {
   assert.equal(getColorName("#DB5A97"), "Vivid Pink");
   assert.equal(getColorName("#E1609E"), "Vivid Pink");

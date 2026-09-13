@@ -72,6 +72,35 @@ function overlaps(a = {}, b = {}) {
   return intersection / Math.max(Math.min(normalizedArea(a), normalizedArea(b)), 1e-6);
 }
 
+function center(geometry = {}) {
+  const x = Number(geometry?.x || 0);
+  const y = Number(geometry?.y || 0);
+  const right = Number(geometry?.x2 ?? (x + Number(geometry?.width || 0)));
+  const bottom = Number(geometry?.y2 ?? (y + Number(geometry?.height || 0)));
+  return { x: (x + right) / 2, y: (y + bottom) / 2 };
+}
+
+// Spatial detections remain the identity authority, but the detected object
+// must also occupy a physically plausible part of a person. This rejects a
+// shorts logo reused as a necklace or a face crop reused as a watch while
+// remaining independent of color and of any one test image.
+function anatomicallyCompatible(type, geometry = null) {
+  // Older validated ledger rows can omit normalized geometry. Their existing
+  // evidence contract still decides publication; this guard only invalidates
+  // geometry that is present and demonstrably incompatible.
+  if (!geometry) return true;
+  const point = center(geometry);
+  if (type === "necklace" || type === "chain" || type === "pendant") {
+    return point.x >= 0.2 && point.x <= 0.8 && point.y >= 0.08 && point.y <= 0.58;
+  }
+  if (type === "earrings") return point.y >= 0.04 && point.y <= 0.36;
+  if (type === "watch" || type === "bracelet") {
+    return point.y >= 0.2 && point.y <= 0.78 && (point.x <= 0.42 || point.x >= 0.58);
+  }
+  if (type === "ring") return point.y >= 0.25 && point.y <= 0.82;
+  return true;
+}
+
 function publishableColors(entry = {}) {
   const sampleCount = Number(entry?.pixel_evidence?.sample_count || 0);
   const minimumPixels = Math.max(2, Math.ceil(sampleCount * 0.012));
@@ -112,6 +141,7 @@ function evaluateEntry(entry = {}) {
   const pixels = entry?.pixel_evidence || {};
   const validation = entry?.validation || {};
   const directSpatialSource = ["grounding_dino", "dino_detection", "sam_segment"].includes(String(entry?.source || ""));
+  if (directSpatialSource && !anatomicallyCompatible(type, entry?.geometry || null)) return null;
   const measurementAccepted = entry?.accepted === true;
   const targetedIdentity = targetedIdentityEligible(entry);
   const pixelSupported = pixels?.available === true && validation?.supported === true && Number(pixels?.sample_count || 0) >= 6;

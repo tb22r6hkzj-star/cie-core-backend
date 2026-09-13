@@ -93,6 +93,12 @@ test("response debug exposes transform latency budget snapshot", () => {
   assert.match(source, /transform_latency_budget_v1: transformLatencyBudget\.snapshot\("response"\)/);
 });
 
+test("runtime contradiction recovery has a dedicated bounded budget", () => {
+  assert.match(source, /VISIONCORE_SECOND_PASS_BUDGET_MS/);
+  assert.match(source, /const secondPassBudgetMs = RUNTIME_SECOND_PASS_BUDGET_MS/);
+  assert.doesNotMatch(source, /secondPassBudgetMs = Math\.max\(0, Math\.min\(8000, transformLatencyBudget\.remainingMs\(\)\)\)/);
+});
+
 test("primary DINO and split YOLO zero-result fallback lanes share the transform budget", () => {
   assert.match(source, /analyzeGhostColors\(ghostUrl, \{[\s\S]*?latencyBudget: transformLatencyBudget,[\s\S]*?semanticObservationPromise: earlyExternalSemanticPromise/);
   assert.match(source, /requestedMs: 18000, maximumMs: 18000/);
