@@ -73,11 +73,27 @@ function pieceType(piece = {}, fallback = null) {
   ) || "unknown_piece";
 }
 
-function correctionState(analysis = {}) {
+function correctionState(analysis = {}, piece = {}, zoneKey = null) {
   const external = analysis?.external_intelligence || {};
   const pass = external?.runtime_second_pass_v1 || external?.second_pass || {};
-  const requested = pass?.required === true || pass?.requested === true || pass?.enabled === true;
-  const completed = pass?.completed === true || pass?.executed === true || pass?.ok === true;
+  const expected = new Set([
+    token(zoneKey),
+    token(piece?.semantic_instance_key || piece?.instance_key),
+    token(piece?.accessory_type || piece?.garment_type || piece?.object_type || piece?.type),
+  ].filter(Boolean));
+  const matching = (Array.isArray(pass?.results) ? pass.results : []).filter((entry) => {
+    const planPiece = token(entry?.plan?.piece);
+    const planInstance = token(entry?.plan?.instance_key);
+    return expected.has(planPiece) || expected.has(planInstance)
+      || [...expected].some((value) => planPiece.includes(value) || value.includes(planPiece));
+  });
+  const requested = matching.length > 0 || (!Array.isArray(pass?.results)
+    && (pass?.required === true || pass?.requested === true || pass?.enabled === true));
+  const completed = requested && (matching.length
+    ? matching.every((entry) => !entry?.skipped && entry?.ok !== false
+      && (!entry?.plan?.remeasure_visioncore || entry?.visioncore_remeasurement?.ok === true)
+      && (!entry?.plan?.reassess_semantic || entry?.semantic_reassessment?.ok === true))
+    : pass?.completed === true || pass?.executed === true || pass?.ok === true);
   const reason = pass?.reason || pass?.skip_reason || null;
   return {
     requested,
@@ -118,7 +134,9 @@ function canonicalPiece(piece = {}, zoneKey, analysis = {}) {
     piece?.primary_color?.pct,
     piece?.primary_color?.percentage
   );
-  const mode = token(piece?.color_mode || piece?.interpretation || "") || (palette.length > 1 ? "multi_color" : "single_color");
+  const mode = palette.length === 0
+    ? "unknown"
+    : token(piece?.color_mode || piece?.interpretation || "") || (palette.length > 1 ? "multi_color" : "single_color");
   const publication = token(piece?.publication_state || piece?.publication_decision || piece?.color_publication_decision || "") || "unspecified";
   const idStem = token(instanceKey || zoneKey || type) || "piece";
   const pieceId = `piece_${idStem}`;
@@ -146,7 +164,7 @@ function canonicalPiece(piece = {}, zoneKey, analysis = {}) {
         mask_coverage: "Mask coverage",
       },
     },
-    correction_v1: correctionState(analysis),
+    correction_v1: correctionState(analysis, piece, zoneKey),
     provenance_v1: {
       authority_owner: "visioncore",
       evidence_key: evidenceKey(piece, zoneKey),
