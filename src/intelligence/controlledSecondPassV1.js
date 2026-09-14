@@ -4,6 +4,34 @@ function clamp01(value) {
   return Math.max(0, Math.min(1, n > 1 ? n / 100 : n));
 }
 
+function canonicalPiece(value) {
+  const piece = String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  if (/(^|_)(footwear|shoe|shoes|sneaker|sneakers)($|_)/.test(piece)) return "footwear";
+  if (/(^|_)(outerwear|jacket|coat|windbreaker)($|_)/.test(piece)) return "outerwear";
+  if (/(^|_)(lower_garment|shorts|trousers|pants)($|_)/.test(piece)) return "lower_garment";
+  if (/(^|_)(upper_garment|shirt|undershirt)($|_)/.test(piece) || /(^|_)top$/.test(piece)) return "upper_garment";
+  return piece;
+}
+
+function planPriority(plan = {}) {
+  const zonePriority = {
+    outerwear: 80,
+    upper_garment: 75,
+    lower_garment: 70,
+    footwear: 65,
+    headwear: 45,
+    eyewear: 40,
+    watch: 30,
+    necklace: 25,
+    bracelet: 20,
+    ring: 15,
+  }[canonicalPiece(plan.piece)] || 10;
+  return (plan.force_fresh_segmentation ? 400 : 0)
+    + (plan.remeasure_visioncore ? 200 : 0)
+    + (plan.reassess_semantic ? 50 : 0)
+    + zonePriority;
+}
+
 /**
  * Builds a bounded second-pass plan from the higher-reasoning synthesis state.
  * This module plans the retry; it does not mutate color, masks, or publication.
@@ -92,7 +120,15 @@ export function buildControlledSecondPassPlanV1({ synthesis = {}, attempt = 0 } 
 }
 
 export function buildControlledSecondPassPlansV1(syntheses = [], { attempt = 0 } = {}) {
-  return (Array.isArray(syntheses) ? syntheses : [])
+  const plans = (Array.isArray(syntheses) ? syntheses : [])
     .map((synthesis) => buildControlledSecondPassPlanV1({ synthesis, attempt }))
     .filter((plan) => plan.allowed);
+  const unique = new Map();
+  for (const plan of plans) {
+    const key = `${canonicalPiece(plan.piece)}:${String(plan.instance_key || "").trim().toLowerCase()}`;
+    const prioritized = { ...plan, scheduling_priority: planPriority(plan) };
+    const existing = unique.get(key);
+    if (!existing || prioritized.scheduling_priority > existing.scheduling_priority) unique.set(key, prioritized);
+  }
+  return [...unique.values()].sort((left, right) => right.scheduling_priority - left.scheduling_priority);
 }

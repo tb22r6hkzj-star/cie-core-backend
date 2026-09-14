@@ -71,7 +71,11 @@ export function buildLocalMeasurementIntegritySynthesesV1(outfitAnalysis = {}) {
   const zones = outfitAnalysis?.garment_zones?.zones || {};
   return Object.entries(zones).flatMap(([zoneKey, zone]) => {
     const { reasons, measurementConfidence } = integrityReasons(zone);
-    if (!reasons.length) return [];
+    // Near-duplicate swatches are repaired deterministically by final palette
+    // consolidation. They do not need another provider mask and must not spend
+    // the correction reserve needed for genuinely weak object-local evidence.
+    const remeasurementReasons = reasons.filter((reason) => reason !== "perceptually_duplicate_palette_clusters");
+    if (!remeasurementReasons.length) return [];
     return [{
       version: "appearance_measurement_synthesis_v1",
       piece: zoneKey,
@@ -83,7 +87,7 @@ export function buildLocalMeasurementIntegritySynthesesV1(outfitAnalysis = {}) {
       relationship: { targeted_remeasurement_requested: true },
       integrity_v1: {
         required: true,
-        reasons,
+        reasons: remeasurementReasons,
         force_fresh_segmentation: true,
       },
     }];

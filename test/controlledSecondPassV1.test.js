@@ -76,3 +76,13 @@ test("batch planner returns only actionable plans", () => {
   assert.equal(plans.length, 1);
   assert.equal(plans[0].action, "targeted_visioncore_remeasurement");
 });
+
+test("planner deduplicates piece aliases and prioritizes garment remeasurement", () => {
+  const plans = buildControlledSecondPassPlansV1([
+    { ...synthesis("appearance_alert", 0.5, 0.95), piece: "shoe" },
+    { ...synthesis("appearance_alert", 0.5, 0.95), piece: "footwear" },
+    { ...synthesis("appearance_alert", 0.5, 0.95), piece: "outerwear", integrity_v1: { force_fresh_segmentation: true } },
+  ]);
+  assert.equal(plans.length, 2);
+  assert.equal(plans[0].piece, "outerwear");
+});

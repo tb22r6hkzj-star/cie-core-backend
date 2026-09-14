@@ -8132,6 +8132,7 @@ async function analyzeGhostColors(ghostUrl, {
   latencyBudget = null,
   semanticObservationPromise = null,
   targetSegmentationPromise = null,
+  targetSegmentationImageUrl = ghostUrl,
 } = {}) {
   const res = await cloudinary.uploader.upload(ghostUrl, {
     folder: "cie/ghost",
@@ -8250,12 +8251,38 @@ async function analyzeGhostColors(ghostUrl, {
     detectionCount: dinoDetections.length,
   });
 
+  // Detector-localized masks do not depend on the semantic observer. Start
+  // them immediately so model reasoning and mask generation overlap instead
+  // of serially consuming the correction reserve.
+  const detectorSegmentationPlan = buildTargetConditionedSegmentationPlanV1({
+    dinoRegions: dinoGarmentRegions,
+    semanticHandoff: {},
+  });
+  const detectorTargetTimeoutMs = latencyBudget?.providerTimeoutMs
+    ? latencyBudget.providerTimeoutMs({
+      requestedMs: Math.min(EARLY_TARGET_SEGMENTATION_BUDGET_MS, 20000),
+      maximumMs: 20000,
+      minimumMs: 2500,
+    })
+    : 16000;
+  const parallelTargetSegmentationPromise = targetSegmentationPromise || (
+    detectorSegmentationPlan.targets.length && (!latencyBudget || latencyBudget.canRun(2500))
+      ? runTargetConditionedSegmentation(targetSegmentationImageUrl, detectorSegmentationPlan, { timeoutMs: detectorTargetTimeoutMs })
+      : Promise.resolve({
+        enabled: true,
+        ok: false,
+        reason: "transform_latency_budget_exhausted_before_parallel_target_segmentation",
+        regions: [],
+        results: [],
+        plan: detectorSegmentationPlan,
+      })
+  );
   const externalSemantic = semanticObservationPromise ? await semanticObservationPromise : null;
   const segmentationPlan = buildTargetConditionedSegmentationPlanV1({
     dinoRegions: dinoGarmentRegions,
     semanticHandoff: externalSemantic?.handoff || {},
   });
-  const earlyTargetSegmentation = targetSegmentationPromise ? await targetSegmentationPromise : null;
+  const earlyTargetSegmentation = await parallelTargetSegmentationPromise;
   const targetSamTimeoutMs = latencyBudget?.providerTimeoutMs
     ? latencyBudget.providerTimeoutMs({ requestedMs: 16000, maximumMs: 16000 })
     : 16000;
@@ -8342,11 +8369,6 @@ async function analyzeGhostColors(ghostUrl, {
    ROUTES
 ========================= */
 app.post("/api/images/transform", upload.any(), async (req, res) => {
-  const transformLatencyBudget = createTransformLatencyBudgetV1({
-    totalMs: Number(process.env.VISIONCORE_TRANSFORM_BUDGET_MS) || 50000,
-    reserveMs: Number(process.env.VISIONCORE_TRANSFORM_RESPONSE_RESERVE_MS) || 5000,
-    correctionReserveMs: Number(process.env.VISIONCORE_CORRECTION_RESERVE_MS) || 12000,
-  });
   try {
     const files = Array.isArray(req.files) ? req.files : [];
     const file = files[0];
@@ -8366,6 +8388,14 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       return sendStepError(res, 500, "upload_cloudinary", error);
     }
 
+    // The inference budget begins after durable upload. Network time spent
+    // receiving/storing the user's file must not consume the correction lane.
+    const transformLatencyBudget = createTransformLatencyBudgetV1({
+      totalMs: Number(process.env.VISIONCORE_TRANSFORM_BUDGET_MS) || 50000,
+      reserveMs: Number(process.env.VISIONCORE_TRANSFORM_RESPONSE_RESERVE_MS) || 5000,
+      correctionReserveMs: Number(process.env.VISIONCORE_CORRECTION_RESERVE_MS) || 12000,
+    });
+
     // Semantic understanding starts before background removal and detector work.
     // It may name unfamiliar pieces, layers, and tiny details, but remains unable
     // to provide numeric color or publication authority.
@@ -8379,7 +8409,10 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       visionCoreDecision: {},
       model: OPENAI_SEMANTIC_MODEL,
       profile: "segmentation_scene",
-      timeoutMs: EARLY_SEMANTIC_OBSERVER_BUDGET_MS,
+      timeoutMs: transformLatencyBudget.providerTimeoutMs({
+        requestedMs: EARLY_SEMANTIC_OBSERVER_BUDGET_MS,
+        maximumMs: EARLY_SEMANTIC_OBSERVER_BUDGET_MS,
+      }),
       cache: externalSemanticCache,
       cacheKey: `${publicUrl}:visioncore_semantic_mask_orchestration_v2:${OPENAI_SEMANTIC_MODEL}`,
     });
@@ -8393,29 +8426,13 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       visionCoreDecision: {},
       model: OPENAI_SEMANTIC_MODEL,
       profile: "color_lighting",
-      timeoutMs: EARLY_SEMANTIC_OBSERVER_BUDGET_MS,
+      timeoutMs: transformLatencyBudget.providerTimeoutMs({
+        requestedMs: EARLY_SEMANTIC_OBSERVER_BUDGET_MS,
+        maximumMs: EARLY_SEMANTIC_OBSERVER_BUDGET_MS,
+      }),
       cache: externalSemanticCache,
       cacheKey: `${publicUrl}:visioncore_color_lighting_observer_v1:${OPENAI_SEMANTIC_MODEL}`,
     });
-    const earlyTargetSegmentationPromise = earlyExternalSemanticPromise.then(async (externalSemantic) => {
-      if (!externalSemantic?.ok || externalSemantic?.skipped) {
-        return { enabled: true, ok: false, reason: externalSemantic?.reason || "semantic_observation_unavailable", regions: [], results: [] };
-      }
-      const earlyPlan = buildTargetConditionedSegmentationPlanV1({
-        dinoRegions: [],
-        semanticHandoff: externalSemantic.handoff || {},
-      });
-      return runTargetConditionedSegmentation(publicUrl, earlyPlan, {
-        timeoutMs: EARLY_TARGET_SEGMENTATION_BUDGET_MS,
-      });
-    }).catch((error) => ({
-      enabled: true,
-      ok: false,
-      reason: error?.message || "early_target_segmentation_failed",
-      regions: [],
-      results: [],
-    }));
-
     let ghostUrl;
     try {
       ghostUrl = await callPixelcutRemoveBg(
@@ -8431,7 +8448,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       analysis = await analyzeGhostColors(ghostUrl, {
         latencyBudget: transformLatencyBudget,
         semanticObservationPromise: earlyExternalSemanticPromise,
-        targetSegmentationPromise: earlyTargetSegmentationPromise,
+        targetSegmentationImageUrl: publicUrl,
       });
     } catch (error) {
       return sendStepError(res, 500, "analyze_cloudinary_colors", error);
