@@ -8591,6 +8591,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         // the first pass. Re-coloring only surviving regions cannot correct a
         // missing jacket, shirt, or small accessory.
         if (!candidates.length || forceFreshSegmentation) {
+          if (forceFreshSegmentation) candidates = [];
           const originalTargets = analysis?.target_conditioned_segmentation_plan_v1?.targets || [];
           const recoveryZoneSet = primaryCorrectionZones.size ? primaryCorrectionZones : correctionZones;
           const seenRecoveryTargets = new Set();
