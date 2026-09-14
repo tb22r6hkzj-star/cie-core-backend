@@ -109,14 +109,40 @@ export function inspectPieceMeasurementIntegrityV1(zone = {}) {
  * bounded fresh-mask pass still leaves a published piece below the numeric
  * confidence floor, remove color authority while preserving piece identity.
  */
-export function applyUnresolvedMeasurementIntegrityGateV1(outfitAnalysis = {}) {
+function unresolvedRemeasurementReasons(zoneKey, runtimeSecondPass = {}) {
+  const zone = token(zoneKey).replace(/^accessory_/, "");
+  const aliases = new Set([zone]);
+  if (zone === "upper_garment") aliases.add("shirt");
+  if (zone === "lower_garment") aliases.add("shorts");
+  if (zone === "outerwear") aliases.add("jacket");
+  if (zone === "footwear") aliases.add("shoe");
+  const unresolved = (Array.isArray(runtimeSecondPass?.results) ? runtimeSecondPass.results : []).some((entry) => {
+    const piece = token(entry?.plan?.piece);
+    const matches = aliases.has(piece) || [...aliases].some((alias) => piece.includes(alias) || alias.includes(piece));
+    return matches && entry?.plan?.remeasure_visioncore === true
+      && entry?.visioncore_remeasurement?.ok !== true;
+  });
+  return unresolved ? ["required_remeasurement_not_completed"] : [];
+}
+
+export function applyUnresolvedMeasurementIntegrityGateV1(outfitAnalysis = {}, { runtimeSecondPass = null } = {}) {
   const zones = outfitAnalysis?.garment_zones?.zones;
   if (!zones || typeof zones !== "object") return outfitAnalysis;
-  const withheld = [];
+  const previous = Array.isArray(outfitAnalysis?.measurement_integrity_v1?.withheld)
+    ? outfitAnalysis.measurement_integrity_v1.withheld
+    : [];
+  const withheld = [...previous];
   const nextZones = Object.fromEntries(Object.entries(zones).map(([zoneKey, zone]) => {
-    const { reasons } = integrityReasons(zone);
-    if (!reasons.includes("published_measurement_below_confidence_floor")) return [zoneKey, zone];
-    withheld.push({ zone: zoneKey, reasons });
+    const local = integrityReasons(zone).reasons;
+    const retry = unresolvedRemeasurementReasons(zoneKey, runtimeSecondPass || outfitAnalysis?.external_intelligence?.runtime_second_pass_v1);
+    const reasons = [...new Set([...local, ...retry])];
+    const hasPublishedColor = palette(zone).length > 0;
+    const mustWithhold = hasPublishedColor && (
+      reasons.includes("published_measurement_below_confidence_floor")
+      || reasons.includes("required_remeasurement_not_completed")
+    );
+    if (!mustWithhold) return [zoneKey, zone];
+    if (!withheld.some((row) => row.zone === zoneKey)) withheld.push({ zone: zoneKey, reasons });
     return [zoneKey, {
       ...zone,
       interpretation: "unknown",

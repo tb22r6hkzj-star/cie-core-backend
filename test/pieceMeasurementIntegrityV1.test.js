@@ -63,3 +63,24 @@ test("unresolved low-confidence color is withheld while piece identity remains",
   assert.equal(jacket.publication_decision, "withhold_unresolved_measurement_integrity");
   assert.equal(result.measurement_integrity_v1.passed, false);
 });
+
+test("an unfinished required remeasurement withholds the matching piece color", () => {
+  const result = applyUnresolvedMeasurementIntegrityGateV1({
+    garment_zones: { zones: {
+      upper_garment: {
+        garment_type: "undershirt", interpretation: "single_color", confidence: .55,
+        primary_color: { hex: "#4F3130", pct: .43 },
+      },
+      eyewear: {
+        garment_type: "sunglasses", interpretation: "single_color", confidence: .64,
+        primary_color: { hex: "#1E0D11", pct: .82 },
+      },
+    } },
+  }, { runtimeSecondPass: { results: [{
+    plan: { piece: "upper_garment", remeasure_visioncore: true },
+    skipped: true,
+    reason: "latency_budget_exhausted",
+  }] } });
+  assert.equal(result.garment_zones.zones.upper_garment.validation_decision, "identity_only");
+  assert.equal(result.garment_zones.zones.eyewear.validation_decision, undefined);
+});

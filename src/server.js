@@ -9066,11 +9066,16 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       summary: semanticIntrinsicRemeasurement.summary,
       semanticHandoff: externalSemantic?.handoff,
     });
-    outfitAnalysis = applyUnresolvedMeasurementIntegrityGateV1(outfitAnalysis);
+    outfitAnalysis = applyUnresolvedMeasurementIntegrityGateV1(outfitAnalysis, { runtimeSecondPass });
     outfitAnalysis = {
       ...outfitAnalysis,
       semantic_scene_graph_v1: analysis.semantic_scene_graph_v1,
     };
+    outfitAnalysis = sanitizeCustomerFacingZonesV1(outfitAnalysis);
+    // Semantic layer reassignment occurs during sanitization. Re-evaluate the
+    // final zone ownership and unresolved per-piece retry state, then scrub any
+    // newly withheld color aliases through the same canonical sanitizer.
+    outfitAnalysis = applyUnresolvedMeasurementIntegrityGateV1(outfitAnalysis, { runtimeSecondPass });
     outfitAnalysis = sanitizeCustomerFacingZonesV1(outfitAnalysis);
     outfitAnalysis = {
       ...outfitAnalysis,
