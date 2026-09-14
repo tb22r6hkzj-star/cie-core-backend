@@ -183,7 +183,7 @@ const ACCESSORY_REANALYSIS_BUDGET_MS = 10000;
 // pass cannot silently disable contradiction recovery.
 const RUNTIME_SECOND_PASS_BUDGET_MS = Math.max(
   1000,
-  Math.min(12000, Number(process.env.VISIONCORE_SECOND_PASS_BUDGET_MS) || 8000)
+  Math.min(15000, Number(process.env.VISIONCORE_SECOND_PASS_BUDGET_MS) || 15000)
 );
 const ACCESSORY_MICRO_CROP_SAM_TIMEOUT_MS = 15000;
 const externalSemanticCache = new Map();
@@ -8391,9 +8391,9 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
     // The inference budget begins after durable upload. Network time spent
     // receiving/storing the user's file must not consume the correction lane.
     const transformLatencyBudget = createTransformLatencyBudgetV1({
-      totalMs: Number(process.env.VISIONCORE_TRANSFORM_BUDGET_MS) || 50000,
+      totalMs: Number(process.env.VISIONCORE_TRANSFORM_BUDGET_MS) || 58000,
       reserveMs: Number(process.env.VISIONCORE_TRANSFORM_RESPONSE_RESERVE_MS) || 5000,
-      correctionReserveMs: Number(process.env.VISIONCORE_CORRECTION_RESERVE_MS) || 12000,
+      correctionReserveMs: Number(process.env.VISIONCORE_CORRECTION_RESERVE_MS) || 18000,
     });
 
     // Semantic understanding starts before background removal and detector work.
@@ -8601,8 +8601,8 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
             };
             const recovered = await runTargetConditionedSegmentation(publicUrl, recoveryPlan, {
               timeoutMs: transformLatencyBudget.correctionProviderTimeoutMs({
-                requestedMs: Math.max(1000, Math.min(7000, secondPassBudgetMs)),
-                maximumMs: 7000,
+                requestedMs: Math.max(1000, Math.min(14500, secondPassBudgetMs)),
+                maximumMs: 14500,
                 minimumMs: 1000,
               }),
             });

@@ -87,3 +87,13 @@ test("independent high-priority corrections run concurrently inside the reserve"
   assert.equal(result.max_concurrency, 4);
   assert.equal(peak, 4);
 });
+
+test("a completed call without new measurement evidence remains unresolved", async () => {
+  const result = await executeRuntimeSecondPassV1({
+    syntheses,
+    remeasureVisionCore: async () => ({ available: false, regions: [] }),
+  });
+  assert.equal(result.completed, false);
+  assert.equal(result.results[0].visioncore_remeasurement.ok, false);
+  assert.equal(result.results[0].visioncore_remeasurement.reason, "measurement_unavailable");
+});

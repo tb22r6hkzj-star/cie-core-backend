@@ -41,6 +41,7 @@ test("appearance alert can remeasure weak VisionCore evidence", () => {
   const plan = buildControlledSecondPassPlanV1({ synthesis: synthesis("appearance_alert", 0.58, 0.96) });
   assert.equal(plan.action, "targeted_visioncore_remeasurement");
   assert.equal(plan.remeasure_visioncore, true);
+  assert.equal(plan.force_fresh_segmentation, true);
   assert.equal(plan.preserve_current_measurement, false);
   assert.equal(plan.publication_changed, false);
 });

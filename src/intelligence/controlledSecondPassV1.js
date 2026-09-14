@@ -100,6 +100,7 @@ export function buildControlledSecondPassPlanV1({ synthesis = {}, attempt = 0 } 
       remeasure_visioncore: weakMeasurement,
       reassess_semantic: !weakMeasurement,
       preserve_current_measurement: !weakMeasurement,
+      force_fresh_segmentation: weakMeasurement || base.force_fresh_segmentation,
     };
   }
 
@@ -113,6 +114,7 @@ export function buildControlledSecondPassPlanV1({ synthesis = {}, attempt = 0 } 
       remeasure_visioncore: weakMeasurement,
       reassess_semantic: true,
       preserve_current_measurement: !weakMeasurement,
+      force_fresh_segmentation: weakMeasurement || base.force_fresh_segmentation,
     };
   }
 
