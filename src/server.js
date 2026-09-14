@@ -8572,6 +8572,8 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
     const correctionZones = new Set(secondPassSyntheses
       .map((synthesis) => segmentationZoneForPieceV1(synthesis?.piece, synthesis?.piece))
       .filter(Boolean));
+    const primaryCorrectionZones = new Set(["outerwear", "upper_garment", "lower_garment", "footwear"]
+      .filter((zone) => correctionZones.has(zone)));
     const runtimeSecondPass = await executeRuntimeSecondPassV1({
       syntheses: secondPassSyntheses,
       imageUrl: publicUrl,
@@ -8590,7 +8592,15 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         // missing jacket, shirt, or small accessory.
         if (!candidates.length || forceFreshSegmentation) {
           const originalTargets = analysis?.target_conditioned_segmentation_plan_v1?.targets || [];
-          const recoveryTargets = originalTargets.filter((target) => correctionZones.has(target?.zone));
+          const recoveryZoneSet = primaryCorrectionZones.size ? primaryCorrectionZones : correctionZones;
+          const seenRecoveryTargets = new Set();
+          const recoveryTargets = originalTargets.filter((target) => {
+            if (!recoveryZoneSet.has(target?.zone)) return false;
+            const key = `${target?.zone || "unknown"}:${target?.semantic_instance_key || target?.id || target?.label || "default"}`;
+            if (seenRecoveryTargets.has(key)) return false;
+            seenRecoveryTargets.add(key);
+            return true;
+          }).slice(0, 6);
           if (recoveryTargets.length) {
             const recoveryPlan = {
               ...(analysis?.target_conditioned_segmentation_plan_v1 || {}),
@@ -8603,8 +8613,8 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
             secondPassFreshSegmentationPromise ||= (async () => {
               const recovered = await runTargetConditionedSegmentation(publicUrl, recoveryPlan, {
                 timeoutMs: transformLatencyBudget.correctionProviderTimeoutMs({
-                  requestedMs: Math.max(1000, Math.min(24500, secondPassBudgetMs)),
-                  maximumMs: 24500,
+                  requestedMs: Math.max(1000, Math.min(20000, secondPassBudgetMs)),
+                  maximumMs: 20000,
                   minimumMs: 1000,
                 }),
               });
