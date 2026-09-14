@@ -122,4 +122,5 @@ test("withheld color truth publishes unknown mode and piece-specific correction 
   assert.equal(shirt.color_mode, "unknown");
   assert.equal(shirt.correction_v1.state, "required_unresolved");
   assert.equal(glasses.correction_v1.state, "not_required");
+  assert.equal(glasses.correction_v1.reason, null);
 });

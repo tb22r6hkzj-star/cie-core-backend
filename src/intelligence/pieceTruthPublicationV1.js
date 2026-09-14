@@ -94,7 +94,7 @@ function correctionState(analysis = {}, piece = {}, zoneKey = null) {
       && (!entry?.plan?.remeasure_visioncore || entry?.visioncore_remeasurement?.ok === true)
       && (!entry?.plan?.reassess_semantic || entry?.semantic_reassessment?.ok === true))
     : pass?.completed === true || pass?.executed === true || pass?.ok === true);
-  const reason = pass?.reason || pass?.skip_reason || null;
+  const reason = requested ? (pass?.reason || pass?.skip_reason || null) : null;
   return {
     requested,
     completed,
