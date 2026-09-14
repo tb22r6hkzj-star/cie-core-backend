@@ -183,7 +183,7 @@ const ACCESSORY_REANALYSIS_BUDGET_MS = 10000;
 // pass cannot silently disable contradiction recovery.
 const RUNTIME_SECOND_PASS_BUDGET_MS = Math.max(
   1000,
-  Math.min(15000, Number(process.env.VISIONCORE_SECOND_PASS_BUDGET_MS) || 15000)
+  Math.min(25000, Number(process.env.VISIONCORE_SECOND_PASS_BUDGET_MS) || 25000)
 );
 const ACCESSORY_MICRO_CROP_SAM_TIMEOUT_MS = 15000;
 const externalSemanticCache = new Map();
@@ -8391,9 +8391,9 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
     // The inference budget begins after durable upload. Network time spent
     // receiving/storing the user's file must not consume the correction lane.
     const transformLatencyBudget = createTransformLatencyBudgetV1({
-      totalMs: Number(process.env.VISIONCORE_TRANSFORM_BUDGET_MS) || 58000,
+      totalMs: Number(process.env.VISIONCORE_TRANSFORM_BUDGET_MS) || 70000,
       reserveMs: Number(process.env.VISIONCORE_TRANSFORM_RESPONSE_RESERVE_MS) || 5000,
-      correctionReserveMs: Number(process.env.VISIONCORE_CORRECTION_RESERVE_MS) || 18000,
+      correctionReserveMs: Number(process.env.VISIONCORE_CORRECTION_RESERVE_MS) || 30000,
     });
 
     // Semantic understanding starts before background removal and detector work.
@@ -8568,6 +8568,10 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       transformLatencyBudget.correctionRemainingMs()
     );
     let secondPassRemeasurementPromise = null;
+    let secondPassFreshSegmentationPromise = null;
+    const correctionZones = new Set(secondPassSyntheses
+      .map((synthesis) => segmentationZoneForPieceV1(synthesis?.piece, synthesis?.piece))
+      .filter(Boolean));
     const runtimeSecondPass = await executeRuntimeSecondPassV1({
       syntheses: secondPassSyntheses,
       imageUrl: publicUrl,
@@ -8586,10 +8590,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         // missing jacket, shirt, or small accessory.
         if (!candidates.length || forceFreshSegmentation) {
           const originalTargets = analysis?.target_conditioned_segmentation_plan_v1?.targets || [];
-          const recoveryTargets = originalTargets.filter((target) => {
-            if (target?.zone !== zone) return false;
-            return !instanceKey || !target?.semantic_instance_key || target.semantic_instance_key === instanceKey;
-          });
+          const recoveryTargets = originalTargets.filter((target) => correctionZones.has(target?.zone));
           if (recoveryTargets.length) {
             const recoveryPlan = {
               ...(analysis?.target_conditioned_segmentation_plan_v1 || {}),
@@ -8599,14 +8600,15 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
               omitted_target_count: 0,
               recovery_pass: true,
             };
-            const recovered = await runTargetConditionedSegmentation(publicUrl, recoveryPlan, {
-              timeoutMs: transformLatencyBudget.correctionProviderTimeoutMs({
-                requestedMs: Math.max(1000, Math.min(14500, secondPassBudgetMs)),
-                maximumMs: 14500,
-                minimumMs: 1000,
-              }),
-            });
-            if (recovered?.results) {
+            secondPassFreshSegmentationPromise ||= (async () => {
+              const recovered = await runTargetConditionedSegmentation(publicUrl, recoveryPlan, {
+                timeoutMs: transformLatencyBudget.correctionProviderTimeoutMs({
+                  requestedMs: Math.max(1000, Math.min(24500, secondPassBudgetMs)),
+                  maximumMs: 24500,
+                  minimumMs: 1000,
+                }),
+              });
+              if (!recovered?.results) return [];
               const spatial = validateTargetConditionedMaskRegionsV1({
                 regions: recovered?.regions || [],
                 plan: recoveryPlan,
@@ -8615,12 +8617,17 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
                 validation: spatial,
                 regions: spatial.regions,
               });
-              const freshCandidates = measured.regions.map((region) => ({
+              return measured.regions.map((region) => ({
                 ...region,
                 semantic_recovery_pass_v1: true,
               }));
-              if (freshCandidates.length) candidates = freshCandidates;
-            }
+            })();
+            const freshCandidates = (await secondPassFreshSegmentationPromise).filter((region) => {
+              if (region?.zone !== zone) return false;
+              const regionInstanceKey = region?.target_conditioned_mask_v1?.semantic_instance_key || null;
+              return !instanceKey || !regionInstanceKey || regionInstanceKey === instanceKey;
+            });
+            if (freshCandidates.length) candidates = freshCandidates;
           }
         }
         if (!candidates.length) return { available: false, piece, instance_key: instanceKey, regions: [] };

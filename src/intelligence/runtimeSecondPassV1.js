@@ -70,7 +70,7 @@ export async function executeRuntimeSecondPassV1({
         imageUrl,
         attempt: attempt + 1,
         preserve_original: true,
-      }, Math.min(remaining, 14_500));
+      }, Math.min(remaining, 24_500));
       if (call.ok && call.result?.available === false) {
         call.ok = false;
         call.reason = "measurement_unavailable";
