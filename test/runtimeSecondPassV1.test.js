@@ -61,3 +61,29 @@ test("latency budget can skip extra work instead of blocking indefinitely", asyn
   assert.equal(result.results[0].reason, "latency_budget_exhausted");
   assert.equal(result.completed, false);
 });
+
+test("independent high-priority corrections run concurrently inside the reserve", async () => {
+  let active = 0;
+  let peak = 0;
+  const rows = ["outerwear", "upper_garment", "lower_garment", "footwear"].map((piece) => ({
+    piece,
+    reasoning_state: "appearance_alert",
+    measurement_truth: { confidence: 0.55 },
+    appearance_truth: { confidence: 0.95 },
+    integrity_v1: { required: true, force_fresh_segmentation: true, reasons: ["published_measurement_below_confidence_floor"] },
+  }));
+  const result = await executeRuntimeSecondPassV1({
+    syntheses: rows,
+    totalBudgetMs: 2000,
+    remeasureVisionCore: async ({ piece }) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      active -= 1;
+      return { piece, available: true, regions: [] };
+    },
+  });
+  assert.equal(result.completed, true);
+  assert.equal(result.max_concurrency, 4);
+  assert.equal(peak, 4);
+});

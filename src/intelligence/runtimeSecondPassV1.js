@@ -37,17 +37,19 @@ export async function executeRuntimeSecondPassV1({
   remeasureVisionCore,
   reassessSemantic,
   totalBudgetMs = 12_000,
+  maxConcurrency = 4,
 } = {}) {
   const plans = buildControlledSecondPassPlansV1(syntheses, { attempt });
   const startedAt = Date.now();
-  const results = [];
+  const results = new Array(plans.length);
+  const concurrency = Math.max(1, Math.min(4, Number(maxConcurrency) || 1, plans.length || 1));
+  let nextPlanIndex = 0;
 
-  for (const plan of plans) {
+  const executePlan = async (plan) => {
     const elapsed = Date.now() - startedAt;
     const remaining = Math.max(0, totalBudgetMs - elapsed);
     if (remaining < 500) {
-      results.push({ plan, ok: false, skipped: true, reason: "latency_budget_exhausted" });
-      continue;
+      return { plan, ok: false, skipped: true, reason: "latency_budget_exhausted" };
     }
 
     const entry = {
@@ -94,8 +96,17 @@ export async function executeRuntimeSecondPassV1({
     entry.ok = [entry.visioncore_remeasurement, entry.semantic_reassessment]
       .filter(Boolean)
       .every((value) => value.ok || value.skipped);
-    results.push(entry);
-  }
+    return entry;
+  };
+
+  const worker = async () => {
+    while (nextPlanIndex < plans.length) {
+      const index = nextPlanIndex;
+      nextPlanIndex += 1;
+      results[index] = await executePlan(plans[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
   const required = plans.length > 0;
   const completed = required && results.length === plans.length && results.every((entry) => {
@@ -112,6 +123,7 @@ export async function executeRuntimeSecondPassV1({
     executed_count: results.filter((value) => !value.skipped).length,
     latency_ms: Date.now() - startedAt,
     latency_budget_ms: totalBudgetMs,
+    max_concurrency: concurrency,
     results,
     publication_changed: false,
     authority_owner: "visioncore",

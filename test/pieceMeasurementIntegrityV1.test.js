@@ -26,8 +26,8 @@ test("local contradictions request correction without semantic disagreement", ()
   assert.ok(syntheses.every((row) => row.integrity_v1.force_fresh_segmentation));
 });
 
-test("near-duplicate palette clusters request fresh segmentation", () => {
-  const [synthesis] = buildLocalMeasurementIntegritySynthesesV1({
+test("near-duplicate palette clusters are left to deterministic consolidation", () => {
+  const syntheses = buildLocalMeasurementIntegritySynthesesV1({
     garment_zones: { zones: { footwear: {
       color_mode: "multi_color", confidence: .7,
       primary_color: { hex: "#DEB3CB", pct: .54 },
@@ -38,7 +38,7 @@ test("near-duplicate palette clusters request fresh segmentation", () => {
       ],
     } } },
   });
-  assert.ok(synthesis.integrity_v1.reasons.includes("perceptually_duplicate_palette_clusters"));
+  assert.deepEqual(syntheses, []);
 });
 
 test("local integrity synthesis overrides a semantic-only plan for the same piece", () => {
