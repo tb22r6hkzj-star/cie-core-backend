@@ -40,13 +40,14 @@ export function canonicalizeColorObjectV1(color) {
   if (!color?.hex) return color;
   const canonical = buildCanonicalColorIdentityV1(color.hex);
   if (!canonical.valid) return { ...color, color_identity_contract_v1: canonical };
+  const { translation: _staleTranslation, ...existingIdentity } = color?.color_identity || {};
   return {
     ...color,
     hex: canonical.hex,
     name: canonical.name,
     family: canonical.family,
     color_identity: {
-      ...(color?.color_identity || {}),
+      ...existingIdentity,
       name: canonical.name,
       family: canonical.family,
       hex: canonical.hex,
@@ -55,4 +56,3 @@ export function canonicalizeColorObjectV1(color) {
     color_identity_contract_v1: canonical,
   };
 }
-

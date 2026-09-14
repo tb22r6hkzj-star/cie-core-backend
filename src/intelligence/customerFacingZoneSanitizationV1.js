@@ -153,16 +153,37 @@ function canonicalPublishedPalette(zone = {}) {
   const unique = values.filter((color, index) =>
     values.findIndex((other) => String(other.hex).toUpperCase() === String(color.hex).toUpperCase()) === index
   );
-  const primary = unique.find((color) => String(color.hex).toUpperCase() === String(primaryHex).toUpperCase())
+  const rawPrimary = unique.find((color) => String(color.hex).toUpperCase() === String(primaryHex).toUpperCase())
     || (primaryHex ? { hex: primaryHex, pct: 1 } : unique[0]);
-  if (!primary?.hex) return [];
-  const supporting = unique
-    .filter((color) => String(color.hex).toUpperCase() !== String(primary.hex).toUpperCase())
+  if (!rawPrimary?.hex) return [];
+  const candidates = [rawPrimary, ...unique
+    .filter((color) => String(color.hex).toUpperCase() !== String(rawPrimary.hex).toUpperCase())
     .filter((color) => normalizedPct(color) >= 0.03 || color?.ownership_validated === true)
+    .sort((a, b) => normalizedPct(b) - normalizedPct(a))];
+
+  // Cluster by perceptual identity, not exact hex. Multiple near-white or
+  // near-black samples are one material color under lighting variation.
+  const merged = [];
+  for (const candidate of candidates) {
+    const existing = merged.find((row) => colorDistance(row.hex, candidate.hex) < 8);
+    if (!existing) {
+      merged.push({ ...candidate });
+      continue;
+    }
+    const combined = normalizedPct(existing) + normalizedPct(candidate);
+    existing.pct = Number(Math.min(1, combined).toFixed(4));
+    existing.perceptual_cluster_merged_v1 = true;
+  }
+  const primary = merged[0];
+  const supporting = merged
+    .slice(1)
     .filter((color) => colorDistance(primary.hex, color.hex) >= 10)
-    .sort((a, b) => normalizedPct(b) - normalizedPct(a))
     .slice(0, 4);
-  return [primary, ...supporting].map(synchronizeColorObject);
+  const palette = [primary, ...supporting].map(synchronizeColorObject);
+  if (palette.length === 1) {
+    palette[0] = { ...palette[0], pct: 1, percentage: 1, share_basis: "owned_piece_palette" };
+  }
+  return palette;
 }
 
 function synchronizeZonePublicationContract(zoneKey, zone = {}) {
@@ -188,15 +209,10 @@ function synchronizeZonePublicationContract(zoneKey, zone = {}) {
   const primary = palette[0];
   const supporting = palette.slice(1);
   const multicolor = supporting.length > 0;
-  const mergeAlias = (existing, fallback) => {
-    const permitted = new Set(palette.map((color) => String(color.hex).toUpperCase()));
-    const current = Array.isArray(existing) ? existing.map(synchronizeColorObject).filter((color) =>
-      color?.hex && (zoneKey !== "eyewear" || permitted.has(String(color.hex).toUpperCase()))
-    ) : [];
-    return [...current, ...fallback.filter((color) =>
-      !current.some((present) => String(present.hex).toUpperCase() === String(color.hex).toUpperCase())
-    )];
-  };
+  const permitted = new Set(palette.map((color) => String(color.hex).toUpperCase()));
+  // Every public alias is a projection of the canonical palette. Retaining a
+  // legacy array here can resurrect pre-merge shares and stale color names.
+  const mergeAlias = (_existing, fallback) => fallback.map((color) => ({ ...color }));
   const detected = mergeAlias(zone?.detected_colors, palette);
   const regions = mergeAlias(zone?.region_colors, palette);
   const objectLocal = mergeAlias(zone?.object_local_colors, palette);
@@ -209,7 +225,9 @@ function synchronizeZonePublicationContract(zoneKey, zone = {}) {
     dominant_hex: primary.hex,
     dominant_color: primary,
     primary_color: primary,
-    signature_color: synchronizeColorObject(zone?.signature_color) || supporting[0] || null,
+    signature_color: multicolor && permitted.has(String(zone?.signature_color?.hex || "").toUpperCase())
+      ? synchronizeColorObject(zone.signature_color)
+      : multicolor ? supporting[0] : null,
     support_colors: support,
     secondary_colors: secondary,
     accent_colors: accents,
@@ -514,7 +532,7 @@ function synchronizeDerivedItemWithPublishedZone(item = {}, zones = {}) {
     read_mode: zone?.read_mode || item?.read_mode,
     dominant_color: sourceDominant,
     primary_color: sourcePrimary,
-    signature_color: zone?.signature_color
+    signature_color: Object.prototype.hasOwnProperty.call(zone, "signature_color")
       ? synchronizeColorObject(zone.signature_color)
       : synchronizeColorObject(item?.signature_color),
     support_colors: sourceList("support_colors"),

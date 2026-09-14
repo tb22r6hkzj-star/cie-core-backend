@@ -76,7 +76,7 @@ test("synchronizes head-to-toe color aliases with the authoritative primary hex"
   assert.equal(lower.name, "Muted Forest Green");
   assert.equal(lower.display_label, "Muted Forest Green");
   assert.equal(lower.color_identity.name, "Muted Forest Green");
-  assert.equal(lower.color_identity.translation, "Soft Gray");
+  assert.equal(lower.color_identity.translation, undefined);
   assert.equal(lower.garment_identity.primary_identity.name, "Muted Forest Green");
 });
 
@@ -96,9 +96,9 @@ test("regenerates every published nested color name from its own authoritative h
   assert.equal(outerwear.name, getName("#BE4175"));
   assert.equal(outerwear.primary_color.name, getName("#BE4175"));
   assert.equal(outerwear.dominant_color.name, getName("#BE4175"));
-  assert.equal(outerwear.signature_color.name, getName("#E15F9E"));
+  assert.equal(outerwear.signature_color, null);
   assert.equal(outerwear.region_colors[0].name, getName("#BE4175"));
-  assert.equal(outerwear.detected_colors[0].name, getName("#E15F9E"));
+  assert.equal(outerwear.detected_colors[0].name, getName("#BE4175"));
 });
 
 test("canonical garment authority rewrites every public alias and preserves a real owned accent", () => {
@@ -160,7 +160,7 @@ test("derived garment cards use the same authoritative hex and regenerated name 
     assert.equal(outerwear.primary_color.hex, "#E15F9E");
     assert.equal(outerwear.primary_color.name, "Vivid Pink");
     assert.equal(outerwear.dominant_color.name, "Vivid Pink");
-    assert.equal(outerwear.signature_color.name, "Vivid Pink");
+    assert.equal(outerwear.signature_color, null);
     assert.equal(outerwear.detected_colors[0].name, "Vivid Pink");
     assert.equal(outerwear.garment_identity.primary_identity.name, "Vivid Pink");
   }
@@ -346,6 +346,40 @@ test("dominant black eyewear cannot publish distant unowned clothing colors", ()
   assert.deepEqual(eyewear.secondary_colors, []);
   assert.equal(eyewear.color_mode, "single_color");
   assert.equal(eyewear.mode, "single_color");
+  assert.equal(eyewear.signature_color, null);
+});
+
+test("single-color publication rebases a scene-relative share to the owned piece palette", () => {
+  const analysis = sanitizeCustomerFacingZonesV1({
+    garment_zones: { zones: { upper_garment: {
+      interpretation: "single_color",
+      primary_color: { hex: "#F2EFFB", pct: .02 },
+      detected_colors: [{ hex: "#F2EFFB", pct: .02 }],
+    } } },
+  });
+  const shirt = analysis.garment_zones.zones.upper_garment;
+  assert.equal(shirt.primary_color.pct, 1);
+  assert.equal(shirt.primary_color.share_basis, "owned_piece_palette");
+  assert.equal(shirt.detected_colors[0].pct, 1);
+});
+
+test("perceptually duplicate near-white clusters merge before every alias is published", () => {
+  const analysis = sanitizeCustomerFacingZonesV1({
+    garment_zones: { zones: { footwear: {
+      interpretation: "multi_color",
+      primary_color: { hex: "#DEB3CB", pct: .54 },
+      detected_colors: [
+        { hex: "#DEB3CB", pct: .54 },
+        { hex: "#D0C0CE", pct: .21 },
+        { hex: "#E1D2DD", pct: .19 },
+        { hex: "#A02D3F", pct: .02 },
+      ],
+    } } },
+  });
+  const shoe = analysis.garment_zones.zones.footwear;
+  assert.equal(shoe.detected_colors.length, 2);
+  assert.equal(shoe.detected_colors[1].pct, .4);
+  assert.equal(shoe.detected_colors[1].perceptual_cluster_merged_v1, true);
 });
 
 test("derived accessory cards resolve accessory zone keys and cannot retain withheld colors", () => {
