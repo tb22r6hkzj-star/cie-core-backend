@@ -112,6 +112,9 @@ test("runtime contradiction recovery has a dedicated bounded budget", () => {
   assert.match(source, /VISIONCORE_TRANSFORM_BUDGET_MS\) \|\| 70000/);
   assert.match(source, /VISIONCORE_CORRECTION_RESERVE_MS\) \|\| 30000/);
   assert.match(source, /secondPassFreshSegmentationPromise \|\|=/);
+  assert.match(source, /const primaryCorrectionZones = new Set/);
+  assert.match(source, /const seenRecoveryTargets = new Set/);
+  assert.match(source, /maximumMs: 20000/);
 });
 
 test("primary DINO and split YOLO zero-result fallback lanes share the transform budget", () => {
