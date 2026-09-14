@@ -29,6 +29,8 @@ export function buildControlledSecondPassPlanV1({ synthesis = {}, attempt = 0 } 
     preserve_current_measurement: true,
     publication_changed: false,
     measured_hex_changed: false,
+    force_fresh_segmentation: synthesis?.integrity_v1?.force_fresh_segmentation === true,
+    integrity_reasons: synthesis?.integrity_v1?.reasons || [],
   };
 
   if (attempt >= 1) {

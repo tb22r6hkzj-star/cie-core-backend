@@ -63,6 +63,8 @@ export async function executeRuntimeSecondPassV1({
       const call = await boundedCall(remeasureVisionCore, {
           piece: plan.piece,
           instance_key: plan.instance_key,
+        force_fresh_segmentation: plan.force_fresh_segmentation === true,
+        integrity_reasons: plan.integrity_reasons || [],
         imageUrl,
         attempt: attempt + 1,
         preserve_original: true,
@@ -95,6 +97,13 @@ export async function executeRuntimeSecondPassV1({
     results.push(entry);
   }
 
+  const required = plans.length > 0;
+  const completed = required && results.length === plans.length && results.every((entry) => {
+    if (entry?.skipped || entry?.ok === false) return false;
+    if (entry?.plan?.remeasure_visioncore && entry?.visioncore_remeasurement?.ok !== true) return false;
+    if (entry?.plan?.reassess_semantic && entry?.semantic_reassessment?.ok !== true) return false;
+    return true;
+  });
   return {
     version: "runtime_second_pass_v1",
     attempt,
@@ -106,5 +115,8 @@ export async function executeRuntimeSecondPassV1({
     results,
     publication_changed: false,
     authority_owner: "visioncore",
+    required,
+    completed,
+    reason: required ? (completed ? "correction_completed" : "correction_required_unresolved") : "not_required",
   };
 }

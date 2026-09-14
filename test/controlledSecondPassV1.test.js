@@ -45,6 +45,14 @@ test("appearance alert can remeasure weak VisionCore evidence", () => {
   assert.equal(plan.publication_changed, false);
 });
 
+test("integrity correction carries a forced fresh-segmentation directive", () => {
+  const row = synthesis("appearance_alert", .55, 1);
+  row.integrity_v1 = { force_fresh_segmentation: true, reasons: ["single_color_share_is_not_object_local"] };
+  const plan = buildControlledSecondPassPlanV1({ synthesis: row });
+  assert.equal(plan.force_fresh_segmentation, true);
+  assert.deepEqual(plan.integrity_reasons, ["single_color_share_is_not_object_local"]);
+});
+
 test("unresolved conflict remeasures only when measurement is weak", () => {
   const weak = buildControlledSecondPassPlanV1({ synthesis: synthesis("unresolved_conflict", 0.61, 0.97) });
   const strong = buildControlledSecondPassPlanV1({ synthesis: synthesis("unresolved_conflict", 0.93, 0.97) });

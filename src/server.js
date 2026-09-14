@@ -58,6 +58,11 @@ import { applyLowerGarmentPurityV2 } from "./intelligence/lowerGarmentPurityV2.j
 import { applyUpperGarmentPurityV1 } from "./intelligence/upperGarmentPurityV1.js";
 import { buildPublishedGarmentZonesV2 } from "./intelligence/publishedGarmentZonesV2.js";
 import { applySignatureColorAuthorityV2 } from "./intelligence/signatureColorAuthorityV2.js";
+import {
+  applyUnresolvedMeasurementIntegrityGateV1,
+  buildLocalMeasurementIntegritySynthesesV1,
+  mergeCorrectionSynthesesV1,
+} from "./intelligence/pieceMeasurementIntegrityV1.js";
 import { buildSceneOwnershipV1 } from "./intelligence/sceneOwnershipV1.js";
 import { runOpenAISemanticObserverV1 } from "./intelligence/external/openaiSemanticObserverV1.js";
 import { reconcileExternalSemanticsV1 } from "./intelligence/external/semanticReconciliationV1.js";
@@ -8537,7 +8542,10 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       handoff: externalSemantic?.handoff,
       outfitAnalysis,
     });
-    const secondPassSyntheses = buildAppearanceMeasurementSynthesesV1(semanticReconciliation);
+    const secondPassSyntheses = mergeCorrectionSynthesesV1(
+      buildLocalMeasurementIntegritySynthesesV1(outfitAnalysis),
+      buildAppearanceMeasurementSynthesesV1(semanticReconciliation),
+    );
     const secondPassBudgetMs = Math.min(
       RUNTIME_SECOND_PASS_BUDGET_MS,
       transformLatencyBudget.correctionRemainingMs()
@@ -8547,7 +8555,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       syntheses: secondPassSyntheses,
       imageUrl: publicUrl,
       totalBudgetMs: secondPassBudgetMs,
-      remeasureVisionCore: async ({ piece, instance_key: instanceKey }) => {
+      remeasureVisionCore: async ({ piece, instance_key: instanceKey, force_fresh_segmentation: forceFreshSegmentation }) => {
         const zone = segmentationZoneForPieceV1(piece, piece);
         secondPassRemeasurementPromise ||= enrichSamRegionsWithMaskedColors(publicUrl, segmentedRegions);
         const remeasuredRegions = await secondPassRemeasurementPromise;
@@ -8559,7 +8567,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
         // A second pass must be able to recover a target rejected or missed in
         // the first pass. Re-coloring only surviving regions cannot correct a
         // missing jacket, shirt, or small accessory.
-        if (!candidates.length) {
+        if (!candidates.length || forceFreshSegmentation) {
           const originalTargets = analysis?.target_conditioned_segmentation_plan_v1?.targets || [];
           const recoveryTargets = originalTargets.filter((target) => {
             if (target?.zone !== zone) return false;
@@ -8590,10 +8598,11 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
                 validation: spatial,
                 regions: spatial.regions,
               });
-              candidates = measured.regions.map((region) => ({
+              const freshCandidates = measured.regions.map((region) => ({
                 ...region,
                 semantic_recovery_pass_v1: true,
               }));
+              if (freshCandidates.length) candidates = freshCandidates;
             }
           }
         }
@@ -9057,6 +9066,7 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
       summary: semanticIntrinsicRemeasurement.summary,
       semanticHandoff: externalSemantic?.handoff,
     });
+    outfitAnalysis = applyUnresolvedMeasurementIntegrityGateV1(outfitAnalysis);
     outfitAnalysis = {
       ...outfitAnalysis,
       semantic_scene_graph_v1: analysis.semantic_scene_graph_v1,

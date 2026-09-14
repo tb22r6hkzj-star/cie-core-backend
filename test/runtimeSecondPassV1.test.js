@@ -23,6 +23,8 @@ test("executes targeted VisionCore remeasurement only when plan requires it", as
   assert.equal(result.planned_count, 1);
   assert.equal(result.results[0].visioncore_remeasurement.ok, true);
   assert.equal(result.publication_changed, false);
+  assert.equal(result.required, true);
+  assert.equal(result.completed, true);
 });
 
 test("strong-measurement divergence reassesses semantics without remeasurement", async () => {
@@ -57,4 +59,5 @@ test("latency budget can skip extra work instead of blocking indefinitely", asyn
   });
   assert.equal(result.planned_count, 1);
   assert.equal(result.results[0].reason, "latency_budget_exhausted");
+  assert.equal(result.completed, false);
 });
