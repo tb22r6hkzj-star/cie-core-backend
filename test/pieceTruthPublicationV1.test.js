@@ -105,3 +105,21 @@ test("required but unfinished second pass is explicit in every piece record", ()
   assert.equal(truth.pieces[0].correction_v1.state, "required_unresolved");
   assert.equal(truth.pieces[0].correction_v1.reason, "mask_contradiction");
 });
+
+test("withheld color truth publishes unknown mode and piece-specific correction state", () => {
+  const truth = buildPieceTruthPublicationV1({
+    external_intelligence: { runtime_second_pass_v1: {
+      required: true,
+      results: [{ plan: { piece: "upper_garment", remeasure_visioncore: true }, skipped: true }],
+    } },
+    garment_zones: { zones: {
+      upper_garment: { garment_type: "shirt", color_mode: "multicolor", confidence: .55 },
+      eyewear: { garment_type: "sunglasses", color_mode: "single_color", confidence: .8, primary_color: { hex: "#111111", pct: 1 } },
+    } },
+  });
+  const shirt = truth.pieces.find((piece) => piece.zone_key === "upper_garment");
+  const glasses = truth.pieces.find((piece) => piece.zone_key === "eyewear");
+  assert.equal(shirt.color_mode, "unknown");
+  assert.equal(shirt.correction_v1.state, "required_unresolved");
+  assert.equal(glasses.correction_v1.state, "not_required");
+});
