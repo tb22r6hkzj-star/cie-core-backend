@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const source = fs.readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
+const segmentationProviderSource = fs.readFileSync(
+  new URL("../src/intelligence/external/segmentationProviderV1.js", import.meta.url),
+  "utf8"
+);
 
 test("transform route uses total latency budget and capped Pixelcut timeout", () => {
   assert.match(source, /createTransformLatencyBudgetV1\(\{/);
@@ -48,13 +52,16 @@ test("upload time cannot consume the inference correction reserve", () => {
 });
 
 test("target-conditioned masks stay color-neutral and publish only measured mask pixels", () => {
-  const targetProvider = source.slice(
-    source.indexOf("async function runTargetConditionedSamMask"),
-    source.indexOf("async function runTargetConditionedSegmentation")
+  const replicateTargetProvider = source.slice(
+    source.indexOf("async function runReplicateTargetConditionedSamMask"),
+    source.indexOf("async function runSamSegmentation")
   );
-  assert.match(targetProvider, /mask_prompt: String\(target\?\.prompt/);
-  assert.match(targetProvider, /const maskUrl = outputs\[2\]/);
-  assert.match(targetProvider, /external_color_authority: false/);
+  assert.match(replicateTargetProvider, /mask_prompt: String\(target\?\.prompt/);
+  assert.match(replicateTargetProvider, /const maskUrl = outputs\[2\]/);
+  assert.match(replicateTargetProvider, /external_color_authority: false/);
+  assert.match(segmentationProviderSource, /prompt: clean\(target\?\.prompt \|\| target\?\.label\)/);
+  assert.match(segmentationProviderSource, /box_prompts: \[box\]/);
+  assert.match(segmentationProviderSource, /apply_mask: false/);
   assert.match(source, /pixel_count: row\.count/);
   assert.match(source, /measured_pixel_count: totalOwnedPixelCount/);
   assert.match(source, /validateTargetConditionedMaskMeasurementsV1/);
@@ -132,8 +139,8 @@ test("primary DINO and split YOLO zero-result fallback lanes share the transform
 test("Replicate provider deadlines include prediction creation and polling", () => {
   const providerFunctions = [
     source.slice(source.indexOf("async function runGroundingDinoDetection"), source.indexOf("async function runYoloWorldDetection")),
-    source.slice(source.indexOf("async function runYoloWorldDetection"), source.indexOf("async function runSamSegmentation")),
-    source.slice(source.indexOf("async function runSamSegmentation"), source.indexOf("function normalizeSamOutput")),
+    source.slice(source.indexOf("async function runYoloWorldDetection"), source.indexOf("async function runReplicateSamSegmentation")),
+    source.slice(source.indexOf("async function runReplicateSamSegmentation"), source.indexOf("async function runReplicateTargetConditionedSamMask")),
   ];
   for (const providerSource of providerFunctions) {
     assert.match(providerSource, /const requestStartedAt = Date\.now\(\);/);
@@ -146,8 +153,8 @@ test("Replicate provider deadlines include prediction creation and polling", () 
 
 test("SAM lifecycle telemetry uses its declared request clock", () => {
   const samProviderSource = source.slice(
-    source.indexOf("async function runSamSegmentation"),
-    source.indexOf("async function runTargetConditionedSamMask")
+    source.indexOf("async function runReplicateSamSegmentation"),
+    source.indexOf("async function runReplicateTargetConditionedSamMask")
   );
   assert.match(samProviderSource, /const requestStartedAt = Date\.now\(\);/);
   assert.doesNotMatch(samProviderSource, /Date\.now\(\) - startedAt/);
