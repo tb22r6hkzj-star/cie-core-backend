@@ -5,6 +5,7 @@ import { classifyExternalStageV2, summarizeExternalStageEventsV2 } from "../src/
 test("classifies the major VisionCore external providers without storing payload contents", () => {
   assert.equal(classifyExternalStageV2("https://api.openai.com/v1/responses"), "openai_http");
   assert.equal(classifyExternalStageV2("https://api.replicate.com/v1/predictions"), "replicate_http");
+  assert.equal(classifyExternalStageV2("https://queue.fal.run/fal-ai/sam-3-1/image"), "fal_http");
   assert.equal(
     classifyExternalStageV2("https://api.pixelcut.ai/v1/background-removal", { PIXELCUT_ENDPOINT: "https://api.pixelcut.ai" }),
     "pixelcut_http"

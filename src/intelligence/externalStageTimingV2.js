@@ -17,6 +17,7 @@ export function classifyExternalStageV2(input, env = process.env) {
 
   if (host === "api.openai.com" || host.endsWith(".openai.com")) return "openai_http";
   if (host === "api.replicate.com" || host.endsWith(".replicate.com")) return "replicate_http";
+  if (host === "queue.fal.run" || host.endsWith(".fal.run")) return "fal_http";
   if (href.includes("pixelcut") || (pixelcutEndpoint && href.startsWith(pixelcutEndpoint))) return "pixelcut_http";
   if (host.includes("cloudinary.com")) return "cloudinary_http";
   return "external_http";

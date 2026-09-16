@@ -19,6 +19,7 @@ VisionCore alone owns:
 
 An external provider may propose:
 
+- segmentation mask candidates for VisionCore spatial and pixel validation;
 - garment and accessory identities;
 - pattern and material cues;
 - possible ownership conflicts, such as belt or footwear pixels appearing in a trouser region;
@@ -27,6 +28,10 @@ An external provider may propose:
 - customer-facing language constrained to already-published VisionCore evidence.
 
 External output is advisory, sanitized, logged, and passed through a VisionCore-owned gate.
+
+Segmentation providers supply candidate mask pixels only. VisionCore owns mask
+acceptance, geometry validation, exclusive pixel ownership, color measurement,
+and every downstream publication decision.
 
 ## Prohibited external behavior
 

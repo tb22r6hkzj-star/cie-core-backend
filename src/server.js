@@ -65,6 +65,12 @@ import {
 } from "./intelligence/pieceMeasurementIntegrityV1.js";
 import { buildSceneOwnershipV1 } from "./intelligence/sceneOwnershipV1.js";
 import { runOpenAISemanticObserverV1 } from "./intelligence/external/openaiSemanticObserverV1.js";
+import {
+  runFalAutoSegmentationV1,
+  runFalTargetMaskV1,
+  segmentationProviderConfigV1,
+  segmentationProviderOrderV1,
+} from "./intelligence/external/segmentationProviderV1.js";
 import { reconcileExternalSemanticsV1 } from "./intelligence/external/semanticReconciliationV1.js";
 import {
   applySemanticIntrinsicPublicationV1,
@@ -255,6 +261,7 @@ app.get("/health", (_req, res) => {
 });
 
 app.get("/api/debug/status", (_req, res) => {
+  const segmentation = segmentationProviderConfigV1(process.env);
   res.json({
     ok: true,
     service: "cie-core-backend",
@@ -267,6 +274,12 @@ app.get("/api/debug/status", (_req, res) => {
       PIXELCUT_ENDPOINT: !!process.env.PIXELCUT_ENDPOINT,
       AMAZON_PARTNER_TAG: !!process.env.AMAZON_PARTNER_TAG,
       OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
+      FAL_KEY: segmentation.fal_configured,
+      REPLICATE_API_TOKEN: segmentation.replicate_configured,
+      VISIONCORE_SEGMENTATION_PROVIDER: segmentation.requested,
+      VISIONCORE_SEGMENTATION_PROVIDER_ORDER: segmentation.order,
+      FAL_TARGET_SEGMENTATION_MODEL: segmentation.fal_target_model,
+      FAL_AUTO_SEGMENTATION_MODEL: segmentation.fal_auto_model,
       VISIONCORE_EXTERNAL_INTELLIGENCE_MODE: EXTERNAL_INTELLIGENCE_MODE,
       VISIONCORE_TARGETED_ACCESSORY_REANALYSIS_MODE: TARGETED_ACCESSORY_REANALYSIS_MODE,
       OPENAI_SEMANTIC_MODEL,
@@ -7766,7 +7779,7 @@ async function runYoloWorldDetection(imageUrl, query = DEFAULT_GROUNDING_DINO_QU
   }
 }
 
-async function runSamSegmentation(imageUrl, { timeoutMs = REPLICATE_SAM_TIMEOUT_MS } = {}) {
+async function runReplicateSamSegmentation(imageUrl, { timeoutMs = REPLICATE_SAM_TIMEOUT_MS } = {}) {
   const token = process.env.REPLICATE_API_TOKEN;
   if (!token) {
     console.warn("[SAM DEBUG] Missing REPLICATE_API_TOKEN: skipping SAM segmentation");
@@ -7935,7 +7948,7 @@ async function runSamSegmentation(imageUrl, { timeoutMs = REPLICATE_SAM_TIMEOUT_
   }
 }
 
-async function runTargetConditionedSamMask(imageUrl, target, { timeoutMs = 16000 } = {}) {
+async function runReplicateTargetConditionedSamMask(imageUrl, target, { timeoutMs = 16000 } = {}) {
   const token = process.env.REPLICATE_API_TOKEN;
   if (!token) return { enabled: false, ok: false, reason: "missing_REPLICATE_API_TOKEN", target };
   const effectiveTimeoutMs = Number.isFinite(Number(timeoutMs)) ? Math.max(1, Number(timeoutMs)) : 16000;
@@ -8000,22 +8013,147 @@ async function runTargetConditionedSamMask(imageUrl, target, { timeoutMs = 16000
   }
 }
 
+async function runSamSegmentation(imageUrl, { timeoutMs = REPLICATE_SAM_TIMEOUT_MS } = {}) {
+  const startedAt = Date.now();
+  const deadlineAt = startedAt + Math.max(1000, Number(timeoutMs) || REPLICATE_SAM_TIMEOUT_MS);
+  const attempts = [];
+  const providers = segmentationProviderOrderV1(process.env);
+  if (!providers.length) {
+    return { enabled: false, ok: false, reason: "missing_segmentation_provider_credentials", provider: null, regions: [], attempts };
+  }
+
+  for (const provider of providers) {
+    const remainingMs = Math.max(0, deadlineAt - Date.now());
+    if (remainingMs < 1000) break;
+    const result = provider === "fal"
+      ? await runFalAutoSegmentationV1({ imageUrl, timeoutMs: remainingMs, env: process.env })
+      : await runReplicateSamSegmentation(imageUrl, { timeoutMs: remainingMs });
+    attempts.push({ provider, ok: !!result?.ok, reason: result?.reason || null, elapsed_ms: result?.elapsed_ms || null });
+    if (!result?.ok) continue;
+
+    if (provider === "replicate") return { ...result, provider, attempts };
+    const parsedRegions = parseSamOutputToRegions({ individual_masks: result.mask_urls });
+    const regions = await enrichSamRegionsWithMaskedColors(imageUrl, parsedRegions.map((region) => ({
+      ...region,
+      segmentation_provider: "fal",
+    })));
+    return {
+      enabled: true,
+      ok: regions.length > 0,
+      reason: regions.length ? null : "fal_auto_masks_malformed",
+      provider,
+      provider_model: segmentationProviderConfigV1(process.env).fal_auto_model,
+      request_id: result.request_id || null,
+      elapsed_ms: Date.now() - startedAt,
+      regions,
+      attempts,
+    };
+  }
+
+  return {
+    enabled: true,
+    ok: false,
+    reason: attempts.map((attempt) => `${attempt.provider}:${attempt.reason || "failed"}`).join("; ") || "segmentation_provider_timeout",
+    provider: null,
+    regions: [],
+    attempts,
+  };
+}
+
+async function runTargetConditionedSamMask(imageUrl, target, { timeoutMs = 16000, imageDimensions = null } = {}) {
+  const startedAt = Date.now();
+  const deadlineAt = startedAt + Math.max(1000, Number(timeoutMs) || 16000);
+  const attempts = [];
+  const providers = segmentationProviderOrderV1(process.env);
+  if (!providers.length) {
+    return { enabled: false, ok: false, reason: "missing_segmentation_provider_credentials", provider: null, target, attempts };
+  }
+
+  for (const provider of providers) {
+    const remainingMs = Math.max(0, deadlineAt - Date.now());
+    if (remainingMs < 1000) break;
+    const result = provider === "fal"
+      ? await runFalTargetMaskV1({ imageUrl, target, imageDimensions, timeoutMs: remainingMs, env: process.env })
+      : await runReplicateTargetConditionedSamMask(imageUrl, target, { timeoutMs: remainingMs });
+    attempts.push({ provider, ok: !!result?.ok, reason: result?.reason || null, elapsed_ms: result?.elapsed_ms || null });
+    if (!result?.ok) continue;
+    if (provider === "replicate") return { ...result, provider, attempts };
+
+    return {
+      enabled: true,
+      ok: true,
+      reason: null,
+      provider,
+      target,
+      region: {
+        id: target.id,
+        segment_label: target.label,
+        label: target.label,
+        zone: target.zone,
+        confidence: Math.round(Math.max(Number(result.score || 0), Math.max(0.7, Number(target.confidence || 0))) * 100),
+        mask_url: result.mask_url,
+        source_type: "sam_segment",
+        segmentation_provider: "fal",
+        target_conditioned_mask_v1: {
+          applied: true,
+          prompt: target.prompt,
+          detector_region_id: target.detector_region_id,
+          semantic_instance_key: target.semantic_instance_key,
+          layer_role: target.layer_role,
+          authority: "spatial_mask_only",
+          external_color_authority: false,
+          provider: "fal",
+          provider_model: segmentationProviderConfigV1(process.env).fal_target_model,
+          request_id: result.request_id || null,
+        },
+      },
+      elapsed_ms: Date.now() - startedAt,
+      attempts,
+    };
+  }
+
+  return {
+    enabled: true,
+    ok: false,
+    reason: attempts.map((attempt) => `${attempt.provider}:${attempt.reason || "failed"}`).join("; ") || "target_mask_provider_timeout",
+    provider: null,
+    target,
+    attempts,
+  };
+}
+
 async function runTargetConditionedSegmentation(imageUrl, plan, { timeoutMs = 16000 } = {}) {
   const targets = Array.isArray(plan?.targets) ? plan.targets : [];
   if (!targets.length) return { enabled: true, ok: false, reason: "no_segmentation_targets", regions: [], results: [], plan };
-  const results = await Promise.all(targets.map((target) => runTargetConditionedSamMask(imageUrl, target, { timeoutMs })));
+  let imageDimensions = null;
+  if (segmentationProviderOrderV1(process.env).includes("fal") && targets.some((target) => !!target?.bbox)) {
+    try {
+      const image = decodeImageRgba(await fetchImageBuffer(imageUrl), imageUrl);
+      imageDimensions = { width: image.width, height: image.height };
+    } catch {
+      imageDimensions = null;
+    }
+  }
+  const results = await Promise.all(targets.map((target) =>
+    runTargetConditionedSamMask(imageUrl, target, { timeoutMs, imageDimensions })
+  ));
   const rawRegions = results.filter((result) => result?.ok && result?.region).map((result) => result.region);
   const regions = rawRegions.length ? await enrichSamRegionsWithMaskedColors(imageUrl, rawRegions) : [];
+  const successfulProviders = [...new Set(results.filter((result) => result?.ok).map((result) => result?.provider).filter(Boolean))];
   return {
     enabled: true,
     ok: regions.length > 0,
     reason: regions.length ? null : results.map((result) => result?.reason).filter(Boolean).join("; ") || "no_target_masks",
+    provider: successfulProviders.length === 1 ? successfulProviders[0] : successfulProviders.length ? "mixed" : null,
+    providers: successfulProviders,
     regions,
     plan,
     measurement_image_url: imageUrl,
     results: results.map((result) => ({
       ok: !!result?.ok,
       reason: result?.reason || null,
+      provider: result?.provider || null,
+      attempts: result?.attempts || [],
       target: result?.target || null,
       elapsed_ms: result?.elapsed_ms || null,
     })),
@@ -8318,7 +8456,7 @@ async function analyzeGhostColors(ghostUrl, {
   const dinoGarmentOk = dinoGarmentRegions.length > 0;
   const detectionSegmentationOk = samOk || dinoGarmentOk;
   const garmentZoneSource = getGarmentZoneSource(samOk ? samRegions : [], dinoGarmentRegions);
-  const segmentationProvider = samOk ? "sam" : null;
+  const segmentationProvider = samOk ? (sam?.provider || samRegions[0]?.segmentation_provider || "replicate") : null;
   const detectionProvider = dinoOk ? (fallbackProvider || "grounding_dino") : null;
 
   return {
@@ -8336,7 +8474,11 @@ async function analyzeGhostColors(ghostUrl, {
       sam_enabled: !!sam?.enabled,
       sam_ok: samOk,
       sam_reason: sam?.reason || null,
-      sam_version: sam?.results ? `target_conditioned:${TARGET_CONDITIONED_SAM_VERSION}` : (process.env.REPLICATE_SAM_MODEL || DEFAULT_REPLICATE_SAM_MODEL),
+      sam_version: sam?.provider_model || (sam?.results && segmentationProvider === "replicate"
+        ? `target_conditioned:${TARGET_CONDITIONED_SAM_VERSION}`
+        : (process.env.REPLICATE_SAM_MODEL || DEFAULT_REPLICATE_SAM_MODEL)),
+      segmentation_provider_config_v1: segmentationProviderConfigV1(process.env),
+      segmentation_provider_attempts: sam?.attempts || [],
       target_conditioned_segmentation: !!sam?.results,
       early_target_conditioned_segmentation: !!earlyTargetSegmentation?.ok,
       target_conditioned_results: sam?.results || [],
