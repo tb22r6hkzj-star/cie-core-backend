@@ -108,3 +108,20 @@ test("remeasurement preserves masks with enough exclusive pixels", () => {
   assert.equal(result.regions[0].region_colors[1].ownership_validated, true);
   assert.equal(result.regions[0].region_colors[1].ownership_state, "owned");
 });
+
+test("accepts a compact eyewear mask with detector overlap", () => {
+  const result = validateTargetConditionedMaskRegionsV1({
+    regions: [region("glasses", "eyewear", { x: 0.42, y: 0.1, w: 0.14, h: 0.05 }, 0.007)],
+    plan: plan("glasses", "eyewear", { x_min: 0.4, y_min: 0.08, x_max: 0.58, y_max: 0.18 }),
+  });
+  assert.equal(result.validated_count, 1);
+});
+
+test("rejects a face-sized eyewear mask", () => {
+  const result = validateTargetConditionedMaskRegionsV1({
+    regions: [region("glasses", "eyewear", { x: 0.2, y: 0.05, w: 0.6, h: 0.5 }, 0.3)],
+    plan: plan("glasses", "eyewear", { x_min: 0.4, y_min: 0.08, x_max: 0.58, y_max: 0.18 }),
+  });
+  assert.equal(result.validated_count, 0);
+  assert.ok(result.evaluations[0].reasons.includes("mask_coverage_out_of_zone_bounds"));
+});
