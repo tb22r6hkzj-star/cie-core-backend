@@ -49,6 +49,11 @@ import { buildAccessoryInstancesV1 } from "./intelligence/accessoryInstancesV1.j
 import { attachColorEvidenceToZones } from "./intelligence/colorEvidence/index.js";
 import { applyPieceColorOwnershipV1 } from "./intelligence/pieceColorOwnershipV1.js";
 import { buildTargetConditionedSegmentationPlanV1 } from "./intelligence/semanticMaskOrchestrationV1.js";
+import {
+  bindEarlySegmentationToFinalPlanV1,
+  mergeTargetConditionedSegmentationsV1,
+  segmentationPlanBindingEnabledV1,
+} from "./intelligence/targetConditionedSegmentationBindingV1.js";
 import { mergeExternalSemanticHandoffsV1 } from "./intelligence/external/semanticHandoffMergeV1.js";
 import {
   validateTargetConditionedMaskMeasurementsV1,
@@ -278,6 +283,7 @@ app.get("/api/debug/status", (_req, res) => {
       REPLICATE_API_TOKEN: segmentation.replicate_configured,
       VISIONCORE_SEGMENTATION_PROVIDER: segmentation.requested,
       VISIONCORE_SEGMENTATION_PROVIDER_ORDER: segmentation.order,
+      VISIONCORE_SEGMENTATION_PLAN_BINDING_V1: segmentationPlanBindingEnabledV1(process.env),
       FAL_TARGET_SEGMENTATION_MODEL: segmentation.fal_target_model,
       FAL_AUTO_SEGMENTATION_MODEL: segmentation.fal_auto_model,
       VISIONCORE_EXTERNAL_INTELLIGENCE_MODE: EXTERNAL_INTELLIGENCE_MODE,
@@ -8424,17 +8430,42 @@ async function analyzeGhostColors(ghostUrl, {
   const targetSamTimeoutMs = latencyBudget?.providerTimeoutMs
     ? latencyBudget.providerTimeoutMs({ requestedMs: 16000, maximumMs: 16000 })
     : 16000;
+  const planBindingEnabled = segmentationPlanBindingEnabledV1(process.env);
+  const preparedEarlySegmentation = earlyTargetSegmentation?.ok && planBindingEnabled
+    ? bindEarlySegmentationToFinalPlanV1({
+        earlySegmentation: earlyTargetSegmentation,
+        finalPlan: segmentationPlan,
+      })
+    : null;
   let sam = earlyTargetSegmentation?.ok
-    ? earlyTargetSegmentation
+    ? (preparedEarlySegmentation?.segmentation || earlyTargetSegmentation)
     : latencyBudget && !latencyBudget.canRun(2500)
       ? earlyTargetSegmentation || { enabled: true, ok: false, reason: "transform_latency_budget_exhausted_before_target_segmentation", regions: [], results: [] }
       : await runTargetConditionedSegmentation(ghostUrl, segmentationPlan, { timeoutMs: targetSamTimeoutMs });
+  if (preparedEarlySegmentation?.missing_plan?.targets?.length && (!latencyBudget || latencyBudget.canRun(2500))) {
+    const supplementalTimeoutMs = latencyBudget?.providerTimeoutMs
+      ? latencyBudget.providerTimeoutMs({ requestedMs: 12000, maximumMs: 12000, minimumMs: 2500 })
+      : 12000;
+    const supplementalSegmentation = await runTargetConditionedSegmentation(
+      ghostUrl,
+      preparedEarlySegmentation.missing_plan,
+      { timeoutMs: supplementalTimeoutMs }
+    );
+    sam = mergeTargetConditionedSegmentationsV1({
+      base: sam,
+      supplement: supplementalSegmentation,
+      validationPlan: preparedEarlySegmentation.validation_plan,
+    });
+  }
   if (!sam?.ok && latencyBudget?.canRun?.(5000)) {
     const fallbackTimeoutMs = latencyBudget.providerTimeoutMs({ requestedMs: 10000, maximumMs: 10000 });
     sam = await runSamSegmentation(ghostUrl, { timeoutMs: fallbackTimeoutMs });
   }
   if (sam?.results) {
-    const spatialValidation = validateTargetConditionedMaskRegionsV1({ regions: sam?.regions || [], plan: segmentationPlan });
+    const spatialValidation = validateTargetConditionedMaskRegionsV1({
+      regions: sam?.regions || [],
+      plan: planBindingEnabled ? (sam?.plan || segmentationPlan) : segmentationPlan,
+    });
     const remeasuredRegions = spatialValidation.validated_count
       ? await enrichSamRegionsWithMaskedColors(sam?.measurement_image_url || ghostUrl, spatialValidation.regions)
       : [];
@@ -8483,6 +8514,12 @@ async function analyzeGhostColors(ghostUrl, {
       early_target_conditioned_segmentation: !!earlyTargetSegmentation?.ok,
       target_conditioned_results: sam?.results || [],
       target_conditioned_validation_v1: sam?.target_conditioned_validation_v1 || null,
+      target_conditioned_plan_binding_v1: {
+        enabled: planBindingEnabled,
+        rebound_count: preparedEarlySegmentation?.rebound_count || 0,
+        unmatched_early_target_count: preparedEarlySegmentation?.unmatched_early_target_count || 0,
+        supplemental_target_count: preparedEarlySegmentation?.missing_plan?.targets?.length || 0,
+      },
       sam_throttled: isReplicateThrottleError(sam?.reason),
       dino_enabled: !!groundingDino?.enabled,
       dino_ok: dinoOk,

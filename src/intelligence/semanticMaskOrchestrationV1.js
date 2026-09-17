@@ -1,6 +1,7 @@
 import {
   CANONICAL_SEGMENTATION_ZONES_V1,
   normalizeConfidenceV1,
+  normalizePieceIdentityV1,
   segmentationZoneForPieceV1,
 } from "./pieceOntologyV1.js";
 
@@ -13,6 +14,22 @@ function clean(value) {
 
 function confidence(value) {
   return normalizeConfidenceV1(value);
+}
+
+function objectFamily(value) {
+  const normalized = normalizePieceIdentityV1(value);
+  if (["necklace", "pendant"].includes(normalized)) return "necklace";
+  if (normalized === "earrings") return "earrings";
+  if (/(^|\s)(hat|cap|beanie|headwear)(\s|$)/i.test(String(value || ""))) return "headwear";
+  return normalized;
+}
+
+function detectorMatchesSemanticPiece(candidate = {}, piece = {}) {
+  if (candidate?.zone !== piece?.zone) return false;
+  if (piece?.zone !== "accessory_jewelry") return true;
+  const detectorFamily = objectFamily(candidate?.detector_label);
+  const semanticFamily = objectFamily([piece?.subtype, piece?.piece].filter(Boolean).join(" "));
+  return Boolean(detectorFamily && semanticFamily && detectorFamily === semanticFamily);
 }
 
 function colorNeutralPrompt(value) {
@@ -99,11 +116,13 @@ export function buildTargetConditionedSegmentationPlanV1({ dinoRegions = [], sem
   // not collapse two overlapping garments merely because both occupy one zone.
   for (const [index, piece] of semanticPieces.entries()) {
     const selected = candidates
-      .filter((candidate) => candidate.zone === piece.zone)
+      .filter((candidate) => !candidate.region_id || !usedDetectorRegionIds.has(candidate.region_id))
+      .filter((candidate) => detectorMatchesSemanticPiece(candidate, piece))
       .sort((a, b) => {
-        const aUnused = a.region_id && !usedDetectorRegionIds.has(a.region_id) ? 1 : 0;
-        const bUnused = b.region_id && !usedDetectorRegionIds.has(b.region_id) ? 1 : 0;
-        return bUnused - aUnused || b.detector_confidence - a.detector_confidence;
+        const semanticFamily = objectFamily([piece?.subtype, piece?.piece].filter(Boolean).join(" "));
+        const aExact = objectFamily(a.detector_label) === semanticFamily ? 1 : 0;
+        const bExact = objectFamily(b.detector_label) === semanticFamily ? 1 : 0;
+        return bExact - aExact || b.detector_confidence - a.detector_confidence;
       })[0];
     if (selected?.region_id) usedDetectorRegionIds.add(selected.region_id);
     const prompt = piece.segmentation_prompt;

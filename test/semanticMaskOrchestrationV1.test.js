@@ -135,6 +135,40 @@ test("tiny accessories become independently measurable targets", () => {
   assert.equal(plan.targets[0].semantic_instance_key, "pendant_1");
 });
 
+test("shared accessory zones never pair unrelated object families", () => {
+  const plan = buildTargetConditionedSegmentationPlanV1({
+    semanticHandoff: handoff([
+      claim({ piece: "watch", subtype: "wristwatch", instance_key: "watch_1", segmentation_prompt: "wristwatch", confidence: 0.96 }),
+      claim({ piece: "necklace", subtype: "chain necklace", instance_key: "necklace_1", segmentation_prompt: "chain necklace", confidence: 0.9 }),
+    ]),
+    dinoRegions: [
+      { id: "hat_box", zone: "accessory_jewelry", label: "hat", confidence: 0.92, bbox: [0.4, 0.05, 0.6, 0.2] },
+      { id: "bracelet_box", zone: "accessory_jewelry", label: "bracelet", confidence: 0.8, bbox: [0.6, 0.5, 0.7, 0.6] },
+      { id: "necklace_box", zone: "accessory_jewelry", label: "chain necklace", confidence: 0.7, bbox: [0.4, 0.2, 0.6, 0.35] },
+    ],
+  });
+  const watch = plan.targets.find((entry) => entry.semantic_instance_key === "watch_1");
+  const necklace = plan.targets.find((entry) => entry.semantic_instance_key === "necklace_1");
+  assert.equal(watch.detector_region_id, null);
+  assert.equal(watch.source, "semantic_target");
+  assert.equal(necklace.detector_region_id, "necklace_box");
+  assert.equal(necklace.source, "semantic_plus_detector");
+});
+
+test("one detector box cannot be reused across multiple semantic instances", () => {
+  const plan = buildTargetConditionedSegmentationPlanV1({
+    semanticHandoff: handoff([
+      claim({ piece: "sneaker", subtype: "low-top sneaker", instance_key: "shoe_1", segmentation_prompt: "low-top sneaker", confidence: 0.98 }),
+      claim({ piece: "sneaker", subtype: "low-top sneaker", instance_key: "shoe_2", segmentation_prompt: "low-top sneaker", confidence: 0.97 }),
+    ]),
+    dinoRegions: [
+      { id: "only_shoe_box", zone: "footwear", label: "shoe", confidence: 0.75, bbox: [0.2, 0.8, 0.4, 0.95] },
+    ],
+  });
+  assert.equal(plan.targets.filter((entry) => entry.detector_region_id === "only_shoe_box").length, 1);
+  assert.equal(plan.targets.filter((entry) => entry.source === "semantic_target").length, 1);
+});
+
 test("weak detector guesses do not become pixel-ownership targets", () => {
   const plan = buildTargetConditionedSegmentationPlanV1({
     dinoRegions: [

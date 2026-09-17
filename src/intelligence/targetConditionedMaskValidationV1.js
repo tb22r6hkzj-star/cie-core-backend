@@ -7,6 +7,7 @@ const ZONE_COVERAGE_BOUNDS = Object.freeze({
   accessory_jewelry: [0.000005, 0.08],
   belt: [0.00002, 0.12],
   bag: [0.0001, 0.35],
+  eyewear: [0.00002, 0.12],
 });
 
 const MIN_OWNED_PIXEL_COUNT = Object.freeze({
@@ -18,6 +19,7 @@ const MIN_OWNED_PIXEL_COUNT = Object.freeze({
   accessory_jewelry: 8,
   belt: 10,
   bag: 20,
+  eyewear: 12,
 });
 
 function normalizedBox(box = null) {
