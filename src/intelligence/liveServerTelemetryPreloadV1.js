@@ -8,6 +8,10 @@ import { reconcileAccessoryPublicationPayloadV1 } from "./accessoryPublicationBr
 import { applyAccessoryCanonicalPublicationV2 } from "./accessoryCanonicalPublicationV2.js";
 import { applyTransformGarmentColorAuthorityV1 } from "./transformGarmentColorAuthorityV1.js";
 import { applyPieceTruthPublicationV1 } from "./pieceTruthPublicationV1.js";
+import {
+  benchmarkCollectionRequestedV1,
+  captureLiveBenchmarkRunV1,
+} from "../evaluation/liveBenchmarkLedgerV1.js";
 
 const runtime = createAnalysisLatencyRuntimeV1({ maxRecords: 500 });
 const originalGet = express.application.get;
@@ -137,6 +141,7 @@ function buildInstrumentationMiddleware(path) {
     const scope = { external_events: [], route: path };
 
     wrapJson(res, (payload) => {
+      let guardedPayload = payload;
       try {
         const record = recommendationTelemetryRecord({
           payload,
@@ -158,11 +163,33 @@ function buildInstrumentationMiddleware(path) {
       }
 
       try {
-        return applyLivePublicationGuards(payload, path);
+        guardedPayload = applyLivePublicationGuards(payload, path);
       } catch {
         // Publication guards must fail open to the original analysis payload.
-        return payload;
+        guardedPayload = payload;
       }
+
+      if (path === "/api/images/transform" && benchmarkCollectionRequestedV1(req)) {
+        const finishedAtMs = Date.now();
+        void captureLiveBenchmarkRunV1({
+          req,
+          payload: guardedPayload,
+          route: path,
+          startedAtMs,
+          finishedAtMs,
+        }).catch((error) => {
+          console.error("[BENCHMARK] Capture failed", error?.message || error);
+        });
+        guardedPayload = {
+          ...guardedPayload,
+          benchmark_capture: {
+            status: "queued",
+            schema_version: "visioncore_live_benchmark_run_v1",
+          },
+        };
+      }
+
+      return guardedPayload;
     });
 
     return requestTimingScope.run(scope, () => next());

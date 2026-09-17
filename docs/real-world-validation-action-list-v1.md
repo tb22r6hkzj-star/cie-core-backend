@@ -95,6 +95,20 @@ Do not reverse-engineer competitors or violate their terms. Record only user-vis
 
 Run `npm run benchmark:readiness` after each catalog update. A nonzero exit is intentional while required evidence is incomplete.
 
+## Live benchmark capture
+
+For an authorized validation upload, send `benchmarkMode=true` in the transform
+multipart form or `X-VisionCore-Benchmark: collect`. The backend stores an
+authenticated raw record in Cloudinary containing a fingerprint of the original
+file, the immutable published response, runtime evidence, and an empty review
+ledger. `GET /api/benchmark/status` reports captured progress toward 100 without
+exposing images or result records.
+
+Capture is not adjudication. A stored run begins as `captured_unreviewed` and is
+not eligible for release scoring until two annotations and any required
+adjudication are attached. Corrections must remain separate from the original
+result.
+
 ## Privacy and data handling
 
 - Obtain explicit evaluation consent from outside testers.
