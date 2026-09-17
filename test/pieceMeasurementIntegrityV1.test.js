@@ -64,6 +64,82 @@ test("unresolved low-confidence color is withheld while piece identity remains",
   assert.equal(result.measurement_integrity_v1.passed, false);
 });
 
+test("validated fresh target mask clears a stale low-confidence publication gate", () => {
+  const result = applyUnresolvedMeasurementIntegrityGateV1({
+    garment_zones: {
+      segmented_regions: [{
+        id: "target_mask_jacket_1",
+        zone: "outerwear",
+        source_type: "sam_segment",
+        region_colors: [{ hex: "#C12E2E", pct: .45, pixel_count: 1200, ownership_validated: true }],
+        target_conditioned_mask_v1: {
+          spatial_validation: {
+            validated: true,
+            measured_pixel_count: 1200,
+            minimum_owned_pixel_count: 100,
+          },
+        },
+      }],
+      zones: { outerwear: {
+        garment_type: "track jacket",
+        interpretation: "multi_color",
+        confidence: .14,
+        primary_color: { hex: "#C12E2E", pct: .45 },
+        detected_colors: [{ hex: "#C12E2E", pct: .45 }, { hex: "#F4F1FB", pct: .30 }],
+      } },
+    },
+  }, { runtimeSecondPass: { results: [{
+    plan: { piece: "jacket", remeasure_visioncore: true },
+    visioncore_remeasurement: { ok: false, reason: "timeout" },
+  }] } });
+  assert.notEqual(result.garment_zones.zones.outerwear.validation_decision, "identity_only");
+  assert.equal(result.measurement_integrity_v1.passed, true);
+});
+
+test("unvalidated or pixel-empty masks cannot bypass the integrity abstention", () => {
+  const outfit = {
+    garment_zones: {
+      segmented_regions: [{
+        id: "target_mask_jacket_1",
+        zone: "outerwear",
+        source_type: "sam_segment",
+        region_colors: [{ hex: "#C12E2E", pct: .45, pixel_count: 0, ownership_validated: true }],
+        target_conditioned_mask_v1: {
+          spatial_validation: { validated: false, measured_pixel_count: 0, minimum_owned_pixel_count: 100 },
+        },
+      }],
+      zones: { outerwear: {
+        confidence: .14,
+        primary_color: { hex: "#C12E2E", pct: .45 },
+      } },
+    },
+  };
+  const result = applyUnresolvedMeasurementIntegrityGateV1(outfit);
+  assert.equal(result.garment_zones.zones.outerwear.validation_decision, "identity_only");
+});
+
+test("validated fresh target mask avoids a redundant forced second pass", () => {
+  const syntheses = buildLocalMeasurementIntegritySynthesesV1({
+    garment_zones: {
+      segmented_regions: [{
+        id: "target_mask_jacket_1",
+        zone: "outerwear",
+        source_type: "sam_segment",
+        region_colors: [{ hex: "#C12E2E", pct: .45, pixel_count: 1200, ownership_validated: true }],
+        target_conditioned_mask_v1: {
+          spatial_validation: { validated: true, measured_pixel_count: 1200, minimum_owned_pixel_count: 100 },
+        },
+      }],
+      zones: { outerwear: {
+        color_mode: "multi_color",
+        confidence: .14,
+        primary_color: { hex: "#C12E2E", pct: .45 },
+      } },
+    },
+  });
+  assert.deepEqual(syntheses, []);
+});
+
 test("an unfinished required remeasurement withholds the matching piece color", () => {
   const result = applyUnresolvedMeasurementIntegrityGateV1({
     garment_zones: { zones: {
