@@ -66,6 +66,7 @@ import { applySignatureColorAuthorityV2 } from "./intelligence/signatureColorAut
 import {
   applyUnresolvedMeasurementIntegrityGateV1,
   buildLocalMeasurementIntegritySynthesesV1,
+  isValidatedFreshTargetMaskRegionV1,
   mergeCorrectionSynthesesV1,
 } from "./intelligence/pieceMeasurementIntegrityV1.js";
 import { buildSceneOwnershipV1 } from "./intelligence/sceneOwnershipV1.js";
@@ -8766,11 +8767,16 @@ app.post("/api/images/transform", upload.any(), async (req, res) => {
           const regionInstanceKey = region?.target_conditioned_mask_v1?.semantic_instance_key || null;
           return !instanceKey || !regionInstanceKey || regionInstanceKey === instanceKey;
         });
+        const hasCurrentValidatedMask = candidates.some((region) =>
+          isValidatedFreshTargetMaskRegionV1(region, { zone, instanceKey })
+        );
         // A second pass must be able to recover a target rejected or missed in
         // the first pass. Re-coloring only surviving regions cannot correct a
-        // missing jacket, shirt, or small accessory.
-        if (!candidates.length || forceFreshSegmentation) {
-          if (forceFreshSegmentation) candidates = [];
+        // missing jacket, shirt, or small accessory. A target-conditioned mask
+        // acquired and validated during this same request is already fresh;
+        // do not buy and wait for the identical provider mask a second time.
+        if (!candidates.length || (forceFreshSegmentation && !hasCurrentValidatedMask)) {
+          if (forceFreshSegmentation && !hasCurrentValidatedMask) candidates = [];
           const originalTargets = analysis?.target_conditioned_segmentation_plan_v1?.targets || [];
           const recoveryZoneSet = primaryCorrectionZones.size ? primaryCorrectionZones : correctionZones;
           const seenRecoveryTargets = new Set();

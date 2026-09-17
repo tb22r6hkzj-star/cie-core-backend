@@ -122,7 +122,8 @@ test("runtime contradiction recovery has a dedicated bounded budget", () => {
   assert.match(source, /const primaryCorrectionZones = new Set/);
   assert.match(source, /const seenRecoveryTargets = new Set/);
   assert.match(source, /maximumMs: 20000/);
-  assert.match(source, /if \(forceFreshSegmentation\) candidates = \[\]/);
+  assert.match(source, /isValidatedFreshTargetMaskRegionV1\(region, \{ zone, instanceKey \}\)/);
+  assert.match(source, /if \(forceFreshSegmentation && !hasCurrentValidatedMask\) candidates = \[\]/);
 });
 
 test("primary DINO and split YOLO zero-result fallback lanes share the transform budget", () => {

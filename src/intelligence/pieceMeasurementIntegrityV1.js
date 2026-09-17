@@ -39,25 +39,28 @@ function share(row = {}) {
   return clamp01(row?.pct ?? row?.percentage ?? row?.share);
 }
 
+export function isValidatedFreshTargetMaskRegionV1(region = {}, { zone = null, instanceKey = null } = {}) {
+  if (zone && token(region?.zone) !== token(zone)) return false;
+  const regionInstanceKey = token(region?.target_conditioned_mask_v1?.semantic_instance_key);
+  if (instanceKey && regionInstanceKey && regionInstanceKey !== token(instanceKey)) return false;
+  const validation = region?.target_conditioned_mask_v1?.spatial_validation;
+  const colors = Array.isArray(region?.region_colors) ? region.region_colors : [];
+  const measuredPixels = Number(
+    validation?.measured_pixel_count
+    ?? region?.owned_pixel_count
+    ?? colors.reduce((total, color) => total + Number(color?.pixel_count || 0), 0)
+  );
+  return region?.source_type === "sam_segment"
+    && validation?.validated === true
+    && measuredPixels >= Number(validation?.minimum_owned_pixel_count || 100)
+    && colors.some((color) => color?.hex && color?.ownership_validated !== false);
+}
+
 function hasValidatedFreshMaskEvidence(outfitAnalysis = {}, zoneKey = "") {
-  const zone = token(zoneKey);
   const regions = Array.isArray(outfitAnalysis?.garment_zones?.segmented_regions)
     ? outfitAnalysis.garment_zones.segmented_regions
     : [];
-  return regions.some((region) => {
-    if (token(region?.zone) !== zone) return false;
-    const validation = region?.target_conditioned_mask_v1?.spatial_validation;
-    const colors = Array.isArray(region?.region_colors) ? region.region_colors : [];
-    const measuredPixels = Number(
-      validation?.measured_pixel_count
-      ?? region?.owned_pixel_count
-      ?? colors.reduce((total, color) => total + Number(color?.pixel_count || 0), 0)
-    );
-    return region?.source_type === "sam_segment"
-      && validation?.validated === true
-      && measuredPixels >= Number(validation?.minimum_owned_pixel_count || 100)
-      && colors.some((color) => color?.hex && color?.ownership_validated !== false);
-  });
+  return regions.some((region) => isValidatedFreshTargetMaskRegionV1(region, { zone: zoneKey }));
 }
 
 function integrityReasons(zone = {}) {

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   applyUnresolvedMeasurementIntegrityGateV1,
   buildLocalMeasurementIntegritySynthesesV1,
+  isValidatedFreshTargetMaskRegionV1,
   mergeCorrectionSynthesesV1,
 } from "../src/intelligence/pieceMeasurementIntegrityV1.js";
 
@@ -138,6 +139,21 @@ test("validated fresh target mask avoids a redundant forced second pass", () => 
     },
   });
   assert.deepEqual(syntheses, []);
+});
+
+test("fresh-mask reuse requires the requested zone and semantic instance", () => {
+  const region = {
+    zone: "footwear",
+    source_type: "sam_segment",
+    region_colors: [{ hex: "#D1C1CE", pixel_count: 900, ownership_validated: true }],
+    target_conditioned_mask_v1: {
+      semantic_instance_key: "shoe_1",
+      spatial_validation: { validated: true, measured_pixel_count: 900, minimum_owned_pixel_count: 100 },
+    },
+  };
+  assert.equal(isValidatedFreshTargetMaskRegionV1(region, { zone: "footwear", instanceKey: "shoe_1" }), true);
+  assert.equal(isValidatedFreshTargetMaskRegionV1(region, { zone: "outerwear", instanceKey: "shoe_1" }), false);
+  assert.equal(isValidatedFreshTargetMaskRegionV1(region, { zone: "footwear", instanceKey: "shoe_2" }), false);
 });
 
 test("an unfinished required remeasurement withholds the matching piece color", () => {
