@@ -39,6 +39,27 @@ function share(row = {}) {
   return clamp01(row?.pct ?? row?.percentage ?? row?.share);
 }
 
+function hasValidatedFreshMaskEvidence(outfitAnalysis = {}, zoneKey = "") {
+  const zone = token(zoneKey);
+  const regions = Array.isArray(outfitAnalysis?.garment_zones?.segmented_regions)
+    ? outfitAnalysis.garment_zones.segmented_regions
+    : [];
+  return regions.some((region) => {
+    if (token(region?.zone) !== zone) return false;
+    const validation = region?.target_conditioned_mask_v1?.spatial_validation;
+    const colors = Array.isArray(region?.region_colors) ? region.region_colors : [];
+    const measuredPixels = Number(
+      validation?.measured_pixel_count
+      ?? region?.owned_pixel_count
+      ?? colors.reduce((total, color) => total + Number(color?.pixel_count || 0), 0)
+    );
+    return region?.source_type === "sam_segment"
+      && validation?.validated === true
+      && measuredPixels >= Number(validation?.minimum_owned_pixel_count || 100)
+      && colors.some((color) => color?.hex && color?.ownership_validated !== false);
+  });
+}
+
 function integrityReasons(zone = {}) {
   const colors = palette(zone);
   const primary = colors[0] || null;
@@ -74,7 +95,11 @@ export function buildLocalMeasurementIntegritySynthesesV1(outfitAnalysis = {}) {
     // Near-duplicate swatches are repaired deterministically by final palette
     // consolidation. They do not need another provider mask and must not spend
     // the correction reserve needed for genuinely weak object-local evidence.
-    const remeasurementReasons = reasons.filter((reason) => reason !== "perceptually_duplicate_palette_clusters");
+    const validatedFreshMask = hasValidatedFreshMaskEvidence(outfitAnalysis, zoneKey);
+    const remeasurementReasons = reasons.filter((reason) =>
+      reason !== "perceptually_duplicate_palette_clusters"
+      && !(validatedFreshMask && reason === "published_measurement_below_confidence_floor")
+    );
     if (!remeasurementReasons.length) return [];
     return [{
       version: "appearance_measurement_synthesis_v1",
@@ -139,7 +164,13 @@ export function applyUnresolvedMeasurementIntegrityGateV1(outfitAnalysis = {}, {
   const nextZones = Object.fromEntries(Object.entries(zones).map(([zoneKey, zone]) => {
     const local = integrityReasons(zone).reasons;
     const retry = unresolvedRemeasurementReasons(zoneKey, runtimeSecondPass || outfitAnalysis?.external_intelligence?.runtime_second_pass_v1);
-    const reasons = [...new Set([...local, ...retry])];
+    const validatedFreshMask = hasValidatedFreshMaskEvidence(outfitAnalysis, zoneKey);
+    const reasons = [...new Set([...local, ...retry])].filter((reason) => !(
+      validatedFreshMask && [
+        "published_measurement_below_confidence_floor",
+        "required_remeasurement_not_completed",
+      ].includes(reason)
+    ));
     const hasPublishedColor = palette(zone).length > 0;
     const mustWithhold = hasPublishedColor && (
       reasons.includes("published_measurement_below_confidence_floor")
